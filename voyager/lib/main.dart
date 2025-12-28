@@ -100,6 +100,9 @@ class _VoyagerHomeState extends State<VoyagerHome>
   bool _autoReconnect = true;
   bool _chromeHidden = false;
   bool _useWormhole = false;
+  bool _showHHKB = false;
+  bool _hhkbFn = false;
+  bool _hhkbShift = false;
   bool _shouldReconnect = false;
   int _reconnectDelaySeconds = 2;
 
@@ -546,6 +549,10 @@ class _VoyagerHomeState extends State<VoyagerHome>
     return buffer.toString();
   }
 
+  void _sendCtrl(String key) {
+    _sendRaw(_applyCtrl(key));
+  }
+
   void _handleResize(
     String sessionId,
     int cols,
@@ -840,22 +847,57 @@ class _VoyagerHomeState extends State<VoyagerHome>
             bottom: 0,
             child: SafeArea(
               top: false,
-              child: KeyedSubtree(
-                key: _quickBarKey,
-                child: _QuickActionsBar(
-                  connected: _connected,
-                  ctrl: _ctrl,
-                  alt: _alt,
-                  meta: _meta,
-                  onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
-                  onToggleAlt: () => setState(() => _alt = !_alt),
-                  onToggleMeta: () => setState(() => _meta = !_meta),
-                  onKey: _sendKey,
-                  onPaste: _pasteClipboard,
-                  onCopy: _copySelection,
-                  onSend: _sendRaw,
-                  onScrollToBottom: _scrollToBottom,
-                ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_showHHKB)
+                    _HHKBKeyboard(
+                      connected: _connected,
+                      fn: _hhkbFn,
+                      ctrl: _ctrl,
+                      alt: _alt,
+                      shift: _hhkbShift,
+                      onKey: (key, {bool isSpecial = false}) {
+                        if (_ctrl && !isSpecial) {
+                          _sendCtrl(key);
+                        } else if (_alt && !isSpecial) {
+                          _sendRaw('\x1b$key');
+                        } else {
+                          _sendRaw(key);
+                        }
+                        // Reset modifiers after key press (except Fn)
+                        if (_ctrl || _alt || _hhkbShift) {
+                          setState(() {
+                            _ctrl = false;
+                            _alt = false;
+                            _hhkbShift = false;
+                          });
+                        }
+                      },
+                      onToggleFn: () => setState(() => _hhkbFn = !_hhkbFn),
+                      onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
+                      onToggleAlt: () => setState(() => _alt = !_alt),
+                      onToggleShift: () => setState(() => _hhkbShift = !_hhkbShift),
+                    ),
+                  if (!_showHHKB)
+                    KeyedSubtree(
+                      key: _quickBarKey,
+                      child: _QuickActionsBar(
+                        connected: _connected,
+                        ctrl: _ctrl,
+                        alt: _alt,
+                        meta: _meta,
+                        onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
+                        onToggleAlt: () => setState(() => _alt = !_alt),
+                        onToggleMeta: () => setState(() => _meta = !_meta),
+                        onKey: _sendKey,
+                        onPaste: _pasteClipboard,
+                        onCopy: _copySelection,
+                        onSend: _sendRaw,
+                        onScrollToBottom: _scrollToBottom,
+                      ),
+                    ),
+                ],
               ),
             ),
           ),
@@ -981,6 +1023,14 @@ class _VoyagerHomeState extends State<VoyagerHome>
                   _reconnectTimer = null;
                 }
               }),
+            ),
+            const SizedBox(height: 24),
+            _buildDrawerSection('Input'),
+            const SizedBox(height: 8),
+            _buildDrawerSwitch(
+              'HHKB Keyboard',
+              _showHHKB,
+              (v) => setState(() => _showHHKB = v),
             ),
             if (_useWormhole) ...[
               const SizedBox(height: 24),
@@ -1715,6 +1765,286 @@ class _ActionButton extends StatelessWidget {
               ),
       ),
     );
+  }
+}
+
+// HHKB Keyboard Widget
+class _HHKBKeyboard extends StatelessWidget {
+  const _HHKBKeyboard({
+    required this.connected,
+    required this.fn,
+    required this.ctrl,
+    required this.alt,
+    required this.shift,
+    required this.onKey,
+    required this.onToggleFn,
+    required this.onToggleCtrl,
+    required this.onToggleAlt,
+    required this.onToggleShift,
+  });
+
+  final bool connected;
+  final bool fn;
+  final bool ctrl;
+  final bool alt;
+  final bool shift;
+  final void Function(String key, {bool isSpecial}) onKey;
+  final VoidCallback onToggleFn;
+  final VoidCallback onToggleCtrl;
+  final VoidCallback onToggleAlt;
+  final VoidCallback onToggleShift;
+
+  static const _bgColor = Color(0xFF1A1A1A);
+  static const _keyColor = Color(0xFF2D2D2D);
+  static const _keyBorder = Color(0xFF3D3D3D);
+  static const _modActiveColor = Color(0xFF4B7AA6);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: _bgColor,
+      padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _buildRow1(),
+          const SizedBox(height: 4),
+          _buildRow2(),
+          const SizedBox(height: 4),
+          _buildRow3(),
+          const SizedBox(height: 4),
+          _buildRow4(),
+          const SizedBox(height: 4),
+          _buildRow5(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRow1() {
+    // Esc 1 2 3 4 5 6 7 8 9 0 - = \ `
+    final keys = fn
+        ? ['Esc', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12', 'Ins', 'Del']
+        : ['Esc', '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\\', '`'];
+    return Row(
+      children: keys.map((k) => _key(k, flex: 1)).toList(),
+    );
+  }
+
+  Widget _buildRow2() {
+    // Tab Q W E R T Y U I O P [ ] BS
+    final keys = fn
+        ? ['Tab', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', 'BS']
+        : ['Tab', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '[', ']', 'BS'];
+    return Row(
+      children: [
+        _key(keys[0], flex: 15, special: true),
+        ...keys.sublist(1, 13).map((k) => _key(k, flex: 10)),
+        _key(keys[13], flex: 15, special: true),
+      ],
+    );
+  }
+
+  Widget _buildRow3() {
+    // Ctrl A S D F G H J K L ; ' Enter
+    final baseKeys = ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ';', "'"];
+    final fnKeys = ['A', 'S', 'D', 'F', 'G', '←', '↓', '↑', '→', ';', "'"];
+    final keys = fn ? fnKeys : baseKeys;
+    return Row(
+      children: [
+        _modKey('Ctrl', ctrl, onToggleCtrl, flex: 18),
+        ...keys.map((k) => _key(k, flex: 10)),
+        _key('Enter', flex: 22, special: true),
+      ],
+    );
+  }
+
+  Widget _buildRow4() {
+    // Shift Z X C V B N M , . / Shift
+    final keys = ['Z', 'X', 'C', 'V', 'B', 'N', 'M', ',', '.', '/'];
+    return Row(
+      children: [
+        _modKey('Shift', shift, onToggleShift, flex: 22),
+        ...keys.map((k) => _key(k, flex: 10)),
+        _modKey('Shift', shift, onToggleShift, flex: 18),
+      ],
+    );
+  }
+
+  Widget _buildRow5() {
+    // Fn Meta Alt [Space] Alt Meta Fn
+    return Row(
+      children: [
+        _modKey('Fn', fn, onToggleFn, flex: 12),
+        _key('◇', flex: 12, special: true), // Meta/Super
+        _modKey('Alt', alt, onToggleAlt, flex: 12),
+        _key('', flex: 60, special: true, isSpace: true), // Space
+        _modKey('Alt', alt, onToggleAlt, flex: 12),
+        _key('◇', flex: 12, special: true),
+        _modKey('Fn', fn, onToggleFn, flex: 12),
+      ],
+    );
+  }
+
+  Widget _key(String label, {int flex = 1, bool special = false, bool isSpace = false}) {
+    String output = label;
+    bool isSpecialKey = special;
+
+    // 处理特殊键的输出
+    if (label == 'Esc') {
+      output = '\x1b';
+      isSpecialKey = true;
+    } else if (label == 'Tab') {
+      output = '\t';
+      isSpecialKey = true;
+    } else if (label == 'Enter') {
+      output = '\r';
+      isSpecialKey = true;
+    } else if (label == 'BS') {
+      output = '\x7f';
+      isSpecialKey = true;
+    } else if (label == 'Del') {
+      output = '\x1b[3~';
+      isSpecialKey = true;
+    } else if (label == 'Ins') {
+      output = '\x1b[2~';
+      isSpecialKey = true;
+    } else if (isSpace) {
+      output = ' ';
+    } else if (label == '←') {
+      output = '\x1b[D';
+      isSpecialKey = true;
+    } else if (label == '→') {
+      output = '\x1b[C';
+      isSpecialKey = true;
+    } else if (label == '↑') {
+      output = '\x1b[A';
+      isSpecialKey = true;
+    } else if (label == '↓') {
+      output = '\x1b[B';
+      isSpecialKey = true;
+    } else if (label.startsWith('F') && label.length > 1) {
+      final fNum = int.tryParse(label.substring(1));
+      if (fNum != null && fNum >= 1 && fNum <= 12) {
+        output = _getFnKeyCode(fNum);
+        isSpecialKey = true;
+      }
+    } else if (label == '◇') {
+      // Meta key - don't send
+      output = '';
+    } else if (shift && label.length == 1) {
+      output = _applyShift(label);
+    }
+
+    return Expanded(
+      flex: flex,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 1.5),
+        child: GestureDetector(
+          onTap: connected && output.isNotEmpty ? () => onKey(output, isSpecial: isSpecialKey) : null,
+          child: Container(
+            height: 42,
+            decoration: BoxDecoration(
+              color: _keyColor,
+              borderRadius: BorderRadius.circular(5),
+              border: Border.all(color: _keyBorder, width: 0.5),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.3),
+                  blurRadius: 2,
+                  offset: const Offset(0, 1),
+                ),
+              ],
+            ),
+            child: Center(
+              child: Text(
+                isSpace ? '' : label,
+                style: TextStyle(
+                  color: connected ? Colors.white : Colors.white38,
+                  fontSize: label.length > 2 ? 10 : 13,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _modKey(String label, bool active, VoidCallback onTap, {int flex = 1}) {
+    return Expanded(
+      flex: flex,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 1.5),
+        child: GestureDetector(
+          onTap: onTap,
+          child: Container(
+            height: 42,
+            decoration: BoxDecoration(
+              color: active ? _modActiveColor : _keyColor,
+              borderRadius: BorderRadius.circular(5),
+              border: Border.all(
+                color: active ? _modActiveColor.withOpacity(0.8) : _keyBorder,
+                width: 0.5,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.3),
+                  blurRadius: 2,
+                  offset: const Offset(0, 1),
+                ),
+              ],
+            ),
+            child: Center(
+              child: Text(
+                label,
+                style: TextStyle(
+                  color: active ? Colors.white : Colors.white70,
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _getFnKeyCode(int n) {
+    const codes = {
+      1: '\x1bOP',
+      2: '\x1bOQ',
+      3: '\x1bOR',
+      4: '\x1bOS',
+      5: '\x1b[15~',
+      6: '\x1b[17~',
+      7: '\x1b[18~',
+      8: '\x1b[19~',
+      9: '\x1b[20~',
+      10: '\x1b[21~',
+      11: '\x1b[23~',
+      12: '\x1b[24~',
+    };
+    return codes[n] ?? '';
+  }
+
+  String _applyShift(String char) {
+    const shiftMap = {
+      '1': '!', '2': '@', '3': '#', '4': '\$', '5': '%',
+      '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
+      '-': '_', '=': '+', '[': '{', ']': '}', '\\': '|',
+      ';': ':', "'": '"', ',': '<', '.': '>', '/': '?',
+      '`': '~',
+    };
+    if (shiftMap.containsKey(char)) {
+      return shiftMap[char]!;
+    }
+    if (char.length == 1 && char.codeUnitAt(0) >= 97 && char.codeUnitAt(0) <= 122) {
+      return char.toUpperCase();
+    }
+    return char;
   }
 }
 
