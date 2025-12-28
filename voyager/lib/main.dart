@@ -110,6 +110,9 @@ class _VoyagerHomeState extends State<VoyagerHome>
   int _lastResizeCols = 0;
   int _lastResizeRows = 0;
   double _quickBarHeight = 0;
+  static const double _hhkbKeyboardHeight = 242; // 5*42 + 4*4 + 16 padding
+
+  double get _bottomBarHeight => _showHHKB ? _quickBarHeight + _hhkbKeyboardHeight : _quickBarHeight;
   double _lastMetricsInsetsBottom = 0;
   Size _lastMetricsSize = Size.zero;
 
@@ -456,7 +459,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
     if (!size.isFinite || size.width <= 0 || size.height <= 0) {
       return;
     }
-    final padding = EdgeInsets.fromLTRB(4, 0, 4, _quickBarHeight);
+    final padding = EdgeInsets.fromLTRB(4, 0, 4, _bottomBarHeight);
     final viewportWidth = size.width - padding.horizontal;
     final viewportHeight = size.height - padding.vertical;
     if (viewportWidth <= 0 || viewportHeight <= 0) {
@@ -784,9 +787,10 @@ class _VoyagerHomeState extends State<VoyagerHome>
               autoResize: false,
               autofocus: true,
               deleteDetection: true,
-              keyboardType: TextInputType.text,
+              readOnly: _showHHKB,
+              keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
               backgroundOpacity: 1.0,
-              padding: EdgeInsets.fromLTRB(8, 4, 8, _quickBarHeight + 8),
+              padding: EdgeInsets.fromLTRB(8, 4, 8, _bottomBarHeight + 8),
               textStyle: const TerminalStyle(
                 fontFamily: 'Menlo',
                 fontSize: 14,
@@ -850,6 +854,23 @@ class _VoyagerHomeState extends State<VoyagerHome>
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  KeyedSubtree(
+                    key: _quickBarKey,
+                    child: _QuickActionsBar(
+                      connected: _connected,
+                      ctrl: _ctrl,
+                      alt: _alt,
+                      meta: _meta,
+                      onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
+                      onToggleAlt: () => setState(() => _alt = !_alt),
+                      onToggleMeta: () => setState(() => _meta = !_meta),
+                      onKey: _sendKey,
+                      onPaste: _pasteClipboard,
+                      onCopy: _copySelection,
+                      onSend: _sendRaw,
+                      onScrollToBottom: _scrollToBottom,
+                    ),
+                  ),
                   if (_showHHKB)
                     _HHKBKeyboard(
                       connected: _connected,
@@ -878,24 +899,6 @@ class _VoyagerHomeState extends State<VoyagerHome>
                       onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
                       onToggleAlt: () => setState(() => _alt = !_alt),
                       onToggleShift: () => setState(() => _hhkbShift = !_hhkbShift),
-                    ),
-                  if (!_showHHKB)
-                    KeyedSubtree(
-                      key: _quickBarKey,
-                      child: _QuickActionsBar(
-                        connected: _connected,
-                        ctrl: _ctrl,
-                        alt: _alt,
-                        meta: _meta,
-                        onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
-                        onToggleAlt: () => setState(() => _alt = !_alt),
-                        onToggleMeta: () => setState(() => _meta = !_meta),
-                        onKey: _sendKey,
-                        onPaste: _pasteClipboard,
-                        onCopy: _copySelection,
-                        onSend: _sendRaw,
-                        onScrollToBottom: _scrollToBottom,
-                      ),
                     ),
                 ],
               ),
@@ -1030,7 +1033,13 @@ class _VoyagerHomeState extends State<VoyagerHome>
             _buildDrawerSwitch(
               'HHKB Keyboard',
               _showHHKB,
-              (v) => setState(() => _showHHKB = v),
+              (v) {
+                setState(() => _showHHKB = v);
+                // Trigger resize after state update
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  _scheduleActiveResize();
+                });
+              },
             ),
             if (_useWormhole) ...[
               const SizedBox(height: 24),
@@ -1932,41 +1941,27 @@ class _HHKBKeyboard extends StatelessWidget {
     } else if (label == '◇') {
       // Meta key - don't send
       output = '';
-    } else if (shift && label.length == 1) {
-      output = _applyShift(label);
+    } else if (label.length == 1) {
+      // 字母键：默认小写，shift 时大写
+      final code = label.codeUnitAt(0);
+      if (code >= 65 && code <= 90) {
+        // A-Z
+        output = shift ? label : label.toLowerCase();
+      } else if (shift) {
+        // 其他字符应用 shift
+        output = _applyShift(label);
+      }
     }
 
     return Expanded(
       flex: flex,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 1.5),
-        child: GestureDetector(
-          onTap: connected && output.isNotEmpty ? () => onKey(output, isSpecial: isSpecialKey) : null,
-          child: Container(
-            height: 42,
-            decoration: BoxDecoration(
-              color: _keyColor,
-              borderRadius: BorderRadius.circular(5),
-              border: Border.all(color: _keyBorder, width: 0.5),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.3),
-                  blurRadius: 2,
-                  offset: const Offset(0, 1),
-                ),
-              ],
-            ),
-            child: Center(
-              child: Text(
-                isSpace ? '' : label,
-                style: TextStyle(
-                  color: connected ? Colors.white : Colors.white38,
-                  fontSize: label.length > 2 ? 10 : 13,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-          ),
+        child: _HHKBKey(
+          label: isSpace ? '' : label,
+          enabled: connected && output.isNotEmpty,
+          onTap: () => onKey(output, isSpecial: isSpecialKey),
+          fontSize: label.length > 2 ? 10.0 : 13.0,
         ),
       ),
     );
@@ -1977,36 +1972,13 @@ class _HHKBKeyboard extends StatelessWidget {
       flex: flex,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 1.5),
-        child: GestureDetector(
+        child: _HHKBKey(
+          label: label,
+          enabled: true,
+          active: active,
+          isModifier: true,
           onTap: onTap,
-          child: Container(
-            height: 42,
-            decoration: BoxDecoration(
-              color: active ? _modActiveColor : _keyColor,
-              borderRadius: BorderRadius.circular(5),
-              border: Border.all(
-                color: active ? _modActiveColor.withOpacity(0.8) : _keyBorder,
-                width: 0.5,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.3),
-                  blurRadius: 2,
-                  offset: const Offset(0, 1),
-                ),
-              ],
-            ),
-            child: Center(
-              child: Text(
-                label,
-                style: TextStyle(
-                  color: active ? Colors.white : Colors.white70,
-                  fontSize: 10,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
-          ),
+          fontSize: 10,
         ),
       ),
     );
@@ -2048,3 +2020,159 @@ class _HHKBKeyboard extends StatelessWidget {
   }
 }
 
+class _HHKBKey extends StatefulWidget {
+  const _HHKBKey({
+    required this.label,
+    required this.enabled,
+    required this.onTap,
+    this.active = false,
+    this.isModifier = false,
+    this.fontSize = 13,
+  });
+
+  final String label;
+  final bool enabled;
+  final bool active;
+  final bool isModifier;
+  final VoidCallback onTap;
+  final double fontSize;
+
+  @override
+  State<_HHKBKey> createState() => _HHKBKeyState();
+}
+
+class _HHKBKeyState extends State<_HHKBKey> {
+  bool _pressed = false;
+  OverlayEntry? _bubbleEntry;
+  final GlobalKey _keyKey = GlobalKey();
+
+  static const _keyColor = Color(0xFF2D2D2D);
+  static const _keyPressedColor = Color(0xFF1A1A1A);
+  static const _keyBorder = Color(0xFF3D3D3D);
+  static const _modActiveColor = Color(0xFF4B7AA6);
+  static const _modPressedColor = Color(0xFF3A6080);
+
+  @override
+  void dispose() {
+    _hideBubble();
+    super.dispose();
+  }
+
+  void _showBubble() {
+    if (widget.label.isEmpty || widget.isModifier) return;
+
+    final renderBox = _keyKey.currentContext?.findRenderObject() as RenderBox?;
+    if (renderBox == null) return;
+
+    final position = renderBox.localToGlobal(Offset.zero);
+    final size = renderBox.size;
+
+    _bubbleEntry = OverlayEntry(
+      builder: (context) => Positioned(
+        left: position.dx + size.width / 2 - 28,
+        top: position.dy - 52,
+        child: IgnorePointer(
+          child: Container(
+            width: 56,
+            height: 52,
+            decoration: BoxDecoration(
+              color: const Color(0xFF3A3A3A),
+              borderRadius: BorderRadius.circular(8),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.4),
+                  blurRadius: 8,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  widget.label,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 24,
+                    fontWeight: FontWeight.w500,
+                    decoration: TextDecoration.none,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    Overlay.of(context).insert(_bubbleEntry!);
+  }
+
+  void _hideBubble() {
+    _bubbleEntry?.remove();
+    _bubbleEntry = null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    Color bgColor;
+    Color borderColor;
+
+    if (widget.isModifier) {
+      if (_pressed) {
+        bgColor = widget.active ? _modPressedColor : _keyPressedColor;
+      } else {
+        bgColor = widget.active ? _modActiveColor : _keyColor;
+      }
+      borderColor = widget.active ? _modActiveColor.withOpacity(0.8) : _keyBorder;
+    } else {
+      bgColor = _pressed ? _keyPressedColor : _keyColor;
+      borderColor = _keyBorder;
+    }
+
+    return GestureDetector(
+      onTapDown: widget.enabled ? (_) {
+        setState(() => _pressed = true);
+        HapticFeedback.lightImpact();
+        _showBubble();
+      } : null,
+      onTapUp: widget.enabled ? (_) {
+        setState(() => _pressed = false);
+        _hideBubble();
+      } : null,
+      onTapCancel: widget.enabled ? () {
+        setState(() => _pressed = false);
+        _hideBubble();
+      } : null,
+      onTap: widget.enabled ? widget.onTap : null,
+      child: Container(
+        key: _keyKey,
+        height: 42,
+        decoration: BoxDecoration(
+          color: bgColor,
+          borderRadius: BorderRadius.circular(5),
+          border: Border.all(color: borderColor, width: 0.5),
+          boxShadow: _pressed
+              ? null
+              : [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.3),
+                    blurRadius: 2,
+                    offset: const Offset(0, 1),
+                  ),
+                ],
+        ),
+        child: Center(
+          child: Text(
+            widget.label,
+            style: TextStyle(
+              color: widget.enabled ? Colors.white : Colors.white38,
+              fontSize: widget.fontSize,
+              fontWeight: widget.isModifier ? FontWeight.bold : FontWeight.w500,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
