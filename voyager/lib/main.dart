@@ -42,8 +42,19 @@ class VoyagerApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Blackhole Voyager',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1A2A3A)),
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: const Color(0xFF0F141B),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF1A2A3A),
+          brightness: Brightness.dark,
+          surface: const Color(0xFF111620),
+        ),
+        textTheme: const TextTheme(
+          bodyMedium: TextStyle(color: Colors.white70),
+          titleMedium: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        ),
         useMaterial3: true,
       ),
       home: const VoyagerHome(),
@@ -735,41 +746,64 @@ class _VoyagerHomeState extends State<VoyagerHome>
 
   @override
   Widget build(BuildContext context) {
-    final topInset = MediaQuery.of(context).padding.top;
     const barColor = Color(0xFF111620);
-    const activeColor = Color(0xFF284058);
-    const overlayColor = Color(0x4D0F141B);
+    const activeColor = Color(0xFF1A2A3A);
+    const overlayColor = Color(0x66000000);
     final terminal = _activeTerminal ?? _idleTerminal;
     final controller = _activeController ?? _idleController;
+    
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         _updateQuickBarHeight();
       }
     });
+
     return Scaffold(
       key: _scaffoldKey,
+      backgroundColor: Colors.black,
       endDrawer: _buildSettingsDrawer(context),
       body: Stack(
         children: [
           Positioned.fill(
-            top: _chromeHidden ? _sessions.length <= 1 ? 0: 32 : topInset+ 82,
-                child: TerminalView(
-                  terminal,
-                  key: _terminalViewKey,
-                  controller: controller,
-                  scrollController: _terminalScrollController,
-                  autoResize: false,
-                  autofocus: true,
-                  deleteDetection: true,
-                  keyboardType: TextInputType.text,
-                  backgroundOpacity: 1.0,
-              padding: EdgeInsets.fromLTRB(4, 0, 4, _quickBarHeight),
+            child: Container(color: Colors.black),
+          ),
+          Positioned.fill(
+            top: _chromeHidden ? (_sessions.length <= 1 ? 0 : 36) : MediaQuery.of(context).padding.top + 82,
+            child: TerminalView(
+              terminal,
+              key: _terminalViewKey,
+              controller: controller,
+              scrollController: _terminalScrollController,
+              autoResize: false,
+              autofocus: true,
+              deleteDetection: true,
+              keyboardType: TextInputType.text,
+              backgroundOpacity: 1.0,
+              padding: EdgeInsets.fromLTRB(8, 4, 8, _quickBarHeight + 8),
               textStyle: const TerminalStyle(
                 fontFamily: 'Menlo',
                 fontSize: 14,
               ),
             ),
           ),
+          if (!_chromeHidden)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 82,
+              left: 0,
+              right: 0,
+              height: 24,
+              child: IgnorePointer(
+                child: Container(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Colors.black.withOpacity(0.4), Colors.transparent],
+                    ),
+                  ),
+                ),
+              ),
+            ),
           Positioned(
             top: 0,
             left: 0,
@@ -817,13 +851,13 @@ class _VoyagerHomeState extends State<VoyagerHome>
                   onToggleAlt: () => setState(() => _alt = !_alt),
                   onToggleMeta: () => setState(() => _meta = !_meta),
                   onKey: _sendKey,
-                onPaste: _pasteClipboard,
-                onCopy: _copySelection,
-                onSend: _sendRaw,
-                onScrollToBottom: _scrollToBottom,
+                  onPaste: _pasteClipboard,
+                  onCopy: _copySelection,
+                  onSend: _sendRaw,
+                  onScrollToBottom: _scrollToBottom,
+                ),
               ),
             ),
-          ),
           ),
         ],
       ),
@@ -835,57 +869,59 @@ class _VoyagerHomeState extends State<VoyagerHome>
         ? _wormholeController.text.trim()
         : _urlController.text.trim();
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 0, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
       child: Row(
         children: [
-          _StatusDot(connected: _connected),
-          const SizedBox(width: 12),
+          _StatusDot(connected: _connected, size: 8),
+          const SizedBox(width: 14),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                  'URL',
-                  style: TextStyle(
-                    color: Color(0xFF9AA6B2),
-                    fontSize: 12,
-                    letterSpacing: 0.4,
+                Text(
+                  _useWormhole ? 'WORMHOLE REMOTE' : 'LAN CONNECTION',
+                  style: const TextStyle(
+                    color: Color(0xFF4B7AA6),
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 0.8,
                   ),
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  urlText.isEmpty ? 'Not set' : urlText,
+                  urlText.isEmpty ? 'Not Configured' : urlText,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Colors.white, fontSize: 14),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
               ],
             ),
           ),
-          const SizedBox(width: 12),
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Switch(
-                value: _connected,
-                  onChanged: (value) {
-                    if (value) {
-                      _connect();
-                    } else {
-                      _shouldReconnect = false;
-                      _reconnectTimer?.cancel();
-                      _reconnectTimer = null;
-                      _disconnect();
-                    }
-                  },
-                ),
-              IconButton(
-                icon: const Icon(Icons.settings, color: Colors.white),
-                onPressed: () {
-                  _scaffoldKey.currentState?.openEndDrawer();
-                },
-              ),
-            ],
+          const SizedBox(width: 16),
+          Switch(
+            value: _connected,
+            activeColor: const Color(0xFF41C87A),
+            onChanged: (value) {
+              if (value) {
+                _connect();
+              } else {
+                _shouldReconnect = false;
+                _reconnectTimer?.cancel();
+                _reconnectTimer = null;
+                _disconnect();
+              }
+            },
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+            icon: const Icon(Icons.settings_outlined, color: Colors.white70, size: 20),
+            onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
+            tooltip: 'Settings',
           ),
         ],
       ),
@@ -893,165 +929,165 @@ class _VoyagerHomeState extends State<VoyagerHome>
   }
 
   Widget _buildSettingsDrawer(BuildContext context) {
-    final fieldFill = Colors.white.withOpacity(0.06);
-    final fieldBorder = const Color(0xFF9AA6B2);
+    final fieldFill = Colors.white.withOpacity(0.05);
+    final fieldBorder = Colors.white.withOpacity(0.1);
     final titleStyle = Theme.of(context)
         .textTheme
         .titleMedium
-        ?.copyWith(color: Colors.white);
+        ?.copyWith(color: Colors.white, fontSize: 18);
 
     return Drawer(
       backgroundColor: const Color(0xFF0F141B),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.only(
+          topLeft: Radius.circular(20),
+          bottomLeft: Radius.circular(20),
+        ),
+      ),
       child: SafeArea(
         child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+          padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
           children: [
-            Text('Connection Settings', style: titleStyle),
-            const SizedBox(height: 16),
+            Row(
+              children: [
+                const Icon(Icons.settings_outlined, color: Color(0xFF4B7AA6)),
+                const SizedBox(width: 12),
+                Text('VOYAGER SETTINGS', style: titleStyle?.copyWith(fontSize: 14, letterSpacing: 1)),
+              ],
+            ),
+            const SizedBox(height: 24),
+            _buildDrawerSection('Connection Address'),
+            const SizedBox(height: 12),
             TextField(
               controller: _useWormhole ? _wormholeController : _urlController,
-              decoration: InputDecoration(
-                labelText: 'Address',
-                filled: true,
-                fillColor: fieldFill,
-                labelStyle: const TextStyle(color: Color(0xFF9AA6B2)),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: BorderSide(color: fieldBorder),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: BorderSide(color: fieldBorder),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: Colors.white, width: 1.4),
-                ),
-              ),
-              style: const TextStyle(color: Colors.white),
+              decoration: _buildInputDecoration('Address', fieldFill, fieldBorder),
+              style: const TextStyle(color: Colors.white, fontSize: 14),
             ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'LAN Mode',
-                    style: const TextStyle(color: Colors.white),
-                  ),
-                ),
-                Switch(
-                  value: !_useWormhole,
-                  onChanged: (value) {
-                    setState(() {
-                      _useWormhole = !value;
-                    });
-                  },
-                ),
-              ],
+            const SizedBox(height: 24),
+            _buildDrawerSection('Modes & Behavior'),
+            const SizedBox(height: 8),
+            _buildDrawerSwitch(
+              'LAN Mode',
+              !_useWormhole,
+              (v) => setState(() => _useWormhole = !v),
             ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'Auto Reconnect',
-                    style: const TextStyle(color: Colors.white),
-                  ),
-                ),
-                Switch(
-                  value: _autoReconnect,
-                  onChanged: (value) {
-                    setState(() {
-                      _autoReconnect = value;
-                      if (!_autoReconnect) {
-                        _reconnectTimer?.cancel();
-                        _reconnectTimer = null;
-                      }
-                    });
-                  },
-                ),
-              ],
+            _buildDrawerSwitch(
+              'Auto Reconnect',
+              _autoReconnect,
+              (v) => setState(() {
+                _autoReconnect = v;
+                if (!_autoReconnect) {
+                  _reconnectTimer?.cancel();
+                  _reconnectTimer = null;
+                }
+              }),
             ),
             if (_useWormhole) ...[
-              const SizedBox(height: 16),
-              Text(
-                'Wormhole Options',
-                style: const TextStyle(color: Colors.white70, fontSize: 12),
-              ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 24),
+              _buildDrawerSection('Wormhole Remote Options'),
+              const SizedBox(height: 12),
               TextField(
                 controller: _sessionController,
                 textCapitalization: TextCapitalization.characters,
-                decoration: InputDecoration(
-                  labelText: 'Session ID',
-                  hintText: 'Enter 6-digit code from Horizon',
-                  hintStyle: TextStyle(color: Colors.white24),
-                  filled: true,
-                  fillColor: fieldFill,
-                  labelStyle: const TextStyle(color: Color(0xFF9AA6B2)),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: BorderSide(color: fieldBorder),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: BorderSide(color: fieldBorder),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: const BorderSide(color: Colors.white, width: 1.4),
-                  ),
-                ),
-                style: const TextStyle(color: Colors.white, letterSpacing: 2),
+                decoration: _buildInputDecoration('Session ID', fieldFill, fieldBorder, hint: '6-digit code'),
+                style: const TextStyle(color: Colors.white, letterSpacing: 4, fontWeight: FontWeight.bold),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 16),
               TextField(
                 controller: _tokenController,
-                decoration: InputDecoration(
-                  labelText: 'Token (optional)',
-                  filled: true,
-                  fillColor: fieldFill,
-                  labelStyle: const TextStyle(color: Color(0xFF9AA6B2)),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: BorderSide(color: fieldBorder),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: BorderSide(color: fieldBorder),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: const BorderSide(color: Colors.white, width: 1.4),
-                  ),
-                ),
-                style: const TextStyle(color: Colors.white),
+                decoration: _buildInputDecoration('Token (Optional)', fieldFill, fieldBorder),
+                style: const TextStyle(color: Colors.white, fontSize: 14),
               ),
             ],
+            const SizedBox(height: 40),
+            Text(
+              'Blackhole Voyager v1.0.0',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white.withOpacity(0.2), fontSize: 11),
+            ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildDrawerSection(String title) {
+    return Text(
+      title.toUpperCase(),
+      style: const TextStyle(
+        color: Color(0xFF4B7AA6),
+        fontSize: 11,
+        fontWeight: FontWeight.bold,
+        letterSpacing: 0.5,
+      ),
+    );
+  }
+
+  Widget _buildDrawerSwitch(String label, bool value, ValueChanged<bool> onChanged) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(color: Colors.white, fontSize: 14),
+            ),
+          ),
+          Switch(
+            value: value,
+            activeColor: const Color(0xFF41C87A),
+            onChanged: onChanged,
+          ),
+        ],
+      ),
+    );
+  }
+
+  InputDecoration _buildInputDecoration(String label, Color fill, Color border, {String? hint}) {
+    return InputDecoration(
+      labelText: label,
+      hintText: hint,
+      hintStyle: const TextStyle(color: Colors.white24, fontSize: 13),
+      filled: true,
+      fillColor: fill,
+      isDense: true,
+      labelStyle: const TextStyle(color: Color(0xFF9AA6B2), fontSize: 13),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: border),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: border),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: const BorderSide(color: Color(0xFF4B7AA6), width: 1.5),
       ),
     );
   }
 }
 
 class _StatusDot extends StatelessWidget {
-  const _StatusDot({required this.connected});
+  const _StatusDot({required this.connected, this.size = 10});
 
   final bool connected;
+  final double size;
 
   @override
   Widget build(BuildContext context) {
     final color = connected ? const Color(0xFF41C87A) : const Color(0xFFFF5C5C);
     return Container(
-      width: 10,
-      height: 10,
+      width: size,
+      height: size,
       decoration: BoxDecoration(
         color: color,
         shape: BoxShape.circle,
         boxShadow: [
           BoxShadow(
-            color: color.withOpacity(0.6),
+            color: color.withOpacity(0.4),
             blurRadius: 6,
             spreadRadius: 1,
           ),
@@ -1093,69 +1129,62 @@ class _QuickActionsBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: const Color(0xFF111620),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFF111620),
+        border: Border(top: BorderSide(color: Colors.white.withOpacity(0.05))),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
         child: Row(
           children: [
-            _ModifierButton(label: 'Ctrl', active: ctrl, onTap: onToggleCtrl),
+            _ModifierButton(label: 'CTRL', active: ctrl, onTap: onToggleCtrl),
             const SizedBox(width: 6),
-            _ModifierButton(label: 'Alt', active: alt, onTap: onToggleAlt),
-            const SizedBox(width: 8),
+            _ModifierButton(label: 'ALT', active: alt, onTap: onToggleAlt),
+            const SizedBox(width: 12),
             _ActionButton(
-              label: 'Tab',
+              label: 'TAB',
               onTap: connected ? () => onKey(TerminalKey.tab) : null,
             ),
             const SizedBox(width: 6),
             _ActionButton(
-              label: 'Esc',
+              label: 'ESC',
               onTap: connected ? () => onKey(TerminalKey.escape) : null,
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: 12),
             _ActionButton(
-              label: '↑',
+              icon: Icons.keyboard_arrow_up,
               onTap: connected ? () => onKey(TerminalKey.arrowUp) : null,
             ),
             const SizedBox(width: 6),
             _ActionButton(
-              label: '↓',
+              icon: Icons.keyboard_arrow_down,
               onTap: connected ? () => onKey(TerminalKey.arrowDown) : null,
             ),
             const SizedBox(width: 6),
             _ActionButton(
-              label: '←',
+              icon: Icons.keyboard_arrow_left,
               onTap: connected ? () => onKey(TerminalKey.arrowLeft) : null,
             ),
             const SizedBox(width: 6),
             _ActionButton(
-              label: '→',
+              icon: Icons.keyboard_arrow_right,
               onTap: connected ? () => onKey(TerminalKey.arrowRight) : null,
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: 12),
             _ActionButton(
-              label: '⏎',
-              onTap: connected ? () => onSend("\r") : null,
-            ),
-            const SizedBox(width: 6),
-            _ActionButton(
-              label: '⤓',
-              onTap: onScrollToBottom,
-            ),
-            const SizedBox(width: 6),
-            _ActionButton(
-              label: 'LF',
-              onTap: connected ? () => onSend("\n") : null,
-            ),
-            const SizedBox(width: 6),
-            _ActionButton(
-              label: 'Paste',
+              label: 'PASTE',
               onTap: connected ? onPaste : null,
             ),
             const SizedBox(width: 6),
             _ActionButton(
-              label: 'Copy',
+              label: 'COPY',
               onTap: connected ? onCopy : null,
+            ),
+            const SizedBox(width: 6),
+            _ActionButton(
+              icon: Icons.vertical_align_bottom,
+              onTap: onScrollToBottom,
             ),
           ],
         ),
@@ -1196,7 +1225,8 @@ class _HeaderChrome extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final topInset = MediaQuery.of(context).padding.top;
-    final fullTab = !hidden || sessions.length > 1;
+    final hasMultipleSessions = sessions.length > 1;
+    final showTabs = !hidden || hasMultipleSessions;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -1212,11 +1242,25 @@ class _HeaderChrome extends StatelessWidget {
                 connectionContent,
                 if (error != null)
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
-                    child: Text(
-                      error!,
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.error,
+                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFF5C5C).withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: const Color(0xFFFF5C5C).withOpacity(0.2)),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.error_outline, size: 14, color: Color(0xFFFF5C5C)),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              error!,
+                              style: const TextStyle(color: Color(0xFFFF5C5C), fontSize: 12),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),
@@ -1224,26 +1268,21 @@ class _HeaderChrome extends StatelessWidget {
             ),
           ),
         Container(
-          color: fullTab ? color : Colors.transparent,
-          padding: EdgeInsets.only(top: hidden ? topInset : 10),
+          color: showTabs ? color.withOpacity(0.8) : Colors.transparent,
+          padding: EdgeInsets.only(top: hidden ? topInset : 0),
           child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              if (fullTab)
+              if (showTabs)
                 Expanded(
                   child: SingleChildScrollView(
                     scrollDirection: Axis.horizontal,
                     child: Row(
                       children: [
+                        const SizedBox(width: 8),
                         for (final entry in sessions.asMap().entries)
                           _ChromeTabPill(
-                            label: 'Term ${entry.key + 1}',
+                            label: 'TERM ${entry.key + 1}',
                             active: entry.value == activeSessionId,
-                            showDivider: !_isNextActive(
-                              sessions,
-                              entry.key,
-                              activeSessionId,
-                            ),
                             onTap: () => onSelectSession(entry.value),
                             onClose: () => onCloseSession(entry.value),
                             color: activeColor,
@@ -1286,20 +1325,9 @@ double _tabWidthForCount(double screenWidth, int count) {
   if (count <= 0) {
     return 120;
   }
-  final maxTabsWidth = screenWidth - 160;
+  final maxTabsWidth = screenWidth - 140;
   final width = maxTabsWidth / count;
-  return width.clamp(72, 140).toDouble();
-}
-
-bool _isNextActive(List<String> sessions, int index, String? activeId) {
-  if (activeId == null) {
-    return false;
-  }
-  final nextIndex = index + 1;
-  if (nextIndex >= sessions.length) {
-    return false;
-  }
-  return sessions[nextIndex] == activeId;
+  return width.clamp(80, 150).toDouble();
 }
 
 class _ChromeTabButton extends StatelessWidget {
@@ -1325,13 +1353,13 @@ class _ChromeTabButton extends StatelessWidget {
       overlayColor: overlayColor,
       inverted: inverted,
       child: SizedBox(
-        width: 60,
-        height: 32,
+        width: 48,
+        height: 36,
         child: Center(
           child: Icon(
             icon,
             color: Colors.white,
-            size: 18,
+            size: 16,
           ),
         ),
       ),
@@ -1343,7 +1371,6 @@ class _ChromeTabPill extends StatelessWidget {
   const _ChromeTabPill({
     required this.label,
     required this.active,
-    required this.showDivider,
     required this.onTap,
     required this.onClose,
     required this.color,
@@ -1353,7 +1380,6 @@ class _ChromeTabPill extends StatelessWidget {
 
   final String label;
   final bool active;
-  final bool showDivider;
   final VoidCallback onTap;
   final VoidCallback onClose;
   final Color color;
@@ -1362,64 +1388,48 @@ class _ChromeTabPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final textColor = active ? Colors.white : Colors.white70;
-    final content = Row(
-      children: [
-        const SizedBox(width: 16),
-        Expanded(
-          child: Text(
-            label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(color: textColor, fontSize: 12, height: 1.0),
-          ),
-        ),
-        const SizedBox(width: 2),
-        GestureDetector(
-          onTap: onClose,
-          child: Icon(
-            Icons.close,
-            size: 12,
-            color: textColor.withOpacity(0.8),
-          ),
-        ),
-        const SizedBox(width: 16),
-      ],
-    );
-
-    if (active) {
-      return Padding(
-        padding: const EdgeInsets.only(right: 4),
-        child: _ChromeTabShell(
-          onTap: onTap,
-          color: color,
-          overlayColor: overlayColor,
-          inverted: true,
-          child: SizedBox(
-            width: width,
-            height: 32,
-            child: content,
-          ),
-        ),
-      );
-    }
-
+    final textColor = active ? Colors.white : Colors.white60;
+    
     return Padding(
-      padding: const EdgeInsets.only(right: 4),
-      child: InkWell(
+      padding: const EdgeInsets.only(right: 2),
+      child: _ChromeTabShell(
         onTap: onTap,
+        color: active ? color : Colors.transparent,
+        overlayColor: active ? overlayColor : Colors.transparent,
+        inverted: true,
         child: Container(
           width: width,
-          height: 16,
-          margin: EdgeInsets.symmetric(vertical: 6),
-          decoration: BoxDecoration(
-            border: showDivider
-                ? Border(
-                    right: BorderSide(color: Colors.white.withOpacity(0.2)),
-                  )
-                : null,
+          height: 36,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: textColor,
+                    fontSize: 10,
+                    fontWeight: active ? FontWeight.bold : FontWeight.normal,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ),
+              if (active)
+                GestureDetector(
+                  onTap: onClose,
+                  child: Container(
+                    padding: const EdgeInsets.all(2),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.1),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.close, size: 10, color: Colors.white70),
+                  ),
+                ),
+            ],
           ),
-          child: content,
         ),
       ),
     );
@@ -1548,11 +1558,14 @@ class _FrostedBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ClipRect( // 🔒 constrain blur to header area only
+    return ClipRect(
       child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
-        child: DecoratedBox(
-          decoration: BoxDecoration(color: color),
+        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+        child: Container(
+          decoration: BoxDecoration(
+            color: color.withOpacity(0.7),
+            border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.05))),
+          ),
           child: DecoratedBox(
             decoration: BoxDecoration(color: overlayColor),
             child: child,
@@ -1564,9 +1577,10 @@ class _FrostedBar extends StatelessWidget {
 }
 
 class _ActionButton extends StatelessWidget {
-  const _ActionButton({required this.label, required this.onTap});
+  const _ActionButton({this.label, this.icon, required this.onTap});
 
-  final String label;
+  final String? label;
+  final IconData? icon;
   final VoidCallback? onTap;
 
   @override
@@ -1576,22 +1590,38 @@ class _ActionButton extends StatelessWidget {
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
           color: enabled ? const Color(0xFF1B2430) : const Color(0xFF0E131A),
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
             color: enabled ? const Color(0xFF2E3A4A) : const Color(0xFF1A222D),
           ),
+          boxShadow: enabled
+              ? [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.2),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  )
+                ]
+              : null,
         ),
-        child: Text(
-          label,
-          style: TextStyle(
-            color: enabled ? Colors.white : const Color(0xFF6D7785),
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
+        child: icon != null
+            ? Icon(
+                icon,
+                size: 16,
+                color: enabled ? Colors.white : const Color(0xFF6D7785),
+              )
+            : Text(
+                label ?? '',
+                style: TextStyle(
+                  color: enabled ? Colors.white : const Color(0xFF6D7785),
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 0.5,
+                ),
+              ),
       ),
     );
   }
@@ -1614,20 +1644,28 @@ class _ModifierButton extends StatelessWidget {
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
           color: active ? const Color(0xFF284058) : const Color(0xFF141B24),
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
             color: active ? const Color(0xFF4B7AA6) : const Color(0xFF223042),
           ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.2),
+              blurRadius: 4,
+              offset: const Offset(0, 2),
+            )
+          ],
         ),
         child: Text(
           label,
           style: TextStyle(
             color: active ? Colors.white : const Color(0xFF9AA6B2),
-            fontSize: 12,
-            fontWeight: FontWeight.w700,
+            fontSize: 11,
+            fontWeight: FontWeight.bold,
+            letterSpacing: 0.5,
           ),
         ),
       ),
