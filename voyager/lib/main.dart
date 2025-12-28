@@ -1173,6 +1173,16 @@ class _QuickActionsBar extends StatelessWidget {
             ),
             const SizedBox(width: 12),
             _ActionButton(
+              icon: Icons.keyboard_return,
+              onTap: connected ? () => onSend("\r") : null,
+            ),
+            const SizedBox(width: 6),
+            _ActionButton(
+              label: 'LF',
+              onTap: connected ? () => onSend("\n") : null,
+            ),
+            const SizedBox(width: 12),
+            _ActionButton(
               label: 'PASTE',
               onTap: connected ? onPaste : null,
             ),

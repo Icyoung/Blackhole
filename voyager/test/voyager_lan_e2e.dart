@@ -9,7 +9,7 @@ const int _typeStdout = 2;
 
 Future<void> main(List<String> args) async {
   if (args.isEmpty) {
-    stderr.writeln('Usage: dart scripts/voyager_lan_e2e.dart <ws://host:port>');
+    stderr.writeln('Usage: dart test/voyager_lan_e2e.dart <ws://host:port>');
     exitCode = 2;
     return;
   }
