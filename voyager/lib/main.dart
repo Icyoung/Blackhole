@@ -1097,7 +1097,7 @@ class _StatusDot extends StatelessWidget {
   }
 }
 
-class _QuickActionsBar extends StatelessWidget {
+class _QuickActionsBar extends StatefulWidget {
   const _QuickActionsBar({
     required this.connected,
     required this.ctrl,
@@ -1127,6 +1127,90 @@ class _QuickActionsBar extends StatelessWidget {
   final VoidCallback onScrollToBottom;
 
   @override
+  State<_QuickActionsBar> createState() => _QuickActionsBarState();
+}
+
+class _QuickActionsBarState extends State<_QuickActionsBar> {
+  final ScrollController _scrollController = ScrollController();
+  final List<GlobalKey> _snapKeys = List.generate(5, (_) => GlobalKey());
+  bool _isSnapping = false;
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _onScrollEnd() {
+    if (_isSnapping || !_scrollController.hasClients) return;
+
+    final currentOffset = _scrollController.offset;
+    final maxScroll = _scrollController.position.maxScrollExtent;
+
+    if (currentOffset <= 0 || currentOffset >= maxScroll) return;
+
+    // 收集所有吸附点的位置
+    final snapOffsets = <double>[0];
+
+    for (final key in _snapKeys) {
+      final ctx = key.currentContext;
+      if (ctx != null) {
+        final box = ctx.findRenderObject() as RenderBox?;
+        if (box != null && box.hasSize) {
+          // 获取相对于 viewport 的位置
+          final offset = _getSnapOffset(box);
+          if (offset != null && offset > 0) {
+            snapOffsets.add(offset);
+          }
+        }
+      }
+    }
+
+    if (snapOffsets.length <= 1) return;
+
+    snapOffsets.sort();
+
+    // 找最近的吸附点
+    double nearest = 0;
+    double minDist = double.infinity;
+
+    for (final snap in snapOffsets) {
+      final dist = (currentOffset - snap).abs();
+      if (dist < minDist) {
+        minDist = dist;
+        nearest = snap;
+      }
+    }
+
+    nearest = nearest.clamp(0.0, maxScroll);
+
+    if ((nearest - currentOffset).abs() > 2) {
+      _isSnapping = true;
+      _scrollController.animateTo(
+        nearest,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+      ).then((_) => _isSnapping = false);
+    }
+  }
+
+  double? _getSnapOffset(RenderBox box) {
+    try {
+      // 获取 Row 相对于 viewport 的位置
+      final ancestor = context.findRenderObject() as RenderBox?;
+      if (ancestor == null) return null;
+
+      final boxGlobal = box.localToGlobal(Offset.zero);
+      final ancestorGlobal = ancestor.localToGlobal(Offset.zero);
+
+      // 计算相对于滚动区域的偏移
+      return _scrollController.offset + (boxGlobal.dx - ancestorGlobal.dx) - 12; // 12 是 padding
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
@@ -1134,69 +1218,47 @@ class _QuickActionsBar extends StatelessWidget {
         border: Border(top: BorderSide(color: Colors.white.withOpacity(0.05))),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            _ModifierButton(label: 'CTRL', active: ctrl, onTap: onToggleCtrl),
-            const SizedBox(width: 6),
-            _ModifierButton(label: 'ALT', active: alt, onTap: onToggleAlt),
-            const SizedBox(width: 12),
-            _ActionButton(
-              label: 'TAB',
-              onTap: connected ? () => onKey(TerminalKey.tab) : null,
-            ),
-            const SizedBox(width: 6),
-            _ActionButton(
-              label: 'ESC',
-              onTap: connected ? () => onKey(TerminalKey.escape) : null,
-            ),
-            const SizedBox(width: 12),
-            _ActionButton(
-              icon: Icons.keyboard_arrow_up,
-              onTap: connected ? () => onKey(TerminalKey.arrowUp) : null,
-            ),
-            const SizedBox(width: 6),
-            _ActionButton(
-              icon: Icons.keyboard_arrow_down,
-              onTap: connected ? () => onKey(TerminalKey.arrowDown) : null,
-            ),
-            const SizedBox(width: 6),
-            _ActionButton(
-              icon: Icons.keyboard_arrow_left,
-              onTap: connected ? () => onKey(TerminalKey.arrowLeft) : null,
-            ),
-            const SizedBox(width: 6),
-            _ActionButton(
-              icon: Icons.keyboard_arrow_right,
-              onTap: connected ? () => onKey(TerminalKey.arrowRight) : null,
-            ),
-            const SizedBox(width: 12),
-            _ActionButton(
-              icon: Icons.keyboard_return,
-              onTap: connected ? () => onSend("\r") : null,
-            ),
-            const SizedBox(width: 6),
-            _ActionButton(
-              label: 'LF',
-              onTap: connected ? () => onSend("\n") : null,
-            ),
-            const SizedBox(width: 12),
-            _ActionButton(
-              label: 'PASTE',
-              onTap: connected ? onPaste : null,
-            ),
-            const SizedBox(width: 6),
-            _ActionButton(
-              label: 'COPY',
-              onTap: connected ? onCopy : null,
-            ),
-            const SizedBox(width: 6),
-            _ActionButton(
-              icon: Icons.vertical_align_bottom,
-              onTap: onScrollToBottom,
-            ),
-          ],
+      child: NotificationListener<ScrollNotification>(
+        onNotification: (notification) {
+          if (notification is ScrollEndNotification && !_isSnapping) {
+            // 等惯性停止
+            Future.delayed(const Duration(milliseconds: 80), _onScrollEnd);
+          }
+          return false;
+        },
+        child: SingleChildScrollView(
+          controller: _scrollController,
+          scrollDirection: Axis.horizontal,
+          physics: const BouncingScrollPhysics(),
+          child: Row(
+            children: [
+              _ActionButton(label: 'CTRL', modifier: true, active: widget.ctrl, onTap: widget.onToggleCtrl),
+              const SizedBox(width: 6),
+              _ActionButton(label: 'ALT', modifier: true, active: widget.alt, onTap: widget.onToggleAlt),
+              const SizedBox(width: 12),
+              _ActionButton(key: _snapKeys[0], label: 'TAB', onTap: widget.connected ? () => widget.onKey(TerminalKey.tab) : null),
+              const SizedBox(width: 6),
+              _ActionButton(label: 'ESC', onTap: widget.connected ? () => widget.onKey(TerminalKey.escape) : null),
+              const SizedBox(width: 12),
+              _ActionButton(key: _snapKeys[1], icon: Icons.keyboard_arrow_up, onTap: widget.connected ? () => widget.onKey(TerminalKey.arrowUp) : null),
+              const SizedBox(width: 6),
+              _ActionButton(icon: Icons.keyboard_arrow_down, onTap: widget.connected ? () => widget.onKey(TerminalKey.arrowDown) : null),
+              const SizedBox(width: 6),
+              _ActionButton(icon: Icons.keyboard_arrow_left, onTap: widget.connected ? () => widget.onKey(TerminalKey.arrowLeft) : null),
+              const SizedBox(width: 6),
+              _ActionButton(icon: Icons.keyboard_arrow_right, onTap: widget.connected ? () => widget.onKey(TerminalKey.arrowRight) : null),
+              const SizedBox(width: 12),
+              _ActionButton(key: _snapKeys[2], icon: Icons.keyboard_return, onTap: widget.connected ? () => widget.onSend("\r") : null),
+              const SizedBox(width: 6),
+              _ActionButton(label: 'LF', onTap: widget.connected ? () => widget.onSend("\n") : null),
+              const SizedBox(width: 12),
+              _ActionButton(key: _snapKeys[3], label: 'PASTE', onTap: widget.connected ? widget.onPaste : null),
+              const SizedBox(width: 6),
+              _ActionButton(label: 'COPY', onTap: widget.connected ? widget.onCopy : null),
+              const SizedBox(width: 6),
+              _ActionButton(key: _snapKeys[4], icon: Icons.vertical_align_bottom, onTap: widget.onScrollToBottom),
+            ],
+          ),
         ),
       ),
     );
@@ -1587,27 +1649,50 @@ class _FrostedBar extends StatelessWidget {
 }
 
 class _ActionButton extends StatelessWidget {
-  const _ActionButton({this.label, this.icon, required this.onTap});
+  const _ActionButton({
+    super.key,
+    this.label,
+    this.icon,
+    this.onTap,
+    this.modifier = false,
+    this.active = false,
+  });
 
   final String? label;
   final IconData? icon;
   final VoidCallback? onTap;
+  final bool modifier;
+  final bool active;
 
   @override
   Widget build(BuildContext context) {
     final enabled = onTap != null;
+
+    Color bgColor;
+    Color borderColor;
+
+    if (modifier) {
+      bgColor = active ? const Color(0xFF284058) : const Color(0xFF141B24);
+      borderColor = active ? const Color(0xFF4B7AA6) : const Color(0xFF223042);
+    } else {
+      bgColor = enabled ? const Color(0xFF1B2430) : const Color(0xFF0E131A);
+      borderColor = enabled ? const Color(0xFF2E3A4A) : const Color(0xFF1A222D);
+    }
+
+    final textColor = modifier
+        ? (active ? Colors.white : const Color(0xFF9AA6B2))
+        : (enabled ? Colors.white : const Color(0xFF6D7785));
+
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
-          color: enabled ? const Color(0xFF1B2430) : const Color(0xFF0E131A),
+          color: bgColor,
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: enabled ? const Color(0xFF2E3A4A) : const Color(0xFF1A222D),
-          ),
-          boxShadow: enabled
+          border: Border.all(color: borderColor),
+          boxShadow: (enabled || modifier)
               ? [
                   BoxShadow(
                     color: Colors.black.withOpacity(0.2),
@@ -1618,15 +1703,11 @@ class _ActionButton extends StatelessWidget {
               : null,
         ),
         child: icon != null
-            ? Icon(
-                icon,
-                size: 16,
-                color: enabled ? Colors.white : const Color(0xFF6D7785),
-              )
+            ? Icon(icon, size: 16, color: textColor)
             : Text(
                 label ?? '',
                 style: TextStyle(
-                  color: enabled ? Colors.white : const Color(0xFF6D7785),
+                  color: textColor,
                   fontSize: 11,
                   fontWeight: FontWeight.bold,
                   letterSpacing: 0.5,
@@ -1637,48 +1718,3 @@ class _ActionButton extends StatelessWidget {
   }
 }
 
-class _ModifierButton extends StatelessWidget {
-  const _ModifierButton({
-    required this.label,
-    required this.active,
-    required this.onTap,
-  });
-
-  final String label;
-  final bool active;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: active ? const Color(0xFF284058) : const Color(0xFF141B24),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: active ? const Color(0xFF4B7AA6) : const Color(0xFF223042),
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.2),
-              blurRadius: 4,
-              offset: const Offset(0, 2),
-            )
-          ],
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            color: active ? Colors.white : const Color(0xFF9AA6B2),
-            fontSize: 11,
-            fontWeight: FontWeight.bold,
-            letterSpacing: 0.5,
-          ),
-        ),
-      ),
-    );
-  }
-}
