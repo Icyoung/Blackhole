@@ -1,0 +1,35 @@
+version: "3.8"
+
+services:
+  wormhole:
+    build: .
+    container_name: wormhole
+    restart: unless-stopped
+    environment:
+      - WORMHOLE_TOKEN=${WORMHOLE_TOKEN}
+      - PORT=3000
+      - RUST_LOG=info
+    networks:
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.wormhole.rule=Host(`wormhole.example.com`)"
+      - "traefik.http.routers.wormhole.entrypoints=websecure"
+      - "traefik.http.routers.wormhole.tls=true"
+      - "traefik.http.routers.wormhole.tls.certresolver=letsencrypt"
+      - "traefik.http.services.wormhole.loadbalancer.server.port=3000"
+      # WebSocket support
+      - "traefik.http.middlewares.wormhole-headers.headers.customrequestheaders.Connection=Upgrade"
+      - "traefik.http.middlewares.wormhole-headers.headers.customrequestheaders.Upgrade=websocket"
+      - "traefik.http.routers.wormhole.middlewares=wormhole-headers"
+
+networks:
+  traefik:
+    external: true
+
+# Usage:
+# 1. Copy this file to docker-compose.yaml
+# 2. Create .env file with WORMHOLE_TOKEN=your-secret-token
+# 3. Update "wormhole.example.com" to your domain
+# 4. Update network name if different
+# 5. Run: docker-compose up -d

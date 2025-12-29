@@ -1,1 +1,9 @@
 docs/architecture.md
+
+# Environment files
+.env
+*.env.local
+
+# Docker
+docker-compose.yaml
+!docker-compose.yaml.example
