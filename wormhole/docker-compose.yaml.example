@@ -4,10 +4,10 @@ services:
     container_name: wormhole
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "6666:6666"
     environment:
       - WORMHOLE_TOKEN=${WORMHOLE_TOKEN}
-      - PORT=8080
+      - PORT=6666
       - RUST_LOG=info
     networks:
       - traefik
@@ -17,7 +17,7 @@ services:
       - "traefik.http.routers.wormhole.entrypoints=websecure"
       - "traefik.http.routers.wormhole.tls=true"
       - "traefik.http.routers.wormhole.tls.certresolver=letsencrypt"
-      - "traefik.http.services.wormhole.loadbalancer.server.port=8080"
+      - "traefik.http.services.wormhole.loadbalancer.server.port=6666"
       # WebSocket support
       - "traefik.http.middlewares.wormhole-headers.headers.customrequestheaders.Connection=Upgrade"
       - "traefik.http.middlewares.wormhole-headers.headers.customrequestheaders.Upgrade=websocket"

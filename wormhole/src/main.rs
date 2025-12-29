@@ -106,7 +106,11 @@ async fn main() {
         .route("/ws", get(ws_handler))
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(6666);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!("wormhole listening on {addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();

@@ -28,7 +28,7 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/wormhole /app/wormhole
 
-EXPOSE 8080
+EXPOSE 6666
 
 ENV RUST_LOG=info
 
