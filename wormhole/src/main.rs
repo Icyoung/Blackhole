@@ -294,6 +294,10 @@ async fn route_message(
     msg: Message,
     origin: Option<mpsc::UnboundedSender<Message>>,
 ) {
+    if role == Role::Voyager {
+        log_delete_probe(&msg, session_id);
+        log_resize_probe(&msg, session_id);
+    }
     let mut sessions = state.sessions.lock().await;
     let Some(session) = sessions.get_mut(session_id) else {
         return;
@@ -317,6 +321,68 @@ async fn route_message(
             }
         }
     }
+}
+
+fn log_delete_probe(msg: &Message, session_id: &str) {
+    match msg {
+        Message::Binary(data) => {
+            if let Some(bytes) = extract_stdin_payload(data) {
+                if bytes.iter().any(|b| *b == 0x08 || *b == 0x7f) {
+                    let hex = bytes
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    info!(session_id = %session_id, bytes = %hex, "wormhole stdin delete bytes (binary)");
+                }
+            }
+        }
+        Message::Text(text) => {
+            if text.contains('\u{8}') || text.contains('\u{7f}') {
+                info!(session_id = %session_id, "wormhole stdin delete bytes (text)");
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_stdin_payload(data: &[u8]) -> Option<&[u8]> {
+    if data.len() < 4 {
+        return None;
+    }
+    if data[0] != 1 {
+        return None;
+    }
+    if data[1] != 1 {
+        return None;
+    }
+    let session_len = ((data[2] as usize) << 8) | data[3] as usize;
+    let header_len = 4 + session_len;
+    if data.len() < header_len {
+        return None;
+    }
+    Some(&data[header_len..])
+}
+
+fn log_resize_probe(msg: &Message, session_id: &str) {
+    let Message::Binary(data) = msg else {
+        return;
+    };
+    if data.len() < 4 {
+        return;
+    }
+    if data[0] != 1 || data[1] != 3 {
+        return;
+    }
+    let session_len = ((data[2] as usize) << 8) | data[3] as usize;
+    let header_len = 4 + session_len;
+    if data.len() < header_len + 4 {
+        return;
+    }
+    let payload = &data[header_len..header_len + 4];
+    let rows = ((payload[0] as u16) << 8) | payload[1] as u16;
+    let cols = ((payload[2] as u16) << 8) | payload[3] as u16;
+    info!(session_id = %session_id, rows = rows, cols = cols, "wormhole resize");
 }
 
 async fn cleanup_connection(

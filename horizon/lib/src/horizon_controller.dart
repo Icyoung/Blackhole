@@ -67,6 +67,8 @@ class HorizonController extends ChangeNotifier {
   String? _accessMessage;
   List<String> _addresses = const [];
   StreamSubscription<TerminalOutput>? _outputSub;
+  DateTime? _stdoutProbeUntil;
+  bool _stdoutProbeArmed = false;
 
   bool get running => _running;
   String? get error => _error;
@@ -270,9 +272,13 @@ class HorizonController extends ChangeNotifier {
       final data = decoded?['data'];
       final raw = decoded?['raw'];
       if (data is String) {
+        _logDeleteProbe('Horizon/LAN data', data.codeUnits);
+        _armStdoutProbe(data.codeUnits);
         final bytes = Uint8List.fromList(utf8.encode(data));
         await _terminal.writeStdin(sessionId, bytes);
       } else if (raw is Uint8List) {
+        _logDeleteProbe('Horizon/LAN raw', raw);
+        _armStdoutProbe(raw);
         await _terminal.writeStdin(sessionId, raw);
       }
     } else if (type == 'resize') {
@@ -288,6 +294,8 @@ class HorizonController extends ChangeNotifier {
     if (!_sessions.contains(output.sessionId)) {
       return;
     }
+    _logDeleteProbe('Horizon/stdout', output.data);
+    _logStdoutProbe(output.data);
     final message = _buildStdoutMessage(output.sessionId, output.data);
     _wsServer.broadcast(message);
     _sendToWormhole(message);
@@ -305,11 +313,6 @@ class HorizonController extends ChangeNotifier {
 
   Future<String?> _createSession() async {
     final sessionId = await _terminal.startShell(rows: 24, cols: 80);
-    const bootstrap = "export PROMPT='%n@%m %~ %# '\n";
-    await _terminal.writeStdin(
-      sessionId,
-      Uint8List.fromList(utf8.encode(bootstrap)),
-    );
     _sessions.add(sessionId);
     return sessionId;
   }
@@ -454,9 +457,13 @@ class HorizonController extends ChangeNotifier {
       final raw = decoded?['raw'];
       if (sessionId is String && _sessions.contains(sessionId)) {
         if (data is String) {
+          _logDeleteProbe('Horizon/Wormhole data', data.codeUnits);
+          _armStdoutProbe(data.codeUnits);
           final bytes = Uint8List.fromList(utf8.encode(data));
           _terminal.writeStdin(sessionId, bytes);
         } else if (raw is Uint8List) {
+          _logDeleteProbe('Horizon/Wormhole raw', raw);
+          _armStdoutProbe(raw);
           _terminal.writeStdin(sessionId, raw);
         }
       }
@@ -470,6 +477,9 @@ class HorizonController extends ChangeNotifier {
           rows is int &&
           cols is int &&
           _sessions.contains(sessionId)) {
+        debugPrint(
+          '[Horizon/Wormhole] resize session=$sessionId rows=$rows cols=$cols',
+        );
         _terminal.resize(sessionId, rows, cols);
       }
       return;
@@ -644,6 +654,39 @@ class HorizonController extends ChangeNotifier {
       socket,
       _encodeMessage({'type': 'error', 'code': code, 'message': message}),
     );
+  }
+
+  void _logDeleteProbe(String label, List<int> bytes) {
+    final hasBackspace = bytes.contains(0x08) || bytes.contains(0x7f);
+    if (!hasBackspace) {
+      return;
+    }
+    final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+    debugPrint('[$label] stdin delete bytes: $hex');
+  }
+
+  void _armStdoutProbe(List<int> bytes) {
+    final hasBackspace = bytes.contains(0x08) || bytes.contains(0x7f);
+    if (!hasBackspace) {
+      return;
+    }
+    _stdoutProbeUntil = DateTime.now().add(const Duration(milliseconds: 400));
+    _stdoutProbeArmed = true;
+  }
+
+  void _logStdoutProbe(Uint8List bytes) {
+    if (!_stdoutProbeArmed) {
+      return;
+    }
+    final until = _stdoutProbeUntil;
+    if (until == null || DateTime.now().isAfter(until)) {
+      _stdoutProbeArmed = false;
+      return;
+    }
+    final sample = bytes.length > 64 ? bytes.sublist(0, 64) : bytes;
+    final hex = sample.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+    debugPrint('[Horizon] stdout after delete bytes: $hex');
+    _stdoutProbeArmed = false;
   }
 
   void _scheduleWormholeReconnect() {

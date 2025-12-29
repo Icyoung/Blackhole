@@ -73,7 +73,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
     with WidgetsBindingObserver {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final GlobalKey _quickBarKey = GlobalKey();
-  final ScrollController _terminalScrollController = ScrollController();
+  final Map<String, ScrollController> _scrollControllers = {};
+  final ScrollController _idleScrollController = ScrollController();
   final TextEditingController _urlController = TextEditingController(
     text: 'ws://127.0.0.1:9527',
   );
@@ -84,7 +85,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
   final TextEditingController _tokenController = TextEditingController();
   final Map<String, Terminal> _terminals = {};
   final Map<String, TerminalController> _controllers = {};
-  final GlobalKey<TerminalViewState> _terminalViewKey =
+  final Map<String, GlobalKey<TerminalViewState>> _terminalViewKeys = {};
+  final GlobalKey<TerminalViewState> _idleTerminalViewKey =
       GlobalKey<TerminalViewState>();
   final Terminal _idleTerminal = Terminal(maxLines: 2000);
   final TerminalController _idleController = TerminalController();
@@ -104,7 +106,10 @@ class _VoyagerHomeState extends State<VoyagerHome>
   bool _hhkbFn = false;
   bool _hhkbShift = false;
   bool _shouldReconnect = false;
+  bool _multiWindow = false;
   int _reconnectDelaySeconds = 2;
+  DateTime? _stdoutProbeUntil;
+  bool _stdoutProbeArmed = false;
 
   String? _lastResizeSessionId;
   int _lastResizeCols = 0;
@@ -146,7 +151,10 @@ class _VoyagerHomeState extends State<VoyagerHome>
     _reconnectTimer?.cancel();
     _heartbeatTimer?.cancel();
     _metricsDebounce?.cancel();
-    _terminalScrollController.dispose();
+    _idleScrollController.dispose();
+    for (final controller in _scrollControllers.values) {
+      controller.dispose();
+    }
     super.dispose();
   }
 
@@ -209,7 +217,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
       _reconnectDelaySeconds = 2;
       _sendListSessions();
       _startHeartbeat();
-      _terminalViewKey.currentState?.requestKeyboard();
+      _activeViewKey?.currentState?.requestKeyboard();
     } catch (error) {
       setState(() {
         _error = 'Failed to connect: $error';
@@ -254,6 +262,11 @@ class _VoyagerHomeState extends State<VoyagerHome>
     _activeSessionId = null;
     _terminals.clear();
     _controllers.clear();
+    for (final controller in _scrollControllers.values) {
+      controller.dispose();
+    }
+    _scrollControllers.clear();
+    _terminalViewKeys.clear();
     _stopHeartbeat();
   }
 
@@ -307,7 +320,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
         if (!_sessions.contains(sessionId)) {
           _sessions.add(sessionId);
         }
-        _activeSessionId ??= sessionId;
+        _activeSessionId = sessionId;
         _terminalFor(sessionId);
         setState(() {});
         _scheduleActiveResize();
@@ -320,6 +333,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
         _sessions.remove(sessionId);
         _terminals.remove(sessionId);
         _controllers.remove(sessionId);
+        _terminalViewKeys.remove(sessionId);
+        _scrollControllers.remove(sessionId)?.dispose();
         if (_activeSessionId == sessionId) {
           _activeSessionId = _sessions.isNotEmpty ? _sessions.first : null;
         }
@@ -333,8 +348,12 @@ class _VoyagerHomeState extends State<VoyagerHome>
       final sessionId = decoded?['sessionId'];
       if (sessionId is String) {
         if (data is String) {
+          _logDeleteProbe(data);
+          _logStdoutProbe(utf8.encode(data));
           _terminalFor(sessionId).write(data);
         } else if (raw is Uint8List) {
+          _logDeleteProbe(utf8.decode(raw, allowMalformed: true));
+          _logStdoutProbe(raw);
           final text = utf8.decode(raw, allowMalformed: true);
           _terminalFor(sessionId).write(text);
         }
@@ -433,6 +452,9 @@ class _VoyagerHomeState extends State<VoyagerHome>
   }
 
   void _forceResizeActiveTerminal() {
+    if (_multiWindow) {
+      return;
+    }
     final sessionId = _activeSessionId;
     if (sessionId == null) {
       return;
@@ -450,7 +472,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
     if (terminal.buffer.height < terminal.viewHeight) {
       return;
     }
-    final viewState = _terminalViewKey.currentState;
+    final viewState = _activeViewKey?.currentState;
     if (viewState == null) {
       return;
     }
@@ -498,6 +520,25 @@ class _VoyagerHomeState extends State<VoyagerHome>
     return _controllers.putIfAbsent(sessionId, () => TerminalController());
   }
 
+  ScrollController _scrollControllerFor(String sessionId) {
+    return _scrollControllers.putIfAbsent(sessionId, () => ScrollController());
+  }
+
+  GlobalKey<TerminalViewState> _viewKeyFor(String sessionId) {
+    return _terminalViewKeys.putIfAbsent(
+      sessionId,
+      () => GlobalKey<TerminalViewState>(),
+    );
+  }
+
+  GlobalKey<TerminalViewState>? get _activeViewKey {
+    final sessionId = _activeSessionId;
+    if (sessionId == null) {
+      return null;
+    }
+    return _viewKeyFor(sessionId);
+  }
+
   Terminal? get _activeTerminal {
     final sessionId = _activeSessionId;
     if (sessionId == null) {
@@ -512,6 +553,35 @@ class _VoyagerHomeState extends State<VoyagerHome>
       return null;
     }
     return _controllerFor(sessionId);
+  }
+
+  ScrollController? get _activeScrollController {
+    final sessionId = _activeSessionId;
+    if (sessionId == null) {
+      return null;
+    }
+    return _scrollControllerFor(sessionId);
+  }
+
+  void _setActiveSession(String sessionId, {bool requestKeyboard = false}) {
+    if (_activeSessionId == sessionId) {
+      if (requestKeyboard) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _viewKeyFor(sessionId).currentState?.requestKeyboard();
+        });
+      }
+      return;
+    }
+    setState(() {
+      _activeSessionId = sessionId;
+      _terminalFor(sessionId);
+    });
+    _scheduleActiveResize();
+    if (requestKeyboard) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _viewKeyFor(sessionId).currentState?.requestKeyboard();
+      });
+    }
   }
 
   void _handleTerminalInput(String sessionId, String data) {
@@ -564,7 +634,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
     int pixelHeight,
   ) {
     final channel = _channel;
-    if (channel == null || _activeSessionId != sessionId) {
+    if (channel == null || (!_multiWindow && _activeSessionId != sessionId)) {
       return;
     }
     final payload = _encodeBinaryMessage(
@@ -577,6 +647,9 @@ class _VoyagerHomeState extends State<VoyagerHome>
         cols & 0xFF,
       ]),
     );
+    debugPrint(
+      '[Voyager] resize session=$sessionId rows=$rows cols=$cols',
+    );
     channel.sink.add(payload);
   }
 
@@ -585,12 +658,41 @@ class _VoyagerHomeState extends State<VoyagerHome>
     if (channel == null || _activeSessionId == null) {
       return;
     }
+    _logDeleteProbe(data);
     final payload = _encodeBinaryMessage(
       _BinaryType.stdin,
       _activeSessionId!,
       data: Uint8List.fromList(utf8.encode(data)),
     );
     channel.sink.add(payload);
+  }
+
+  void _logDeleteProbe(String data) {
+    final runes = data.runes.toList();
+    final hasBackspace = runes.contains(0x08) || runes.contains(0x7f);
+    if (!hasBackspace) {
+      return;
+    }
+    final bytes = utf8.encode(data);
+    final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+    debugPrint('[Voyager] stdin delete bytes: $hex');
+    _stdoutProbeUntil = DateTime.now().add(const Duration(milliseconds: 400));
+    _stdoutProbeArmed = true;
+  }
+
+  void _logStdoutProbe(List<int> bytes) {
+    if (!_stdoutProbeArmed) {
+      return;
+    }
+    final until = _stdoutProbeUntil;
+    if (until == null || DateTime.now().isAfter(until)) {
+      _stdoutProbeArmed = false;
+      return;
+    }
+    final sample = bytes.length > 64 ? bytes.sublist(0, 64) : bytes;
+    final hex = sample.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+    debugPrint('[Voyager] stdout after delete bytes: $hex');
+    _stdoutProbeArmed = false;
   }
 
   void _sendListSessions() {
@@ -746,21 +848,27 @@ class _VoyagerHomeState extends State<VoyagerHome>
   }
 
   void _scrollToBottom() {
-    if (!_terminalScrollController.hasClients) {
+    final controller = _activeScrollController ?? _idleScrollController;
+    if (!controller.hasClients) {
       return;
     }
-    _terminalScrollController.jumpTo(
-      _terminalScrollController.position.maxScrollExtent,
+    controller.jumpTo(
+      controller.position.maxScrollExtent,
     );
   }
 
   @override
   Widget build(BuildContext context) {
     const barColor = Color(0xFF111620);
-    const activeColor = Color(0xFF1A2A3A);
-    const overlayColor = Color(0x66000000);
+    const activeColor = Color(0xFF1E2D3D); // Slightly lighter for contrast
+    const overlayColor = Colors.transparent; // No longer need overlay with solid background
     final terminal = _activeTerminal ?? _idleTerminal;
     final controller = _activeController ?? _idleController;
+    final scrollController = _activeScrollController ?? _idleScrollController;
+    final topInset = MediaQuery.of(context).padding.top;
+    // connectionContent: 32 + 16(padding) = 48, tab栏: 36, 合计 82
+    final terminalTopInset =
+        _chromeHidden ? (_sessions.length <= 1 ? 0 : 36) : 48 + 36;
     
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -778,24 +886,105 @@ class _VoyagerHomeState extends State<VoyagerHome>
             child: Container(color: Colors.black),
           ),
           Positioned.fill(
-            top: _chromeHidden ? (_sessions.length <= 1 ? 0 : 36) : MediaQuery.of(context).padding.top + 82,
-            child: TerminalView(
-              terminal,
-              key: _terminalViewKey,
-              controller: controller,
-              scrollController: _terminalScrollController,
-              autoResize: false,
-              autofocus: true,
-              deleteDetection: true,
-              readOnly: _showHHKB,
-              keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
-              backgroundOpacity: 1.0,
-              padding: EdgeInsets.fromLTRB(8, 4, 8, _bottomBarHeight + 8),
-              textStyle: const TerminalStyle(
-                fontFamily: 'Menlo',
-                fontSize: 14,
-              ),
-            ),
+            top: terminalTopInset.toDouble(),
+            child: _multiWindow
+                ? LayoutBuilder(
+                    builder: (context, constraints) {
+                      final width = constraints.maxWidth;
+                      var columns = 1;
+                      if (width >= 2500) {
+                        columns = 5;
+                      } else if (width >= 2000) {
+                        columns = 4;
+                      } else if (width >= 1500) {
+                        columns = 3;
+                      } else if (width >= 1000) {
+                        columns = 2;
+                      }
+                      final sessions = _sessions.isNotEmpty
+                          ? _sessions
+                          : (_activeSessionId != null
+                              ? [_activeSessionId!]
+                              : <String>[]);
+                      final displaySessions = sessions.isEmpty
+                          ? <String>[]
+                          : sessions;
+                      final aspectRatio = columns == 1 
+                          ? 1.4 
+                          : (columns == 2 ? 1.5 : (columns == 3 ? 1.6 : (columns == 4 ? 1.7 : 1.8)));
+                      final padding = EdgeInsets.fromLTRB(16, 12, 16, _bottomBarHeight + 20);
+
+                      if (displaySessions.isEmpty) {
+                        return Padding(
+                          padding: padding,
+                          child: TerminalView(
+                            _idleTerminal,
+                            key: _idleTerminalViewKey,
+                            controller: _idleController,
+                            scrollController: _idleScrollController,
+                            autoResize: true,
+                            autofocus: true,
+                            deleteDetection: true,
+                            readOnly: _showHHKB,
+                            keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
+                            backgroundOpacity: 1.0,
+                            padding: const EdgeInsets.all(8),
+                            textStyle: const TerminalStyle(
+                              fontFamily: 'Menlo',
+                              fontSize: 14,
+                            ),
+                          ),
+                        );
+                      }
+
+                      return GridView.builder(
+                        padding: padding,
+                        physics: const BouncingScrollPhysics(),
+                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: columns,
+                          crossAxisSpacing: 12,
+                          mainAxisSpacing: 12,
+                          childAspectRatio: aspectRatio,
+                        ),
+                        itemCount: displaySessions.length + 1,
+                        itemBuilder: (context, index) {
+                          if (index == displaySessions.length) {
+                            return _AddTerminalCard(onTap: _sendCreateSession);
+                          }
+                          final sessionId = displaySessions[index];
+                          return _TerminalWindowCard(
+                            sessionId: sessionId,
+                            terminal: _terminalFor(sessionId),
+                            controller: _controllerFor(sessionId),
+                            scrollController: _scrollControllerFor(sessionId),
+                            viewKey: _viewKeyFor(sessionId),
+                            label: 'TERM ${index + 1}',
+                            isActive: sessionId == _activeSessionId,
+                            showHHKB: _showHHKB,
+                            onTap: () => _setActiveSession(sessionId, requestKeyboard: true),
+                            onClose: () => _sendCloseSession(sessionId),
+                          );
+                        },
+                      );
+                    },
+                  )
+                : TerminalView(
+                    terminal,
+                    key: _activeViewKey ?? _idleTerminalViewKey,
+                    controller: controller,
+                    scrollController: scrollController,
+                    autoResize: false,
+                    autofocus: true,
+                    deleteDetection: true,
+                    readOnly: _showHHKB,
+                    keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
+                    backgroundOpacity: 1.0,
+                    padding: EdgeInsets.fromLTRB(8, 4, 8, _bottomBarHeight + 8),
+                    textStyle: const TerminalStyle(
+                      fontFamily: 'Menlo',
+                      fontSize: 14,
+                    ),
+                  ),
           ),
           if (!_chromeHidden)
             Positioned(
@@ -834,13 +1023,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
               onAddSession: _sendCreateSession,
               sessions: _sessions,
               activeSessionId: _activeSessionId,
-              onSelectSession: (id) {
-                setState(() {
-                  _activeSessionId = id;
-                  _terminalFor(id);
-                });
-                _scheduleActiveResize();
-              },
+              onSelectSession: (id) => _setActiveSession(id, requestKeyboard: true),
               onCloseSession: _sendCloseSession,
               connectionContent: _buildConnectionContent(context),
             ),
@@ -914,21 +1097,24 @@ class _VoyagerHomeState extends State<VoyagerHome>
         ? _wormholeController.text.trim()
         : _urlController.text.trim();
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-      child: Row(
-        children: [
-          _StatusDot(connected: _connected, size: 8),
-          const SizedBox(width: 14),
-          Expanded(
+      padding: const EdgeInsets.only(left: 16, top: 8, bottom: 8),
+      child: SizedBox(
+        height: 32, // 固定高度，避免 Switch/IconButton 在不同平台撑高 Row
+        child: Row(
+          children: [
+            _StatusDot(connected: _connected, size: 8),
+            const SizedBox(width: 14),
+            Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  _useWormhole ? 'WORMHOLE REMOTE' : 'LAN CONNECTION',
+                  _multiWindow ? 'GRID OVERVIEW' : (_useWormhole ? 'WORMHOLE REMOTE' : 'LAN CONNECTION'),
                   style: const TextStyle(
                     color: Color(0xFF4B7AA6),
                     fontSize: 10,
+                    height: 1.2,
                     fontWeight: FontWeight.bold,
                     letterSpacing: 0.8,
                   ),
@@ -941,6 +1127,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 14,
+                    height: 1.2,
                     fontWeight: FontWeight.w500,
                   ),
                 ),
@@ -968,7 +1155,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
             onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
             tooltip: 'Settings',
           ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -1026,6 +1214,16 @@ class _VoyagerHomeState extends State<VoyagerHome>
                   _reconnectTimer = null;
                 }
               }),
+            ),
+            _buildDrawerSwitch(
+              'Multi-Window Mode',
+              _multiWindow,
+              (v) {
+                setState(() => _multiWindow = v);
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  _scheduleActiveResize();
+                });
+              },
             ),
             const SizedBox(height: 24),
             _buildDrawerSection('Input'),
@@ -1363,9 +1561,13 @@ class _HeaderChrome extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         if (!hidden)
-          _FrostedBar(
-            color: color,
-            overlayColor: overlayColor,
+          Container(
+            decoration: BoxDecoration(
+              color: color,
+              border: Border(
+                bottom: BorderSide(color: Colors.white.withOpacity(0.05)),
+              ),
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -1373,7 +1575,7 @@ class _HeaderChrome extends StatelessWidget {
                 connectionContent,
                 if (error != null)
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                       decoration: BoxDecoration(
@@ -1399,8 +1601,8 @@ class _HeaderChrome extends StatelessWidget {
             ),
           ),
         Container(
-          color: showTabs ? color.withOpacity(0.8) : Colors.transparent,
-          padding: EdgeInsets.only(top: hidden ? topInset : 0),
+          color: showTabs ? color : Colors.transparent,
+          padding: EdgeInsets.only(top: hidden ? topInset : 0, bottom: 2),
           child: Row(
             children: [
               if (showTabs)
@@ -1519,7 +1721,7 @@ class _ChromeTabPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final textColor = active ? Colors.white : Colors.white60;
+    final textColor = active ? Colors.white : Colors.white38;
     
     return Padding(
       padding: const EdgeInsets.only(right: 2),
@@ -1532,6 +1734,11 @@ class _ChromeTabPill extends StatelessWidget {
           width: width,
           height: 36,
           padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: active ? BoxDecoration(
+            border: Border(
+              top: BorderSide(color: Colors.white.withOpacity(0.1), width: 1),
+            ),
+          ) : null,
           child: Row(
             children: [
               Expanded(
@@ -1589,16 +1796,11 @@ class _ChromeTabShell extends StatelessWidget {
       behavior: HitTestBehavior.translucent,
       child: ClipPath(
         clipper: inverted ? _TabClipperInverted() : _TabClipper(),
-        child: ClipRect(
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
-            child: DecoratedBox(
-              decoration: BoxDecoration(color: color),
-              child: DecoratedBox(
-                decoration: BoxDecoration(color: overlayColor),
-                child: child,
-              ),
-            ),
+        child: DecoratedBox(
+          decoration: BoxDecoration(color: color),
+          child: DecoratedBox(
+            decoration: BoxDecoration(color: overlayColor),
+            child: child,
           ),
         ),
       ),
@@ -1674,37 +1876,6 @@ class _TabClipperInverted extends CustomClipper<Path> {
 
   @override
   bool shouldReclip(covariant _TabClipperInverted oldClipper) => false;
-}
-
-class _FrostedBar extends StatelessWidget {
-  const _FrostedBar({
-    required this.color,
-    required this.overlayColor,
-    required this.child,
-  });
-
-  final Color color;
-  final Color overlayColor;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    return ClipRect(
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-        child: Container(
-          decoration: BoxDecoration(
-            color: color.withOpacity(0.7),
-            border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.05))),
-          ),
-          child: DecoratedBox(
-            decoration: BoxDecoration(color: overlayColor),
-            child: child,
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 class _ActionButton extends StatelessWidget {
@@ -2020,6 +2191,192 @@ class _HHKBKeyboard extends StatelessWidget {
   }
 }
 
+class _AddTerminalCard extends StatelessWidget {
+  const _AddTerminalCard({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.02),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: Colors.white.withOpacity(0.05),
+            width: 1.0,
+          ),
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.03),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.add_rounded,
+                size: 24,
+                color: Colors.white.withOpacity(0.2),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'NEW SESSION',
+              style: TextStyle(
+                color: Colors.white.withOpacity(0.2),
+                fontSize: 9,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TerminalWindowCard extends StatelessWidget {
+  const _TerminalWindowCard({
+    required this.sessionId,
+    required this.terminal,
+    required this.controller,
+    required this.scrollController,
+    required this.viewKey,
+    required this.label,
+    required this.isActive,
+    required this.showHHKB,
+    this.onTap,
+    this.onClose,
+  });
+
+  final String sessionId;
+  final Terminal terminal;
+  final TerminalController controller;
+  final ScrollController scrollController;
+  final GlobalKey<TerminalViewState> viewKey;
+  final String label;
+  final bool isActive;
+  final bool showHHKB;
+  final VoidCallback? onTap;
+  final VoidCallback? onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) => onTap?.call(),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeInOut,
+        decoration: BoxDecoration(
+          color: const Color(0xFF0A0E14),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: isActive
+                ? const Color(0xFF4B7AA6).withOpacity(0.6)
+                : Colors.white.withOpacity(0.05),
+            width: isActive ? 1.5 : 1.0,
+          ),
+          boxShadow: [
+            if (isActive)
+              BoxShadow(
+                color: const Color(0xFF4B7AA6).withOpacity(0.1),
+                blurRadius: 10,
+                spreadRadius: 0,
+              ),
+          ],
+        ),
+        child: Column(
+          children: [
+            // Optimized Window Header
+            Container(
+              height: 28,
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              decoration: BoxDecoration(
+                color: isActive
+                    ? const Color(0xFF1A2A3A).withOpacity(0.4)
+                    : const Color(0xFF111620).withOpacity(0.2),
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(9),
+                  topRight: Radius.circular(9),
+                ),
+              ),
+              child: Row(
+                children: [
+                  _StatusDot(connected: isActive, size: 6),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      label,
+                      style: TextStyle(
+                        color: isActive ? Colors.white : Colors.white38,
+                        fontSize: 9,
+                        fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ),
+                  if (isActive)
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.keyboard_arrow_right,
+                          size: 12,
+                          color: Color(0xFF4B7AA6),
+                        ),
+                        const SizedBox(width: 8),
+                        GestureDetector(
+                          onTap: onClose,
+                          child: Icon(
+                            Icons.close_rounded,
+                            size: 14,
+                            color: Colors.white.withOpacity(0.3),
+                          ),
+                        ),
+                      ],
+                    ),
+                ],
+              ),
+            ),
+            // Terminal Body
+            Expanded(
+              child: ClipRRect(
+                borderRadius: const BorderRadius.only(
+                  bottomLeft: Radius.circular(9),
+                  bottomRight: Radius.circular(9),
+                ),
+                child: TerminalView(
+                  terminal,
+                  key: viewKey,
+                  controller: controller,
+                  scrollController: scrollController,
+                  autoResize: true,
+                  autofocus: isActive,
+                  deleteDetection: true,
+                  readOnly: !isActive || showHHKB,
+                  keyboardType: showHHKB ? TextInputType.none : TextInputType.text,
+                  backgroundOpacity: 1.0,
+                  padding: const EdgeInsets.all(8),
+                  textStyle: const TerminalStyle(
+                    fontFamily: 'Menlo',
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _HHKBKey extends StatefulWidget {
   const _HHKBKey({
     required this.label,
@@ -2145,20 +2502,27 @@ class _HHKBKeyState extends State<_HHKBKey> {
         _hideBubble();
       } : null,
       onTap: widget.enabled ? widget.onTap : null,
-      child: Container(
+      child: AnimatedContainer(
         key: _keyKey,
+        duration: const Duration(milliseconds: 100),
         height: 42,
         decoration: BoxDecoration(
           color: bgColor,
-          borderRadius: BorderRadius.circular(5),
+          borderRadius: BorderRadius.circular(6),
           border: Border.all(color: borderColor, width: 0.5),
           boxShadow: _pressed
-              ? null
+              ? [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.5),
+                    blurRadius: 1,
+                    offset: const Offset(0, 0),
+                  ),
+                ]
               : [
                   BoxShadow(
-                    color: Colors.black.withOpacity(0.3),
+                    color: Colors.black.withOpacity(0.4),
                     blurRadius: 2,
-                    offset: const Offset(0, 1),
+                    offset: const Offset(0, 1.5),
                   ),
                 ],
         ),
