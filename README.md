@@ -173,7 +173,7 @@ Blackhole/
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `WORMHOLE_TOKEN` | Authentication token | (required) |
-| `PORT` | Server port | 3000 |
+| `PORT` | Server port | 6666 |
 
 ## Protocol
 
