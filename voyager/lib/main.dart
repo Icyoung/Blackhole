@@ -2389,6 +2389,25 @@ class _TerminalWindowCardState extends State<_TerminalWindowCard>
   @override
   bool get wantKeepAlive => true;
 
+  double? _savedScrollOffset;
+
+  @override
+  void didUpdateWidget(_TerminalWindowCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // When becoming inactive, save and restore scroll position after rebuild
+    if (oldWidget.isActive && !widget.isActive) {
+      if (widget.scrollController.hasClients) {
+        _savedScrollOffset = widget.scrollController.offset;
+        // Restore position after the frame to counteract any unwanted scroll
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (widget.scrollController.hasClients && _savedScrollOffset != null) {
+            widget.scrollController.jumpTo(_savedScrollOffset!);
+          }
+        });
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
