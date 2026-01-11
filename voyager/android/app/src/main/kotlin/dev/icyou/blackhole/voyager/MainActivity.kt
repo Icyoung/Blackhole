@@ -1,4 +1,4 @@
-package dev.icyou.voyager
+package dev.icyou.blackhole.voyager
 
 import io.flutter.embedding.android.FlutterActivity
 

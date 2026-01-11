@@ -6,6 +6,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:xterm/xterm.dart';
 
@@ -136,6 +137,35 @@ class _VoyagerHomeState extends State<VoyagerHome>
     WidgetsBinding.instance.addObserver(this);
     _urlController.addListener(_handleAddressChange);
     _wormholeController.addListener(_handleAddressChange);
+    _sessionController.addListener(_saveSettings);
+    _tokenController.addListener(_saveSettings);
+    _loadSettings();
+  }
+
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _urlController.text = prefs.getString('lanAddress') ?? 'ws://127.0.0.1:9527';
+      _wormholeController.text = prefs.getString('wormholeAddress') ?? 'ws://127.0.0.1:8080/ws';
+      _sessionController.text = prefs.getString('sessionId') ?? '';
+      _tokenController.text = prefs.getString('token') ?? '';
+      _useWormhole = prefs.getBool('useWormhole') ?? false;
+      _autoReconnect = prefs.getBool('autoReconnect') ?? true;
+      _multiWindow = prefs.getBool('multiWindow') ?? false;
+      _showHHKB = prefs.getBool('showHHKB') ?? false;
+    });
+  }
+
+  Future<void> _saveSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('lanAddress', _urlController.text);
+    await prefs.setString('wormholeAddress', _wormholeController.text);
+    await prefs.setString('sessionId', _sessionController.text);
+    await prefs.setString('token', _tokenController.text);
+    await prefs.setBool('useWormhole', _useWormhole);
+    await prefs.setBool('autoReconnect', _autoReconnect);
+    await prefs.setBool('multiWindow', _multiWindow);
+    await prefs.setBool('showHHKB', _showHHKB);
   }
 
   @override
@@ -144,6 +174,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
     WidgetsBinding.instance.removeObserver(this);
     _urlController.removeListener(_handleAddressChange);
     _wormholeController.removeListener(_handleAddressChange);
+    _sessionController.removeListener(_saveSettings);
+    _tokenController.removeListener(_saveSettings);
     _urlController.dispose();
     _wormholeController.dispose();
     _sessionController.dispose();
@@ -185,6 +217,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
       return;
     }
     setState(() {});
+    _saveSettings();
   }
 
   Future<void> _connect() async {
@@ -261,6 +294,9 @@ class _VoyagerHomeState extends State<VoyagerHome>
     _sessions.clear();
     _activeSessionId = null;
     _terminals.clear();
+    for (final controller in _controllers.values) {
+      controller.dispose();
+    }
     _controllers.clear();
     for (final controller in _scrollControllers.values) {
       controller.dispose();
@@ -332,7 +368,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
       if (sessionId is String) {
         _sessions.remove(sessionId);
         _terminals.remove(sessionId);
-        _controllers.remove(sessionId);
+        _controllers.remove(sessionId)?.dispose();
         _terminalViewKeys.remove(sessionId);
         _scrollControllers.remove(sessionId)?.dispose();
         if (_activeSessionId == sessionId) {
@@ -350,12 +386,12 @@ class _VoyagerHomeState extends State<VoyagerHome>
         if (data is String) {
           _logDeleteProbe(data);
           _logStdoutProbe(utf8.encode(data));
-          _terminalFor(sessionId).write(data);
+          _writeToTerminal(sessionId, data);
         } else if (raw is Uint8List) {
           _logDeleteProbe(utf8.decode(raw, allowMalformed: true));
           _logStdoutProbe(raw);
           final text = utf8.decode(raw, allowMalformed: true);
-          _terminalFor(sessionId).write(text);
+          _writeToTerminal(sessionId, text);
         }
         if (sessionId == _activeSessionId) {
           setState(() {});
@@ -412,15 +448,51 @@ class _VoyagerHomeState extends State<VoyagerHome>
     channel.sink.add(_encodeMessage({'type': 'ping'}));
   }
 
+  Terminal _createTerminal(String sessionId) {
+    final terminal = Terminal(maxLines: 10000);
+    terminal.onOutput = (data) => _handleTerminalInput(sessionId, data);
+    terminal.onResize = (cols, rows, pixelWidth, pixelHeight) =>
+        _handleResize(sessionId, cols, rows, pixelWidth, pixelHeight);
+    return terminal;
+  }
+
   Terminal _terminalFor(String sessionId) {
     return _terminals.putIfAbsent(sessionId, () {
-      final terminal = Terminal(maxLines: 10000);
-      terminal.onOutput = (data) => _handleTerminalInput(sessionId, data);
-      terminal.onResize = (cols, rows, pixelWidth, pixelHeight) =>
-          _handleResize(sessionId, cols, rows, pixelWidth, pixelHeight);
       _controllers.putIfAbsent(sessionId, () => TerminalController());
-      return terminal;
+      return _createTerminal(sessionId);
     });
+  }
+
+  void _resetTerminal(String sessionId) {
+    _controllers[sessionId]?.clearSelection();
+    _terminals[sessionId] = _createTerminal(sessionId);
+    _controllers.putIfAbsent(sessionId, () => TerminalController());
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
+    if (sessionId == _activeSessionId) {
+      _scheduleActiveResize();
+    }
+  }
+
+  void _writeToTerminal(String sessionId, String text) {
+    try {
+      _terminalFor(sessionId).write(text);
+    } on AssertionError catch (error, stack) {
+      debugPrint('[Voyager] terminal write failed: $error');
+      debugPrint('$stack');
+      _resetTerminal(sessionId);
+      try {
+        _terminalFor(sessionId).write(text);
+      } on AssertionError catch (error, stack) {
+        debugPrint('[Voyager] terminal write retry failed: $error');
+        debugPrint('$stack');
+      }
+    } catch (error, stack) {
+      debugPrint('[Voyager] terminal write error: $error');
+      debugPrint('$stack');
+    }
   }
 
   void _scheduleActiveResize() {
@@ -481,7 +553,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
     if (!size.isFinite || size.width <= 0 || size.height <= 0) {
       return;
     }
-    final padding = EdgeInsets.fromLTRB(4, 0, 4, _bottomBarHeight);
+    final padding = EdgeInsets.fromLTRB(8, 4, 8, _bottomBarHeight + 8);
     final viewportWidth = size.width - padding.horizontal;
     final viewportHeight = size.height - padding.vertical;
     if (viewportWidth <= 0 || viewportHeight <= 0) {
@@ -565,7 +637,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
 
   void _setActiveSession(String sessionId, {bool requestKeyboard = false}) {
     if (_activeSessionId == sessionId) {
-      if (requestKeyboard) {
+      if (requestKeyboard && !_multiWindow) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           _viewKeyFor(sessionId).currentState?.requestKeyboard();
         });
@@ -577,11 +649,21 @@ class _VoyagerHomeState extends State<VoyagerHome>
       _terminalFor(sessionId);
     });
     _scheduleActiveResize();
-    if (requestKeyboard) {
+    if (requestKeyboard && !_multiWindow) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _viewKeyFor(sessionId).currentState?.requestKeyboard();
       });
     }
+  }
+
+  void _reorderSessions(int oldIndex, int newIndex) {
+    setState(() {
+      if (newIndex > oldIndex) {
+        newIndex -= 1;
+      }
+      final session = _sessions.removeAt(oldIndex);
+      _sessions.insert(newIndex, session);
+    });
   }
 
   void _handleTerminalInput(String sessionId, String data) {
@@ -1025,6 +1107,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
               activeSessionId: _activeSessionId,
               onSelectSession: (id) => _setActiveSession(id, requestKeyboard: true),
               onCloseSession: _sendCloseSession,
+              onReorderSessions: _reorderSessions,
               connectionContent: _buildConnectionContent(context),
             ),
           ),
@@ -1202,24 +1285,31 @@ class _VoyagerHomeState extends State<VoyagerHome>
             _buildDrawerSwitch(
               'LAN Mode',
               !_useWormhole,
-              (v) => setState(() => _useWormhole = !v),
+              (v) {
+                setState(() => _useWormhole = !v);
+                _saveSettings();
+              },
             ),
             _buildDrawerSwitch(
               'Auto Reconnect',
               _autoReconnect,
-              (v) => setState(() {
-                _autoReconnect = v;
-                if (!_autoReconnect) {
-                  _reconnectTimer?.cancel();
-                  _reconnectTimer = null;
-                }
-              }),
+              (v) {
+                setState(() {
+                  _autoReconnect = v;
+                  if (!_autoReconnect) {
+                    _reconnectTimer?.cancel();
+                    _reconnectTimer = null;
+                  }
+                });
+                _saveSettings();
+              },
             ),
             _buildDrawerSwitch(
               'Multi-Window Mode',
               _multiWindow,
               (v) {
                 setState(() => _multiWindow = v);
+                _saveSettings();
                 WidgetsBinding.instance.addPostFrameCallback((_) {
                   _scheduleActiveResize();
                 });
@@ -1233,7 +1323,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
               _showHHKB,
               (v) {
                 setState(() => _showHHKB = v);
-                // Trigger resize after state update
+                _saveSettings();
                 WidgetsBinding.instance.addPostFrameCallback((_) {
                   _scheduleActiveResize();
                 });
@@ -1507,13 +1597,13 @@ class _QuickActionsBarState extends State<_QuickActionsBar> {
               const SizedBox(width: 12),
               _ActionButton(key: _snapKeys[2], icon: Icons.keyboard_return, onTap: widget.connected ? () => widget.onSend("\r") : null),
               const SizedBox(width: 6),
-              _ActionButton(label: 'LF', onTap: widget.connected ? () => widget.onSend("\n") : null),
+              _ActionButton(key: _snapKeys[4], icon: Icons.vertical_align_bottom, onTap: widget.onScrollToBottom),
               const SizedBox(width: 12),
+              _ActionButton(label: 'LF', onTap: widget.connected ? () => widget.onSend("\n") : null),
+              const SizedBox(width: 6),
               _ActionButton(key: _snapKeys[3], label: 'PASTE', onTap: widget.connected ? widget.onPaste : null),
               const SizedBox(width: 6),
               _ActionButton(label: 'COPY', onTap: widget.connected ? widget.onCopy : null),
-              const SizedBox(width: 6),
-              _ActionButton(key: _snapKeys[4], icon: Icons.vertical_align_bottom, onTap: widget.onScrollToBottom),
             ],
           ),
         ),
@@ -1534,6 +1624,7 @@ class _HeaderChrome extends StatelessWidget {
     required this.activeSessionId,
     required this.onSelectSession,
     required this.onCloseSession,
+    required this.onReorderSessions,
     required this.connectionContent,
     required this.error,
   });
@@ -1548,6 +1639,7 @@ class _HeaderChrome extends StatelessWidget {
   final String? activeSessionId;
   final void Function(String id) onSelectSession;
   final void Function(String id) onCloseSession;
+  final void Function(int oldIndex, int newIndex) onReorderSessions;
   final Widget connectionContent;
   final String? error;
 
@@ -1607,24 +1699,46 @@ class _HeaderChrome extends StatelessWidget {
             children: [
               if (showTabs)
                 Expanded(
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
+                  child: SizedBox(
+                    height: 36,
                     child: Row(
                       children: [
                         const SizedBox(width: 8),
-                        for (final entry in sessions.asMap().entries)
-                          _ChromeTabPill(
-                            label: 'TERM ${entry.key + 1}',
-                            active: entry.value == activeSessionId,
-                            onTap: () => onSelectSession(entry.value),
-                            onClose: () => onCloseSession(entry.value),
-                            color: activeColor,
-                            overlayColor: overlayColor,
-                            width: _tabWidthForCount(
-                              MediaQuery.of(context).size.width,
-                              sessions.length,
-                            ),
+                        Expanded(
+                          child: ReorderableListView.builder(
+                            scrollDirection: Axis.horizontal,
+                            buildDefaultDragHandles: false,
+                            proxyDecorator: (child, index, animation) {
+                              return Material(
+                                color: Colors.transparent,
+                                elevation: 4,
+                                shadowColor: Colors.black54,
+                                child: child,
+                              );
+                            },
+                            onReorder: onReorderSessions,
+                            itemCount: sessions.length,
+                            itemBuilder: (context, index) {
+                              final sessionId = sessions[index];
+                              return ReorderableDragStartListener(
+                                key: ValueKey(sessionId),
+                                index: index,
+                                child: _ChromeTabPill(
+                                  label: 'TERM ${index + 1}',
+                                  active: sessionId == activeSessionId,
+                                  onTap: () => onSelectSession(sessionId),
+                                  onClose: () => onCloseSession(sessionId),
+                                  color: activeColor,
+                                  overlayColor: overlayColor,
+                                  width: _tabWidthForCount(
+                                    MediaQuery.of(context).size.width,
+                                    sessions.length,
+                                  ),
+                                ),
+                              );
+                            },
                           ),
+                        ),
                         _ChromeTabButton(
                           icon: Icons.add,
                           onTap: onAddSession,
@@ -2241,7 +2355,7 @@ class _AddTerminalCard extends StatelessWidget {
   }
 }
 
-class _TerminalWindowCard extends StatelessWidget {
+class _TerminalWindowCard extends StatefulWidget {
   const _TerminalWindowCard({
     required this.sessionId,
     required this.terminal,
@@ -2267,9 +2381,19 @@ class _TerminalWindowCard extends StatelessWidget {
   final VoidCallback? onClose;
 
   @override
+  State<_TerminalWindowCard> createState() => _TerminalWindowCardState();
+}
+
+class _TerminalWindowCardState extends State<_TerminalWindowCard>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
   Widget build(BuildContext context) {
+    super.build(context);
     return GestureDetector(
-      onTapDown: (_) => onTap?.call(),
+      onTapDown: (_) => widget.onTap?.call(),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         curve: Curves.easeInOut,
@@ -2277,13 +2401,13 @@ class _TerminalWindowCard extends StatelessWidget {
           color: const Color(0xFF0A0E14),
           borderRadius: BorderRadius.circular(10),
           border: Border.all(
-            color: isActive
+            color: widget.isActive
                 ? const Color(0xFF4B7AA6).withOpacity(0.6)
                 : Colors.white.withOpacity(0.05),
-            width: isActive ? 1.5 : 1.0,
+            width: widget.isActive ? 1.5 : 1.0,
           ),
           boxShadow: [
-            if (isActive)
+            if (widget.isActive)
               BoxShadow(
                 color: const Color(0xFF4B7AA6).withOpacity(0.1),
                 blurRadius: 10,
@@ -2298,7 +2422,7 @@ class _TerminalWindowCard extends StatelessWidget {
               height: 28,
               padding: const EdgeInsets.symmetric(horizontal: 10),
               decoration: BoxDecoration(
-                color: isActive
+                color: widget.isActive
                     ? const Color(0xFF1A2A3A).withOpacity(0.4)
                     : const Color(0xFF111620).withOpacity(0.2),
                 borderRadius: const BorderRadius.only(
@@ -2308,20 +2432,20 @@ class _TerminalWindowCard extends StatelessWidget {
               ),
               child: Row(
                 children: [
-                  _StatusDot(connected: isActive, size: 6),
+                  _StatusDot(connected: widget.isActive, size: 6),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      label,
+                      widget.label,
                       style: TextStyle(
-                        color: isActive ? Colors.white : Colors.white38,
+                        color: widget.isActive ? Colors.white : Colors.white38,
                         fontSize: 9,
-                        fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                        fontWeight: widget.isActive ? FontWeight.bold : FontWeight.normal,
                         letterSpacing: 0.5,
                       ),
                     ),
                   ),
-                  if (isActive)
+                  if (widget.isActive)
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -2332,7 +2456,7 @@ class _TerminalWindowCard extends StatelessWidget {
                         ),
                         const SizedBox(width: 8),
                         GestureDetector(
-                          onTap: onClose,
+                          onTap: widget.onClose,
                           child: Icon(
                             Icons.close_rounded,
                             size: 14,
@@ -2352,15 +2476,15 @@ class _TerminalWindowCard extends StatelessWidget {
                   bottomRight: Radius.circular(9),
                 ),
                 child: TerminalView(
-                  terminal,
-                  key: viewKey,
-                  controller: controller,
-                  scrollController: scrollController,
+                  widget.terminal,
+                  key: widget.viewKey,
+                  controller: widget.controller,
+                  scrollController: widget.scrollController,
                   autoResize: true,
-                  autofocus: isActive,
+                  autofocus: false,
                   deleteDetection: true,
-                  readOnly: !isActive || showHHKB,
-                  keyboardType: showHHKB ? TextInputType.none : TextInputType.text,
+                  readOnly: widget.showHHKB,
+                  keyboardType: widget.showHHKB ? TextInputType.none : TextInputType.text,
                   backgroundOpacity: 1.0,
                   padding: const EdgeInsets.all(8),
                   textStyle: const TerminalStyle(

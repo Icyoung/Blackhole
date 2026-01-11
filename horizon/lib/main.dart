@@ -50,7 +50,7 @@ class HorizonApp extends StatelessWidget {
           brightness: Brightness.dark,
           surface: const Color(0xFF111620),
         ),
-        cardTheme: CardTheme(
+        cardTheme: CardThemeData(
           color: const Color(0xFF111620),
           elevation: 0,
           shape: RoundedRectangleBorder(
