@@ -1012,7 +1012,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
                             backgroundOpacity: 1.0,
                             padding: const EdgeInsets.all(8),
                             textStyle: const TerminalStyle(
-                              fontFamily: 'Menlo',
+                              fontFamily: 'JetBrainsMono',
                               fontSize: 14,
                             ),
                           ),
@@ -1063,7 +1063,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
                     backgroundOpacity: 1.0,
                     padding: EdgeInsets.fromLTRB(8, 4, 8, _bottomBarHeight + 8),
                     textStyle: const TerminalStyle(
-                      fontFamily: 'Menlo',
+                      fontFamily: 'JetBrainsMono',
                       fontSize: 14,
                     ),
                   ),
@@ -2117,9 +2117,14 @@ class _HHKBKeyboard extends StatelessWidget {
 
   Widget _buildRow1() {
     // Esc 1 2 3 4 5 6 7 8 9 0 - = \ `
-    final keys = fn
-        ? ['Esc', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12', 'Ins', 'Del']
-        : ['Esc', '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\\', '`'];
+    List<String> keys;
+    if (fn) {
+      keys = ['Esc', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12', 'Ins', 'Del'];
+    } else if (shift) {
+      keys = ['Esc', '!', '@', '#', '\$', '%', '^', '&', '*', '(', ')', '_', '+', '|', '~'];
+    } else {
+      keys = ['Esc', '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\\', '`'];
+    }
     return Row(
       children: keys.map((k) => _key(k, flex: 1)).toList(),
     );
@@ -2127,40 +2132,52 @@ class _HHKBKeyboard extends StatelessWidget {
 
   Widget _buildRow2() {
     // Tab Q W E R T Y U I O P [ ] BS
-    final keys = fn
-        ? ['Tab', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', 'BS']
-        : ['Tab', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '[', ']', 'BS'];
+    List<String> keys;
+    if (fn) {
+      keys = ['Tab', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', 'BS'];
+    } else if (shift) {
+      keys = ['Tab', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', 'BS'];
+    } else {
+      keys = ['Tab', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '[', ']', 'BS'];
+    }
     return Row(
       children: [
-        _key(keys[0], flex: 15, special: true),
-        ...keys.sublist(1, 13).map((k) => _key(k, flex: 10)),
-        _key(keys[13], flex: 15, special: true),
+        _key(keys[0], flex: 12, special: true),
+        ...keys.sublist(1, 13).map((k) => _key(k, flex: 11)),
+        _key(keys[13], flex: 12, special: true),
       ],
     );
   }
 
   Widget _buildRow3() {
     // Ctrl A S D F G H J K L ; ' Enter
-    final baseKeys = ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ';', "'"];
-    final fnKeys = ['A', 'S', 'D', 'F', 'G', '←', '↓', '↑', '→', ';', "'"];
-    final keys = fn ? fnKeys : baseKeys;
+    List<String> keys;
+    if (fn) {
+      keys = ['A', 'S', 'D', 'F', 'G', '←', '↓', '↑', '→', ';', "'"];
+    } else if (shift) {
+      keys = ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"'];
+    } else {
+      keys = ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ';', "'"];
+    }
     return Row(
       children: [
-        _modKey('Ctrl', ctrl, onToggleCtrl, flex: 18),
-        ...keys.map((k) => _key(k, flex: 10)),
-        _key('Enter', flex: 22, special: true),
+        _modKey('Ctrl', ctrl, onToggleCtrl, flex: 14),
+        ...keys.map((k) => _key(k, flex: 11)),
+        _key('Enter', flex: 15, special: true),
       ],
     );
   }
 
   Widget _buildRow4() {
     // Shift Z X C V B N M , . / Shift
-    final keys = ['Z', 'X', 'C', 'V', 'B', 'N', 'M', ',', '.', '/'];
+    final keys = shift
+        ? ['Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?']
+        : ['Z', 'X', 'C', 'V', 'B', 'N', 'M', ',', '.', '/'];
     return Row(
       children: [
-        _modKey('Shift', shift, onToggleShift, flex: 22),
-        ...keys.map((k) => _key(k, flex: 10)),
-        _modKey('Shift', shift, onToggleShift, flex: 18),
+        _modKey('Shift', shift, onToggleShift, flex: 16),
+        ...keys.map((k) => _key(k, flex: 11)),
+        _modKey('Shift', shift, onToggleShift, flex: 14),
       ],
     );
   }
@@ -2169,13 +2186,13 @@ class _HHKBKeyboard extends StatelessWidget {
     // Fn Meta Alt [Space] Alt Meta Fn
     return Row(
       children: [
-        _modKey('Fn', fn, onToggleFn, flex: 12),
-        _key('◇', flex: 12, special: true), // Meta/Super
-        _modKey('Alt', alt, onToggleAlt, flex: 12),
-        _key('', flex: 60, special: true, isSpace: true), // Space
-        _modKey('Alt', alt, onToggleAlt, flex: 12),
-        _key('◇', flex: 12, special: true),
-        _modKey('Fn', fn, onToggleFn, flex: 12),
+        _modKey('Fn', fn, onToggleFn, flex: 10),
+        _key('◇', flex: 10, special: true), // Meta/Super
+        _modKey('Alt', alt, onToggleAlt, flex: 10),
+        _key('', flex: 72, special: true, isSpace: true), // Space
+        _modKey('Alt', alt, onToggleAlt, flex: 10),
+        _key('◇', flex: 10, special: true),
+        _modKey('Fn', fn, onToggleFn, flex: 10),
       ],
     );
   }
@@ -2507,7 +2524,7 @@ class _TerminalWindowCardState extends State<_TerminalWindowCard>
                   backgroundOpacity: 1.0,
                   padding: const EdgeInsets.all(8),
                   textStyle: const TerminalStyle(
-                    fontFamily: 'Menlo',
+                    fontFamily: 'JetBrainsMono',
                     fontSize: 12,
                   ),
                 ),
