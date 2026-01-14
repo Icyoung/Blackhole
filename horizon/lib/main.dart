@@ -56,7 +56,7 @@ class HorizonApp extends StatelessWidget {
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
             side: BorderSide(
-              color: Colors.white.withOpacity(0.05),
+              color: Colors.white.withValues(alpha: 0.05),
               width: 1,
             ),
           ),
@@ -191,7 +191,7 @@ class _StatusDot extends StatelessWidget {
         shape: BoxShape.circle,
         boxShadow: [
           BoxShadow(
-            color: color.withOpacity(0.4),
+            color: color.withValues(alpha: 0.4),
             blurRadius: 6,
             spreadRadius: 1,
           ),
@@ -262,9 +262,9 @@ class _StatusCard extends StatelessWidget {
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: const Color(0xFFFF5C5C).withOpacity(0.1),
+                  color: const Color(0xFFFF5C5C).withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: const Color(0xFFFF5C5C).withOpacity(0.2)),
+                  border: Border.all(color: const Color(0xFFFF5C5C).withValues(alpha: 0.2)),
                 ),
                 child: Row(
                   children: [
@@ -336,7 +336,7 @@ class _SessionIdDisplay extends StatelessWidget {
       decoration: BoxDecoration(
         color: const Color(0xFF1A2A3A),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.white.withOpacity(0.1)),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
       ),
       child: Row(
         children: [
@@ -542,16 +542,16 @@ class _StyledTextField extends StatelessWidget {
         hintStyle: const TextStyle(color: Colors.white24, fontSize: 13),
         labelStyle: const TextStyle(color: Color(0xFF9AA6B2), fontSize: 13),
         filled: true,
-        fillColor: Colors.white.withOpacity(0.05),
+        fillColor: Colors.white.withValues(alpha: 0.05),
         isDense: true,
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
-          borderSide: BorderSide(color: Colors.white.withOpacity(0.1)),
+          borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
         ),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
-          borderSide: BorderSide(color: Colors.white.withOpacity(0.1)),
+          borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
@@ -589,9 +589,9 @@ class _AddressCard extends StatelessWidget {
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                   decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.2),
+                    color: Colors.black.withValues(alpha: 0.2),
                     borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: Colors.white.withOpacity(0.05)),
+                    border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
                   ),
                   child: Row(
                     children: [
@@ -626,7 +626,7 @@ class _StatusMessage extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: (isError ? const Color(0xFFFF5C5C) : const Color(0xFF9AA6B2)).withOpacity(0.05),
+        color: (isError ? const Color(0xFFFF5C5C) : const Color(0xFF9AA6B2)).withValues(alpha: 0.05),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Row(
@@ -713,10 +713,10 @@ class _DevModeCard extends StatelessWidget {
     final warningColor = const Color(0xFFFF5C5C);
 
     return Card(
-      color: warningColor.withOpacity(0.05),
+      color: warningColor.withValues(alpha: 0.05),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: warningColor.withOpacity(0.2)),
+        side: BorderSide(color: warningColor.withValues(alpha: 0.2)),
       ),
       child: Padding(
         padding: const EdgeInsets.all(20),

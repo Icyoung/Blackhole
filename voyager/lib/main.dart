@@ -1,10 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
-import 'dart:ui';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -76,6 +74,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
   final GlobalKey _quickBarKey = GlobalKey();
   final Map<String, ScrollController> _scrollControllers = {};
   final ScrollController _idleScrollController = ScrollController();
+  final Map<String, double> _scrollBottomGapCache = {};
   final TextEditingController _urlController = TextEditingController(
     text: 'ws://127.0.0.1:9527',
   );
@@ -302,6 +301,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
       controller.dispose();
     }
     _scrollControllers.clear();
+    _scrollBottomGapCache.clear();
     _terminalViewKeys.clear();
     _stopHeartbeat();
   }
@@ -347,6 +347,9 @@ class _VoyagerHomeState extends State<VoyagerHome>
         }
         setState(() {});
         _scheduleActiveResize();
+        if (_activeSessionId != null) {
+          _restoreScrollOffset(_activeSessionId!);
+        }
       }
       return;
     }
@@ -360,6 +363,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
         _terminalFor(sessionId);
         setState(() {});
         _scheduleActiveResize();
+        _restoreScrollOffset(sessionId);
       }
       return;
     }
@@ -371,6 +375,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
         _controllers.remove(sessionId)?.dispose();
         _terminalViewKeys.remove(sessionId);
         _scrollControllers.remove(sessionId)?.dispose();
+        _scrollBottomGapCache.remove(sessionId);
         if (_activeSessionId == sessionId) {
           _activeSessionId = _sessions.isNotEmpty ? _sessions.first : null;
         }
@@ -474,6 +479,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
     if (sessionId == _activeSessionId) {
       _scheduleActiveResize();
     }
+    _restoreScrollOffset(sessionId);
   }
 
   void _writeToTerminal(String sessionId, String text) {
@@ -573,6 +579,10 @@ class _VoyagerHomeState extends State<VoyagerHome>
         _lastResizeRows == rows) {
       return;
     }
+    final scrollController = _scrollControllers[sessionId];
+    if (scrollController != null) {
+      _cacheScrollOffset(sessionId, scrollController);
+    }
     try {
       terminal.resize(
         cols,
@@ -586,6 +596,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
     _lastResizeSessionId = sessionId;
     _lastResizeCols = cols;
     _lastResizeRows = rows;
+    _restoreScrollOffset(sessionId);
   }
 
   TerminalController _controllerFor(String sessionId) {
@@ -593,7 +604,43 @@ class _VoyagerHomeState extends State<VoyagerHome>
   }
 
   ScrollController _scrollControllerFor(String sessionId) {
-    return _scrollControllers.putIfAbsent(sessionId, () => ScrollController());
+    final existing = _scrollControllers[sessionId];
+    if (existing != null) {
+      return existing;
+    }
+    final controller = ScrollController();
+    controller.addListener(() => _cacheScrollOffset(sessionId, controller));
+    _scrollControllers[sessionId] = controller;
+    _restoreScrollOffset(sessionId);
+    return controller;
+  }
+
+  void _cacheScrollOffset(String sessionId, ScrollController controller) {
+    if (!controller.hasClients) {
+      return;
+    }
+    final maxScroll = controller.position.maxScrollExtent;
+    final gap = (maxScroll - controller.offset).clamp(0.0, maxScroll);
+    _scrollBottomGapCache[sessionId] = gap;
+  }
+
+  void _restoreScrollOffset(String sessionId) {
+    final controller = _scrollControllers[sessionId];
+    final gap = _scrollBottomGapCache[sessionId];
+    if (controller == null || gap == null) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !controller.hasClients) {
+        return;
+      }
+      final maxScroll = controller.position.maxScrollExtent;
+      final target = (maxScroll - gap).clamp(0.0, maxScroll);
+      if ((controller.offset - target).abs() < 0.5) {
+        return;
+      }
+      controller.jumpTo(target);
+    });
   }
 
   GlobalKey<TerminalViewState> _viewKeyFor(String sessionId) {
@@ -649,6 +696,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
       _terminalFor(sessionId);
     });
     _scheduleActiveResize();
+    _restoreScrollOffset(sessionId);
     if (requestKeyboard && !_multiWindow) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _viewKeyFor(sessionId).currentState?.requestKeyboard();
@@ -947,7 +995,6 @@ class _VoyagerHomeState extends State<VoyagerHome>
     final terminal = _activeTerminal ?? _idleTerminal;
     final controller = _activeController ?? _idleController;
     final scrollController = _activeScrollController ?? _idleScrollController;
-    final topInset = MediaQuery.of(context).padding.top;
     // connectionContent: 32 + 16(padding) = 48, tab栏: 36, 合计 82
     final terminalTopInset =
         _chromeHidden ? (_sessions.length <= 1 ? 0 : 36) : 48 + 36;
@@ -1080,7 +1127,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
                     gradient: LinearGradient(
                       begin: Alignment.topCenter,
                       end: Alignment.bottomCenter,
-                      colors: [Colors.black.withOpacity(0.4), Colors.transparent],
+                      colors: [Colors.black.withValues(alpha: 0.4), Colors.transparent],
                     ),
                   ),
                 ),
@@ -1220,7 +1267,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
           const SizedBox(width: 16),
           Switch(
             value: _connected,
-            activeColor: const Color(0xFF41C87A),
+            activeTrackColor: const Color(0xFF41C87A),
             onChanged: (value) {
               if (value) {
                 _connect();
@@ -1245,8 +1292,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
   }
 
   Widget _buildSettingsDrawer(BuildContext context) {
-    final fieldFill = Colors.white.withOpacity(0.05);
-    final fieldBorder = Colors.white.withOpacity(0.1);
+    final fieldFill = Colors.white.withValues(alpha: 0.05);
+    final fieldBorder = Colors.white.withValues(alpha: 0.1);
     final titleStyle = Theme.of(context)
         .textTheme
         .titleMedium
@@ -1350,7 +1397,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
             Text(
               'Blackhole Voyager v1.0.0',
               textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.white.withOpacity(0.2), fontSize: 11),
+              style: TextStyle(color: Colors.white.withValues(alpha: 0.2), fontSize: 11),
             ),
           ],
         ),
@@ -1383,7 +1430,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
           ),
           Switch(
             value: value,
-            activeColor: const Color(0xFF41C87A),
+            activeTrackColor: const Color(0xFF41C87A),
             onChanged: onChanged,
           ),
         ],
@@ -1434,7 +1481,7 @@ class _StatusDot extends StatelessWidget {
         shape: BoxShape.circle,
         boxShadow: [
           BoxShadow(
-            color: color.withOpacity(0.4),
+            color: color.withValues(alpha: 0.4),
             blurRadius: 6,
             spreadRadius: 1,
           ),
@@ -1562,7 +1609,7 @@ class _QuickActionsBarState extends State<_QuickActionsBar> {
     return Container(
       decoration: BoxDecoration(
         color: const Color(0xFF111620),
-        border: Border(top: BorderSide(color: Colors.white.withOpacity(0.05))),
+        border: Border(top: BorderSide(color: Colors.white.withValues(alpha: 0.05))),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       child: NotificationListener<ScrollNotification>(
@@ -1657,7 +1704,7 @@ class _HeaderChrome extends StatelessWidget {
             decoration: BoxDecoration(
               color: color,
               border: Border(
-                bottom: BorderSide(color: Colors.white.withOpacity(0.05)),
+                bottom: BorderSide(color: Colors.white.withValues(alpha: 0.05)),
               ),
             ),
             child: Column(
@@ -1671,9 +1718,9 @@ class _HeaderChrome extends StatelessWidget {
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                       decoration: BoxDecoration(
-                        color: const Color(0xFFFF5C5C).withOpacity(0.1),
+                        color: const Color(0xFFFF5C5C).withValues(alpha: 0.1),
                         borderRadius: BorderRadius.circular(6),
-                        border: Border.all(color: const Color(0xFFFF5C5C).withOpacity(0.2)),
+                        border: Border.all(color: const Color(0xFFFF5C5C).withValues(alpha: 0.2)),
                       ),
                       child: Row(
                         children: [
@@ -1850,7 +1897,7 @@ class _ChromeTabPill extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 12),
           decoration: active ? BoxDecoration(
             border: Border(
-              top: BorderSide(color: Colors.white.withOpacity(0.1), width: 1),
+              top: BorderSide(color: Colors.white.withValues(alpha: 0.1), width: 1),
             ),
           ) : null,
           child: Row(
@@ -1874,7 +1921,7 @@ class _ChromeTabPill extends StatelessWidget {
                   child: Container(
                     padding: const EdgeInsets.all(2),
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.1),
+                      color: Colors.white.withValues(alpha: 0.1),
                       shape: BoxShape.circle,
                     ),
                     child: const Icon(Icons.close, size: 10, color: Colors.white70),
@@ -1983,7 +2030,9 @@ class _TabClipperInverted extends CustomClipper<Path> {
   Path getClip(Size size) {
     final path = _TabClipper.buildPath(size);
     final matrix = Matrix4.identity()
+      // ignore: deprecated_member_use
       ..translate(0.0, size.height)
+      // ignore: deprecated_member_use
       ..scale(1.0, -1.0);
     return path.transform(matrix.storage);
   }
@@ -2039,7 +2088,7 @@ class _ActionButton extends StatelessWidget {
           boxShadow: (enabled || modifier)
               ? [
                   BoxShadow(
-                    color: Colors.black.withOpacity(0.2),
+                    color: Colors.black.withValues(alpha: 0.2),
                     blurRadius: 4,
                     offset: const Offset(0, 2),
                   )
@@ -2089,9 +2138,6 @@ class _HHKBKeyboard extends StatelessWidget {
   final VoidCallback onToggleShift;
 
   static const _bgColor = Color(0xFF1A1A1A);
-  static const _keyColor = Color(0xFF2D2D2D);
-  static const _keyBorder = Color(0xFF3D3D3D);
-  static const _modActiveColor = Color(0xFF4B7AA6);
 
   @override
   Widget build(BuildContext context) {
@@ -2333,10 +2379,10 @@ class _AddTerminalCard extends StatelessWidget {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.02),
+          color: Colors.white.withValues(alpha: 0.02),
           borderRadius: BorderRadius.circular(10),
           border: Border.all(
-            color: Colors.white.withOpacity(0.05),
+            color: Colors.white.withValues(alpha: 0.05),
             width: 1.0,
           ),
         ),
@@ -2346,20 +2392,20 @@ class _AddTerminalCard extends StatelessWidget {
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.03),
+                color: Colors.white.withValues(alpha: 0.03),
                 shape: BoxShape.circle,
               ),
               child: Icon(
                 Icons.add_rounded,
                 size: 24,
-                color: Colors.white.withOpacity(0.2),
+                color: Colors.white.withValues(alpha: 0.2),
               ),
             ),
             const SizedBox(height: 12),
             Text(
               'NEW SESSION',
               style: TextStyle(
-                color: Colors.white.withOpacity(0.2),
+                color: Colors.white.withValues(alpha: 0.2),
                 fontSize: 9,
                 fontWeight: FontWeight.bold,
                 letterSpacing: 1,
@@ -2438,14 +2484,14 @@ class _TerminalWindowCardState extends State<_TerminalWindowCard>
           borderRadius: BorderRadius.circular(10),
           border: Border.all(
             color: widget.isActive
-                ? const Color(0xFF4B7AA6).withOpacity(0.6)
-                : Colors.white.withOpacity(0.05),
+                ? const Color(0xFF4B7AA6).withValues(alpha: 0.6)
+                : Colors.white.withValues(alpha: 0.05),
             width: widget.isActive ? 1.5 : 1.0,
           ),
           boxShadow: [
             if (widget.isActive)
               BoxShadow(
-                color: const Color(0xFF4B7AA6).withOpacity(0.1),
+                color: const Color(0xFF4B7AA6).withValues(alpha: 0.1),
                 blurRadius: 10,
                 spreadRadius: 0,
               ),
@@ -2459,8 +2505,8 @@ class _TerminalWindowCardState extends State<_TerminalWindowCard>
               padding: const EdgeInsets.symmetric(horizontal: 10),
               decoration: BoxDecoration(
                 color: widget.isActive
-                    ? const Color(0xFF1A2A3A).withOpacity(0.4)
-                    : const Color(0xFF111620).withOpacity(0.2),
+                    ? const Color(0xFF1A2A3A).withValues(alpha: 0.4)
+                    : const Color(0xFF111620).withValues(alpha: 0.2),
                 borderRadius: const BorderRadius.only(
                   topLeft: Radius.circular(9),
                   topRight: Radius.circular(9),
@@ -2496,7 +2542,7 @@ class _TerminalWindowCardState extends State<_TerminalWindowCard>
                           child: Icon(
                             Icons.close_rounded,
                             size: 14,
-                            color: Colors.white.withOpacity(0.3),
+                            color: Colors.white.withValues(alpha: 0.3),
                           ),
                         ),
                       ],
@@ -2597,7 +2643,7 @@ class _HHKBKeyState extends State<_HHKBKey> {
               borderRadius: BorderRadius.circular(8),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withOpacity(0.4),
+                  color: Colors.black.withValues(alpha: 0.4),
                   blurRadius: 8,
                   offset: const Offset(0, 4),
                 ),
@@ -2641,7 +2687,7 @@ class _HHKBKeyState extends State<_HHKBKey> {
       } else {
         bgColor = widget.active ? _modActiveColor : _keyColor;
       }
-      borderColor = widget.active ? _modActiveColor.withOpacity(0.8) : _keyBorder;
+      borderColor = widget.active ? _modActiveColor.withValues(alpha: 0.8) : _keyBorder;
     } else {
       bgColor = _pressed ? _keyPressedColor : _keyColor;
       borderColor = _keyBorder;
@@ -2673,14 +2719,14 @@ class _HHKBKeyState extends State<_HHKBKey> {
           boxShadow: _pressed
               ? [
                   BoxShadow(
-                    color: Colors.black.withOpacity(0.5),
+                    color: Colors.black.withValues(alpha: 0.5),
                     blurRadius: 1,
                     offset: const Offset(0, 0),
                   ),
                 ]
               : [
                   BoxShadow(
-                    color: Colors.black.withOpacity(0.4),
+                    color: Colors.black.withValues(alpha: 0.4),
                     blurRadius: 2,
                     offset: const Offset(0, 1.5),
                   ),
