@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -150,6 +151,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
 
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
+    final savedDeviceName = prefs.getString('deviceName');
+    final deviceName = savedDeviceName ?? await _getDefaultDeviceName();
     setState(() {
       _urlController.text = prefs.getString('lanAddress') ?? 'ws://127.0.0.1:9527';
       _wormholeController.text = prefs.getString('wormholeAddress') ?? 'ws://127.0.0.1:8080/ws';
@@ -160,17 +163,40 @@ class _VoyagerHomeState extends State<VoyagerHome>
       _multiWindow = prefs.getBool('multiWindow') ?? false;
       _showHHKB = prefs.getBool('showHHKB') ?? false;
       _deviceKey = prefs.getString('deviceKey');
-      _deviceName = prefs.getString('deviceName') ?? _getDefaultDeviceName();
+      _deviceName = deviceName;
     });
   }
 
-  String _getDefaultDeviceName() {
-    if (kIsWeb) return 'Web Browser';
-    if (Platform.isIOS) return 'iPhone';
-    if (Platform.isAndroid) return 'Android';
-    if (Platform.isMacOS) return 'Mac';
-    if (Platform.isWindows) return 'Windows';
-    if (Platform.isLinux) return 'Linux';
+  Future<String> _getDefaultDeviceName() async {
+    final deviceInfo = DeviceInfoPlugin();
+    try {
+      if (kIsWeb) {
+        final webInfo = await deviceInfo.webBrowserInfo;
+        return webInfo.browserName.name;
+      }
+      if (Platform.isIOS) {
+        final iosInfo = await deviceInfo.iosInfo;
+        return iosInfo.name;
+      }
+      if (Platform.isAndroid) {
+        final androidInfo = await deviceInfo.androidInfo;
+        return androidInfo.model;
+      }
+      if (Platform.isMacOS) {
+        final macInfo = await deviceInfo.macOsInfo;
+        return macInfo.computerName;
+      }
+      if (Platform.isWindows) {
+        final windowsInfo = await deviceInfo.windowsInfo;
+        return windowsInfo.computerName;
+      }
+      if (Platform.isLinux) {
+        final linuxInfo = await deviceInfo.linuxInfo;
+        return linuxInfo.prettyName;
+      }
+    } catch (e) {
+      debugPrint('Failed to get device name: $e');
+    }
     return 'Unknown Device';
   }
 

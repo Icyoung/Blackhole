@@ -37,6 +37,7 @@ dependencies:
   web_socket_channel: ^2.4.0
   xterm: ^4.0.0
   shared_preferences: ^2.3.3
+  device_info_plus: ^11.2.0
 
 dev_dependencies:
   flutter_test:
