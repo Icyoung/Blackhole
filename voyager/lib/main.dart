@@ -182,7 +182,13 @@ class _VoyagerHomeState extends State<VoyagerHome>
       }
       if (Platform.isIOS) {
         final iosInfo = await deviceInfo.iosInfo;
-        return iosInfo.name;
+        debugPrint('[Voyager] iOS device info: name=${iosInfo.name}, model=${iosInfo.model}, localizedModel=${iosInfo.localizedModel}');
+        // iOS 16+ restricts UIDevice.name for privacy, use model as fallback
+        final name = iosInfo.name;
+        if (name == 'iPhone' || name == 'iPad' || name == 'iPod touch') {
+          return '${iosInfo.localizedModel} (${iosInfo.model})';
+        }
+        return name;
       }
       if (Platform.isAndroid) {
         final androidInfo = await deviceInfo.androidInfo;
