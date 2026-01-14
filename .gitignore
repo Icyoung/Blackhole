@@ -1,5 +1,8 @@
 docs/architecture.md
 
+# Rust build artifacts
+wormhole/target/
+
 # Environment files
 .env
 *.env.local
