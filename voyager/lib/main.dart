@@ -152,7 +152,13 @@ class _VoyagerHomeState extends State<VoyagerHome>
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
     final savedDeviceName = prefs.getString('deviceName');
-    final deviceName = savedDeviceName ?? await _getDefaultDeviceName();
+    // Re-fetch device name if saved value is a generic name
+    const genericNames = ['iPhone', 'Android', 'Mac', 'Windows', 'Linux', 'Web Browser', 'Unknown Device'];
+    final needsRefresh = savedDeviceName == null || genericNames.contains(savedDeviceName);
+    final deviceName = needsRefresh ? await _getDefaultDeviceName() : savedDeviceName;
+    if (needsRefresh && savedDeviceName != deviceName) {
+      await prefs.setString('deviceName', deviceName);
+    }
     setState(() {
       _urlController.text = prefs.getString('lanAddress') ?? 'ws://127.0.0.1:9527';
       _wormholeController.text = prefs.getString('wormholeAddress') ?? 'ws://127.0.0.1:8080/ws';
