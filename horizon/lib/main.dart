@@ -91,6 +91,8 @@ class _HorizonHomeState extends State<HorizonHome> {
   late final HorizonController _controller;
   late final TextEditingController _wormholeUrlController;
   late final TextEditingController _wormholeTokenController;
+  late final TextEditingController _customSessionController;
+  bool _pairingDialogShown = false;
 
   @override
   void initState() {
@@ -103,8 +105,11 @@ class _HorizonHomeState extends State<HorizonHome> {
         TextEditingController(text: _controller.wormholeBaseUrl);
     _wormholeTokenController =
         TextEditingController(text: _controller.wormholeToken);
+    _customSessionController =
+        TextEditingController(text: _controller.customSessionId);
     _wormholeUrlController.addListener(_syncWormholeConfig);
     _wormholeTokenController.addListener(_syncWormholeConfig);
+    _customSessionController.addListener(_syncCustomSession);
     if (!_controller.requiresDevModeConfirmation) {
       _controller.start();
     }
@@ -114,8 +119,10 @@ class _HorizonHomeState extends State<HorizonHome> {
   void dispose() {
     _wormholeUrlController.removeListener(_syncWormholeConfig);
     _wormholeTokenController.removeListener(_syncWormholeConfig);
+    _customSessionController.removeListener(_syncCustomSession);
     _wormholeUrlController.dispose();
     _wormholeTokenController.dispose();
+    _customSessionController.dispose();
     _controller.dispose();
     super.dispose();
   }
@@ -127,11 +134,46 @@ class _HorizonHomeState extends State<HorizonHome> {
     );
   }
 
+  void _syncCustomSession() {
+    _controller.setCustomSessionId(_customSessionController.text);
+  }
+
+  void _showPairingDialog(PendingPairing pending) {
+    if (_pairingDialogShown) return;
+    _pairingDialogShown = true;
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => _PairingDialog(
+        pending: pending,
+        onApprove: (remember) {
+          Navigator.of(context).pop();
+          _pairingDialogShown = false;
+          _controller.approvePairing(remember: remember);
+        },
+        onReject: () {
+          Navigator.of(context).pop();
+          _pairingDialogShown = false;
+          _controller.rejectPairing();
+        },
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, _) {
+        // Show pairing dialog if there's a pending request
+        final pending = _controller.pendingPairing;
+        if (pending != null && !_pairingDialogShown) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _showPairingDialog(pending);
+          });
+        }
+
         return Scaffold(
           appBar: AppBar(
             title: const Text('Horizon'),
@@ -157,6 +199,7 @@ class _HorizonHomeState extends State<HorizonHome> {
                   controller: _controller,
                   wormholeUrlController: _wormholeUrlController,
                   wormholeTokenController: _wormholeTokenController,
+                  customSessionController: _customSessionController,
                 ),
                 // Only show access card on macOS (folder access dialog)
                 if (Platform.isMacOS) ...[
@@ -165,6 +208,10 @@ class _HorizonHomeState extends State<HorizonHome> {
                 ],
                 const SizedBox(height: 16),
                 _AddressCard(controller: _controller),
+                if (_controller.wormholeEnabled) ...[
+                  const SizedBox(height: 16),
+                  _PairedDevicesCard(controller: _controller),
+                ],
                 const SizedBox(height: 24),
               ],
             ),
@@ -393,11 +440,13 @@ class _ConnectionCard extends StatelessWidget {
     required this.controller,
     required this.wormholeUrlController,
     required this.wormholeTokenController,
+    required this.customSessionController,
   });
 
   final HorizonController controller;
   final TextEditingController wormholeUrlController;
   final TextEditingController wormholeTokenController;
+  final TextEditingController customSessionController;
 
   @override
   Widget build(BuildContext context) {
@@ -438,6 +487,23 @@ class _ConnectionCard extends StatelessWidget {
                 hint: 'Optional authentication token',
                 isPassword: true,
               ),
+              const Divider(height: 32, color: Colors.white10),
+              _ConfigRow(
+                label: 'Custom Session ID',
+                subtitle: 'Use a fixed 6-character code (requires token)',
+                value: controller.customSessionEnabled,
+                onChanged: (v) => controller.setCustomSessionEnabled(v),
+              ),
+              if (controller.customSessionEnabled) ...[
+                const SizedBox(height: 16),
+                _StyledTextField(
+                  controller: customSessionController,
+                  label: 'Session ID',
+                  hint: 'e.g., ABC123',
+                  maxLength: 6,
+                  textCapitalization: TextCapitalization.characters,
+                ),
+              ],
             ],
           ],
         ),
@@ -523,18 +589,24 @@ class _StyledTextField extends StatelessWidget {
     required this.label,
     this.hint,
     this.isPassword = false,
+    this.maxLength,
+    this.textCapitalization = TextCapitalization.none,
   });
 
   final TextEditingController controller;
   final String label;
   final String? hint;
   final bool isPassword;
+  final int? maxLength;
+  final TextCapitalization textCapitalization;
 
   @override
   Widget build(BuildContext context) {
     return TextField(
       controller: controller,
       obscureText: isPassword,
+      maxLength: maxLength,
+      textCapitalization: textCapitalization,
       style: const TextStyle(color: Colors.white, fontSize: 14),
       decoration: InputDecoration(
         labelText: label,
@@ -544,6 +616,7 @@ class _StyledTextField extends StatelessWidget {
         filled: true,
         fillColor: Colors.white.withValues(alpha: 0.05),
         isDense: true,
+        counterText: '',
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
@@ -766,6 +839,178 @@ class _DevModeCard extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _PairedDevicesCard extends StatelessWidget {
+  const _PairedDevicesCard({required this.controller});
+
+  final HorizonController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final devices = controller.pairedDevices;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const _SectionTitle(title: 'Paired Devices', icon: Icons.devices_outlined),
+            const SizedBox(height: 16),
+            if (devices.isEmpty)
+              const _StatusMessage(
+                message: 'No paired devices. New devices will require approval.',
+                isError: false,
+              )
+            else
+              ...devices.map((device) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: _DeviceListTile(
+                  device: device,
+                  onRemove: () => controller.removePairedDevice(device.deviceKey),
+                ),
+              )),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DeviceListTile extends StatelessWidget {
+  const _DeviceListTile({required this.device, required this.onRemove});
+
+  final PairedDevice device;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final lastSeen = _formatLastSeen(device.lastSeenAt);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.2),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.smartphone, size: 18, color: Color(0xFF4B7AA6)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  device.deviceName,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Last seen: $lastSeen',
+                  style: const TextStyle(
+                    color: Color(0xFF9AA6B2),
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.delete_outline, size: 18, color: Color(0xFFFF5C5C)),
+            onPressed: onRemove,
+            tooltip: 'Remove device',
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _formatLastSeen(DateTime lastSeen) {
+    final now = DateTime.now();
+    final diff = now.difference(lastSeen);
+
+    if (diff.inMinutes < 1) {
+      return 'Just now';
+    } else if (diff.inHours < 1) {
+      return '${diff.inMinutes}m ago';
+    } else if (diff.inDays < 1) {
+      return '${diff.inHours}h ago';
+    } else {
+      return '${diff.inDays}d ago';
+    }
+  }
+}
+
+class _PairingDialog extends StatelessWidget {
+  const _PairingDialog({
+    required this.pending,
+    required this.onApprove,
+    required this.onReject,
+  });
+
+  final PendingPairing pending;
+  final void Function(bool remember) onApprove;
+  final VoidCallback onReject;
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: const Color(0xFF1A2030),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      title: Row(
+        children: [
+          const Icon(Icons.smartphone, color: Color(0xFF4B7AA6), size: 24),
+          const SizedBox(width: 12),
+          const Text(
+            'New Device',
+            style: TextStyle(color: Colors.white, fontSize: 18),
+          ),
+        ],
+      ),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '"${pending.deviceName}" wants to connect.',
+            style: const TextStyle(color: Colors.white, fontSize: 15),
+          ),
+          const SizedBox(height: 12),
+          const Text(
+            'Do you want to allow this connection?',
+            style: TextStyle(color: Color(0xFF9AA6B2), fontSize: 13),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: onReject,
+          style: TextButton.styleFrom(foregroundColor: const Color(0xFFFF5C5C)),
+          child: const Text('Deny'),
+        ),
+        TextButton(
+          onPressed: () => onApprove(false),
+          style: TextButton.styleFrom(foregroundColor: Colors.white70),
+          child: const Text('Allow Once'),
+        ),
+        FilledButton(
+          onPressed: () => onApprove(true),
+          style: FilledButton.styleFrom(
+            backgroundColor: const Color(0xFF4B7AA6),
+            foregroundColor: Colors.white,
+          ),
+          child: const Text('Allow & Remember'),
+        ),
+      ],
     );
   }
 }

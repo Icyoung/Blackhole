@@ -24,7 +24,8 @@ enum Role {
 #[derive(Debug)]
 struct Session {
     horizon: Option<mpsc::UnboundedSender<Message>>,
-    voyagers: Vec<mpsc::UnboundedSender<Message>>,
+    voyagers: Vec<VoyagerInfo>,
+    custom_session: bool,
 }
 
 impl Session {
@@ -32,6 +33,7 @@ impl Session {
         Self {
             horizon: None,
             voyagers: Vec::new(),
+            custom_session: false,
         }
     }
 }
@@ -47,6 +49,23 @@ struct WsParams {
     role: String,
     session: Option<String>,
     token: Option<String>,
+    device_key: Option<String>,
+    device_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PairingState {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+#[derive(Debug)]
+struct VoyagerInfo {
+    tx: mpsc::UnboundedSender<Message>,
+    device_key: Option<String>,
+    device_name: Option<String>,
+    pairing_state: PairingState,
 }
 
 fn generate_session_id(existing: &HashMap<String, Session>) -> String {
@@ -151,7 +170,9 @@ async fn ws_handler(
         }
     }
 
-    ws.on_upgrade(move |socket| handle_socket(state, role, session, socket))
+    let device_key = params.device_key.clone();
+    let device_name = params.device_name.clone();
+    ws.on_upgrade(move |socket| handle_socket(state, role, session, device_key, device_name, socket))
 }
 
 async fn list_sessions(
@@ -216,39 +237,94 @@ async fn close_session(
         let _ = horizon.send(Message::Close(None));
     }
     for voyager in session.voyagers {
-        let _ = voyager.send(Message::Close(None));
+        let _ = voyager.tx.send(Message::Close(None));
     }
 
     (axum::http::StatusCode::OK, "closed").into_response()
 }
 
-async fn handle_socket(state: AppState, role: Role, session_param: Option<String>, socket: WebSocket) {
+async fn handle_socket(
+    state: AppState,
+    role: Role,
+    session_param: Option<String>,
+    device_key: Option<String>,
+    device_name: Option<String>,
+    socket: WebSocket,
+) {
     let (mut sender, mut receiver) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
 
     // Determine session ID: use provided one or generate for Horizon
-    let session_id = {
+    let (session_id, custom_session, session_in_use) = {
         let mut sessions = state.sessions.lock().await;
-        let id = match (&role, session_param) {
-            (Role::Horizon, None) => generate_session_id(&sessions),
-            (_, Some(s)) => s,
+        let (id, is_custom) = match (&role, &session_param) {
+            (Role::Horizon, None) => (generate_session_id(&sessions), false),
+            (Role::Horizon, Some(s)) => {
+                // Custom session ID provided by Horizon
+                // Check if already in use by another Horizon
+                if let Some(existing) = sessions.get(s) {
+                    if existing.horizon.is_some() {
+                        // Session is in use, will send error
+                        (s.clone(), true)
+                    } else {
+                        (s.clone(), true)
+                    }
+                } else {
+                    (s.clone(), true)
+                }
+            }
+            (Role::Voyager, Some(s)) => (s.clone(), false),
             (Role::Voyager, None) => unreachable!(), // Already validated in ws_handler
         };
 
-        let session = sessions.entry(id.clone()).or_insert_with(Session::new);
-        match role {
-            Role::Horizon => {
-                if session.horizon.is_some() {
-                    warn!(session_id = %id, "horizon replaced existing connection");
-                }
-                session.horizon = Some(tx.clone());
+        // Check if custom session is already in use by another Horizon
+        let in_use = if role == Role::Horizon && is_custom {
+            if let Some(existing) = sessions.get(&id) {
+                existing.horizon.is_some()
+            } else {
+                false
             }
-            Role::Voyager => {
-                session.voyagers.push(tx.clone());
+        } else {
+            false
+        };
+
+        if !in_use {
+            let session = sessions.entry(id.clone()).or_insert_with(Session::new);
+            if is_custom {
+                session.custom_session = true;
+            }
+            match role {
+                Role::Horizon => {
+                    if session.horizon.is_some() {
+                        warn!(session_id = %id, "horizon replaced existing connection");
+                    }
+                    session.horizon = Some(tx.clone());
+                }
+                Role::Voyager => {
+                    let voyager_info = VoyagerInfo {
+                        tx: tx.clone(),
+                        device_key: device_key.clone(),
+                        device_name: device_name.clone(),
+                        pairing_state: PairingState::Pending,
+                    };
+                    session.voyagers.push(voyager_info);
+                }
             }
         }
-        id
+        (id, is_custom, in_use)
     };
+
+    // Handle session_in_use error for Horizon with custom session
+    if session_in_use {
+        let error_msg = serde_json::json!({
+            "v": 1,
+            "type": "error",
+            "code": "session_in_use",
+            "message": "Session ID is already in use"
+        });
+        let _ = sender.send(Message::Text(error_msg.to_string())).await;
+        return;
+    }
 
     info!(session_id = %session_id, ?role, "client connected");
 
@@ -257,12 +333,41 @@ async fn handle_socket(state: AppState, role: Role, session_param: Option<String
         let assign_msg = serde_json::json!({
             "v": 1,
             "type": "session_assigned",
-            "sessionId": session_id
+            "sessionId": session_id,
+            "custom": custom_session
         });
         if sender.send(Message::Text(assign_msg.to_string())).await.is_err() {
             warn!(session_id = %session_id, "failed to send session_assigned");
             cleanup_connection(state, role, &session_id, &tx).await;
             return;
+        }
+    }
+
+    // For Voyager, send voyager_connect notification to Horizon
+    if role == Role::Voyager {
+        let connect_msg = serde_json::json!({
+            "v": 1,
+            "type": "voyager_connect",
+            "deviceKey": device_key,
+            "deviceName": device_name.clone().unwrap_or_else(|| "Unknown Device".to_string())
+        });
+        let mut sessions = state.sessions.lock().await;
+        if let Some(session) = sessions.get_mut(&session_id) {
+            if let Some(horizon) = session.horizon.as_ref() {
+                let _ = horizon.send(Message::Text(connect_msg.to_string()));
+            } else {
+                // No Horizon connected, auto-reject the pairing
+                drop(sessions);
+                let reject_msg = serde_json::json!({
+                    "v": 1,
+                    "type": "pairing_result",
+                    "approved": false,
+                    "reason": "horizon_offline"
+                });
+                let _ = sender.send(Message::Text(reject_msg.to_string())).await;
+                cleanup_connection(state, role, &session_id, &tx).await;
+                return;
+            }
         }
     }
 
@@ -298,6 +403,21 @@ async fn route_message(
         log_delete_probe(&msg, session_id);
         log_resize_probe(&msg, session_id);
     }
+
+    // Handle pairing_response from Horizon
+    if role == Role::Horizon {
+        if let Message::Text(text) = &msg {
+            if let Ok(value) = serde_json::from_str::<Value>(text) {
+                if let Some(msg_type) = value.get("type").and_then(|v| v.as_str()) {
+                    if msg_type == "pairing_response" {
+                        handle_pairing_response(state.clone(), session_id, &value).await;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     let mut sessions = state.sessions.lock().await;
     let Some(session) = sessions.get_mut(session_id) else {
         return;
@@ -305,9 +425,30 @@ async fn route_message(
 
     match role {
         Role::Horizon => {
-            session.voyagers.retain(|tx| tx.send(msg.clone()).is_ok());
+            // Only send to approved voyagers
+            session.voyagers.retain(|v| {
+                if v.pairing_state == PairingState::Approved {
+                    v.tx.send(msg.clone()).is_ok()
+                } else {
+                    true // Keep pending/rejected voyagers in list for now
+                }
+            });
         }
         Role::Voyager => {
+            // Check if this voyager is approved
+            let is_approved = session.voyagers.iter().any(|v| {
+                if let Some(origin_tx) = origin.as_ref() {
+                    v.tx.same_channel(origin_tx) && v.pairing_state == PairingState::Approved
+                } else {
+                    false
+                }
+            });
+
+            if !is_approved {
+                // Voyager not yet approved, drop the message
+                return;
+            }
+
             if let Some(horizon) = session.horizon.as_ref() {
                 if horizon.send(msg).is_err() {
                     session.horizon = None;
@@ -320,6 +461,57 @@ async fn route_message(
                 }
             }
         }
+    }
+}
+
+async fn handle_pairing_response(state: AppState, session_id: &str, value: &Value) {
+    let device_key = value.get("deviceKey").and_then(|v| v.as_str());
+    let approved = value.get("approved").and_then(|v| v.as_bool()).unwrap_or(false);
+    let assigned_key = value.get("assignedKey").and_then(|v| v.as_str());
+
+    let mut sessions = state.sessions.lock().await;
+    let Some(session) = sessions.get_mut(session_id) else {
+        return;
+    };
+
+    // Find the voyager by device_key (or the first pending one if no key)
+    let voyager = if let Some(key) = device_key {
+        session.voyagers.iter_mut().find(|v| {
+            v.device_key.as_deref() == Some(key) ||
+            (v.device_key.is_none() && v.pairing_state == PairingState::Pending)
+        })
+    } else {
+        session.voyagers.iter_mut().find(|v| v.pairing_state == PairingState::Pending)
+    };
+
+    let Some(voyager) = voyager else {
+        return;
+    };
+
+    if approved {
+        voyager.pairing_state = PairingState::Approved;
+        if let Some(key) = assigned_key {
+            voyager.device_key = Some(key.to_string());
+        }
+        let result_msg = serde_json::json!({
+            "v": 1,
+            "type": "pairing_result",
+            "approved": true,
+            "assignedKey": assigned_key
+        });
+        let _ = voyager.tx.send(Message::Text(result_msg.to_string()));
+        info!(session_id = %session_id, device_key = ?voyager.device_key, "voyager pairing approved");
+    } else {
+        voyager.pairing_state = PairingState::Rejected;
+        let result_msg = serde_json::json!({
+            "v": 1,
+            "type": "pairing_result",
+            "approved": false
+        });
+        let _ = voyager.tx.send(Message::Text(result_msg.to_string()));
+        // Close the connection for rejected voyager
+        let _ = voyager.tx.send(Message::Close(None));
+        info!(session_id = %session_id, device_key = ?device_key, "voyager pairing rejected");
     }
 }
 
@@ -405,7 +597,7 @@ async fn cleanup_connection(
             }
         }
         Role::Voyager => {
-            session.voyagers.retain(|voyager_tx| !voyager_tx.same_channel(tx));
+            session.voyagers.retain(|v| !v.tx.same_channel(tx));
         }
     }
 

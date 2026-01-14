@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -130,6 +132,11 @@ class _VoyagerHomeState extends State<VoyagerHome>
 
   String? _error;
 
+  // Device pairing related state
+  String? _deviceKey;
+  String _deviceName = '';
+  bool _pairingPending = false;
+
   @override
   void initState() {
     super.initState();
@@ -152,7 +159,19 @@ class _VoyagerHomeState extends State<VoyagerHome>
       _autoReconnect = prefs.getBool('autoReconnect') ?? true;
       _multiWindow = prefs.getBool('multiWindow') ?? false;
       _showHHKB = prefs.getBool('showHHKB') ?? false;
+      _deviceKey = prefs.getString('deviceKey');
+      _deviceName = prefs.getString('deviceName') ?? _getDefaultDeviceName();
     });
+  }
+
+  String _getDefaultDeviceName() {
+    if (kIsWeb) return 'Web Browser';
+    if (Platform.isIOS) return 'iPhone';
+    if (Platform.isAndroid) return 'Android';
+    if (Platform.isMacOS) return 'Mac';
+    if (Platform.isWindows) return 'Windows';
+    if (Platform.isLinux) return 'Linux';
+    return 'Unknown Device';
   }
 
   Future<void> _saveSettings() async {
@@ -165,6 +184,10 @@ class _VoyagerHomeState extends State<VoyagerHome>
     await prefs.setBool('autoReconnect', _autoReconnect);
     await prefs.setBool('multiWindow', _multiWindow);
     await prefs.setBool('showHHKB', _showHHKB);
+    if (_deviceKey != null) {
+      await prefs.setString('deviceKey', _deviceKey!);
+    }
+    await prefs.setString('deviceName', _deviceName);
   }
 
   @override
@@ -224,6 +247,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
     _disconnect();
     setState(() {
       _error = null;
+      _pairingPending = false;
     });
 
     try {
@@ -245,15 +269,22 @@ class _VoyagerHomeState extends State<VoyagerHome>
         _sessions.clear();
         _activeSessionId = null;
         _lastMessageAt = DateTime.now();
+        // In Wormhole mode, wait for pairing result before requesting sessions
+        _pairingPending = _useWormhole;
       });
       _reconnectDelaySeconds = 2;
-      _sendListSessions();
+      // Only send list sessions immediately in LAN mode
+      // In Wormhole mode, we wait for pairing_result
+      if (!_useWormhole) {
+        _sendListSessions();
+      }
       _startHeartbeat();
       _activeViewKey?.currentState?.requestKeyboard();
     } catch (error) {
       setState(() {
         _error = 'Failed to connect: $error';
         _connected = false;
+        _pairingPending = false;
       });
       _scheduleReconnect();
     }
@@ -289,7 +320,6 @@ class _VoyagerHomeState extends State<VoyagerHome>
     _subscription = null;
     _channel?.sink.close();
     _channel = null;
-    _connected = false;
     _sessions.clear();
     _activeSessionId = null;
     _terminals.clear();
@@ -304,6 +334,13 @@ class _VoyagerHomeState extends State<VoyagerHome>
     _scrollBottomGapCache.clear();
     _terminalViewKeys.clear();
     _stopHeartbeat();
+    if (mounted && _connected) {
+      setState(() {
+        _connected = false;
+      });
+    } else {
+      _connected = false;
+    }
   }
 
   void _handleMessage(dynamic message) {
@@ -329,7 +366,35 @@ class _VoyagerHomeState extends State<VoyagerHome>
       if (message is String) {
         setState(() {
           _error = 'Server error: $message';
+          _pairingPending = false;
         });
+      }
+      return;
+    }
+    if (type == 'pairing_result') {
+      final approved = decoded?['approved'] as bool? ?? false;
+      final assignedKey = decoded?['assignedKey'] as String?;
+
+      if (approved) {
+        if (assignedKey != null && assignedKey.isNotEmpty) {
+          _deviceKey = assignedKey;
+          _saveSettings();
+        }
+        setState(() {
+          _pairingPending = false;
+          _error = null;
+        });
+        debugPrint('[Voyager] Pairing approved, deviceKey: $_deviceKey');
+        // Pairing successful, continue with normal flow
+        _sendListSessions();
+      } else {
+        setState(() {
+          _pairingPending = false;
+          _error = 'Connection rejected by host';
+          _connected = false;
+        });
+        debugPrint('[Voyager] Pairing rejected');
+        _disconnect();
       }
       return;
     }
@@ -417,6 +482,11 @@ class _VoyagerHomeState extends State<VoyagerHome>
     if (token.isNotEmpty) {
       query['token'] = token;
     }
+    // Add device information for pairing
+    if (_deviceKey != null && _deviceKey!.isNotEmpty) {
+      query['device_key'] = _deviceKey!;
+    }
+    query['device_name'] = _deviceName;
     return base.replace(queryParameters: query);
   }
 
@@ -1143,6 +1213,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
               activeColor: activeColor,
               overlayColor: overlayColor,
               error: _error,
+              pairingPending: _pairingPending,
               onToggle: () {
                 setState(() {
                   _chromeHidden = !_chromeHidden;
@@ -1267,7 +1338,6 @@ class _VoyagerHomeState extends State<VoyagerHome>
           const SizedBox(width: 16),
           Switch(
             value: _connected,
-            activeTrackColor: const Color(0xFF41C87A),
             onChanged: (value) {
               if (value) {
                 _connect();
@@ -1430,7 +1500,6 @@ class _VoyagerHomeState extends State<VoyagerHome>
           ),
           Switch(
             value: value,
-            activeTrackColor: const Color(0xFF41C87A),
             onChanged: onChanged,
           ),
         ],
@@ -1674,6 +1743,7 @@ class _HeaderChrome extends StatelessWidget {
     required this.onReorderSessions,
     required this.connectionContent,
     required this.error,
+    required this.pairingPending,
   });
 
   final bool hidden;
@@ -1689,6 +1759,7 @@ class _HeaderChrome extends StatelessWidget {
   final void Function(int oldIndex, int newIndex) onReorderSessions;
   final Widget connectionContent;
   final String? error;
+  final bool pairingPending;
 
   @override
   Widget build(BuildContext context) {
@@ -1712,7 +1783,48 @@ class _HeaderChrome extends StatelessWidget {
               children: [
                 SizedBox(height: topInset),
                 connectionContent,
-                if (error != null)
+                if (pairingPending)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF4B7AA6).withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: const Color(0xFF4B7AA6).withValues(alpha: 0.2)),
+                      ),
+                      child: const Row(
+                        children: [
+                          SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Color(0xFF4B7AA6),
+                            ),
+                          ),
+                          SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Waiting for host approval...',
+                                  style: TextStyle(color: Color(0xFF4B7AA6), fontSize: 12, fontWeight: FontWeight.w500),
+                                ),
+                                SizedBox(height: 2),
+                                Text(
+                                  'Please check the Horizon app on your computer',
+                                  style: TextStyle(color: Color(0xFF9AA6B2), fontSize: 11),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                if (error != null && !pairingPending)
                   Padding(
                     padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
                     child: Container(

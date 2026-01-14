@@ -5,9 +5,52 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:uuid/uuid.dart';
 
 import 'terminal_service.dart';
 import 'ws_server.dart';
+
+/// Represents a paired device that has been approved to connect
+class PairedDevice {
+  PairedDevice({
+    required this.deviceKey,
+    required this.deviceName,
+    required this.firstPairedAt,
+    required this.lastSeenAt,
+  });
+
+  final String deviceKey;
+  String deviceName;
+  final DateTime firstPairedAt;
+  DateTime lastSeenAt;
+
+  Map<String, dynamic> toJson() => {
+        'deviceKey': deviceKey,
+        'deviceName': deviceName,
+        'firstPairedAt': firstPairedAt.toIso8601String(),
+        'lastSeenAt': lastSeenAt.toIso8601String(),
+      };
+
+  factory PairedDevice.fromJson(Map<String, dynamic> json) => PairedDevice(
+        deviceKey: json['deviceKey'] as String,
+        deviceName: json['deviceName'] as String,
+        firstPairedAt: DateTime.parse(json['firstPairedAt'] as String),
+        lastSeenAt: DateTime.parse(json['lastSeenAt'] as String),
+      );
+}
+
+/// Represents a pending pairing request waiting for user confirmation
+class PendingPairing {
+  PendingPairing({
+    required this.deviceKey,
+    required this.deviceName,
+    required this.requestedAt,
+  });
+
+  final String? deviceKey;
+  final String deviceName;
+  final DateTime requestedAt;
+}
 
 enum _BinaryType {
   stdin(1),
@@ -70,6 +113,13 @@ class HorizonController extends ChangeNotifier {
   DateTime? _stdoutProbeUntil;
   bool _stdoutProbeArmed = false;
 
+  // Pairing related state
+  List<PairedDevice> _pairedDevices = [];
+  PendingPairing? _pendingPairing;
+  bool _customSessionEnabled = false;
+  String _customSessionId = '';
+  static const _uuid = Uuid();
+
   bool get running => _running;
   String? get error => _error;
   String? get accessMessage => _accessMessage;
@@ -87,6 +137,12 @@ class HorizonController extends ChangeNotifier {
       _devModeRequested && (!_requireDevModeConfirmation || _devModeConfirmed);
   bool get requiresDevModeConfirmation =>
       _devModeRequested && _requireDevModeConfirmation && !_devModeConfirmed;
+
+  // Pairing related getters
+  List<PairedDevice> get pairedDevices => List.unmodifiable(_pairedDevices);
+  PendingPairing? get pendingPairing => _pendingPairing;
+  bool get customSessionEnabled => _customSessionEnabled;
+  String get customSessionId => _customSessionId;
 
   void confirmDevMode() {
     if (!requiresDevModeConfirmation) {
@@ -123,6 +179,9 @@ class HorizonController extends ChangeNotifier {
     }
     _error = null;
     notifyListeners();
+
+    // Load paired devices
+    await _loadPairedDevices();
 
     try {
       if (devModeEnabled) {
@@ -391,11 +450,14 @@ class HorizonController extends ChangeNotifier {
       final base = Uri.parse(_wormholeBaseUrl!);
       final query = Map<String, String>.from(base.queryParameters);
       query['role'] = 'horizon';
-      // Only include session if explicitly provided (for reconnection)
-      // Otherwise let Wormhole assign one
-      if (sessionId != null && sessionId.isNotEmpty) {
+
+      // Use custom session ID if enabled, otherwise use provided sessionId for reconnection
+      if (_customSessionEnabled && _customSessionId.isNotEmpty) {
+        query['session'] = _customSessionId;
+      } else if (sessionId != null && sessionId.isNotEmpty) {
         query['session'] = sessionId;
       }
+
       final token = _wormholeToken;
       if (token != null && token.isNotEmpty) {
         query['token'] = token;
@@ -447,6 +509,20 @@ class HorizonController extends ChangeNotifier {
       if (assignedId is String && assignedId.isNotEmpty) {
         _wormholeSessionId = assignedId;
         debugPrint('[Wormhole] Session assigned: $assignedId');
+        notifyListeners();
+      }
+      return;
+    }
+    if (type == 'voyager_connect') {
+      final deviceKey = decoded?['deviceKey'] as String?;
+      final deviceName = decoded?['deviceName'] as String? ?? 'Unknown Device';
+      await _handleVoyagerConnect(deviceKey, deviceName);
+      return;
+    }
+    if (type == 'error') {
+      final code = decoded?['code'] as String?;
+      if (code == 'session_in_use') {
+        _error = 'Custom session ID is already in use';
         notifyListeners();
       }
       return;
@@ -711,6 +787,155 @@ class HorizonController extends ChangeNotifier {
     );
     _wormholeReconnectDelaySeconds =
         (_wormholeReconnectDelaySeconds * 2).clamp(2, 10);
+  }
+
+  // ============ Pairing Methods ============
+
+  Future<void> _handleVoyagerConnect(String? deviceKey, String deviceName) async {
+    // Check if this is a paired device
+    final paired = _pairedDevices.where((d) => d.deviceKey == deviceKey).firstOrNull;
+
+    if (paired != null) {
+      // Already paired, auto-approve
+      paired.lastSeenAt = DateTime.now();
+      await _savePairedDevices();
+      _sendPairingResponse(deviceKey!, approved: true);
+      debugPrint('[Horizon] Auto-approved paired device: $deviceName');
+      return;
+    }
+
+    // New device, set pending pairing for user confirmation
+    _pendingPairing = PendingPairing(
+      deviceKey: deviceKey,
+      deviceName: deviceName,
+      requestedAt: DateTime.now(),
+    );
+    debugPrint('[Horizon] New device requesting pairing: $deviceName');
+    notifyListeners();
+  }
+
+  void approvePairing({required bool remember}) {
+    if (_pendingPairing == null) {
+      return;
+    }
+
+    // Generate a new device key if the client didn't provide one
+    final assignedKey = _pendingPairing!.deviceKey ?? _uuid.v4();
+
+    if (remember) {
+      final device = PairedDevice(
+        deviceKey: assignedKey,
+        deviceName: _pendingPairing!.deviceName,
+        firstPairedAt: DateTime.now(),
+        lastSeenAt: DateTime.now(),
+      );
+      _pairedDevices.add(device);
+      _savePairedDevices();
+    }
+
+    _sendPairingResponse(
+      _pendingPairing!.deviceKey,
+      approved: true,
+      assignedKey: assignedKey,
+    );
+    debugPrint('[Horizon] Approved pairing for: ${_pendingPairing!.deviceName}');
+    _pendingPairing = null;
+    notifyListeners();
+  }
+
+  void rejectPairing() {
+    if (_pendingPairing == null) {
+      return;
+    }
+
+    _sendPairingResponse(_pendingPairing!.deviceKey, approved: false);
+    debugPrint('[Horizon] Rejected pairing for: ${_pendingPairing!.deviceName}');
+    _pendingPairing = null;
+    notifyListeners();
+  }
+
+  void _sendPairingResponse(String? deviceKey, {required bool approved, String? assignedKey}) {
+    final response = {
+      'type': 'pairing_response',
+      'deviceKey': deviceKey,
+      'approved': approved,
+      if (assignedKey != null) 'assignedKey': assignedKey,
+    };
+    _sendToWormhole(_encodeMessage(response));
+  }
+
+  Future<void> removePairedDevice(String deviceKey) async {
+    _pairedDevices.removeWhere((d) => d.deviceKey == deviceKey);
+    await _savePairedDevices();
+    notifyListeners();
+  }
+
+  void setCustomSessionEnabled(bool enabled) {
+    if (_customSessionEnabled == enabled) {
+      return;
+    }
+    _customSessionEnabled = enabled;
+    _savePairedDevices(); // Settings are saved together
+    notifyListeners();
+  }
+
+  void setCustomSessionId(String sessionId) {
+    _customSessionId = sessionId.toUpperCase();
+    _savePairedDevices(); // Settings are saved together
+    notifyListeners();
+  }
+
+  Future<void> _loadPairedDevices() async {
+    try {
+      final home = Platform.environment['HOME'] ?? '/tmp';
+      final dir = Directory('$home/.blackhole/horizon');
+      final file = File('${dir.path}/paired_devices.json');
+
+      if (!await file.exists()) {
+        return;
+      }
+
+      final content = await file.readAsString();
+      final json = jsonDecode(content) as Map<String, dynamic>;
+
+      final devices = json['devices'] as List<dynamic>? ?? [];
+      _pairedDevices = devices
+          .map((d) => PairedDevice.fromJson(d as Map<String, dynamic>))
+          .toList();
+
+      final settings = json['settings'] as Map<String, dynamic>? ?? {};
+      _customSessionEnabled = settings['customSessionEnabled'] as bool? ?? false;
+      _customSessionId = settings['customSessionId'] as String? ?? '';
+
+      debugPrint('[Horizon] Loaded ${_pairedDevices.length} paired devices');
+    } catch (e) {
+      debugPrint('[Horizon] Failed to load paired devices: $e');
+    }
+  }
+
+  Future<void> _savePairedDevices() async {
+    try {
+      final home = Platform.environment['HOME'] ?? '/tmp';
+      final dir = Directory('$home/.blackhole/horizon');
+      if (!await dir.exists()) {
+        await dir.create(recursive: true);
+      }
+
+      final file = File('${dir.path}/paired_devices.json');
+      final json = {
+        'version': 1,
+        'devices': _pairedDevices.map((d) => d.toJson()).toList(),
+        'settings': {
+          'customSessionEnabled': _customSessionEnabled,
+          'customSessionId': _customSessionId,
+        },
+      };
+
+      await file.writeAsString(const JsonEncoder.withIndent('  ').convert(json));
+      debugPrint('[Horizon] Saved ${_pairedDevices.length} paired devices');
+    } catch (e) {
+      debugPrint('[Horizon] Failed to save paired devices: $e');
+    }
   }
 
   @override
