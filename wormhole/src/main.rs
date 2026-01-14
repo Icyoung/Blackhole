@@ -597,7 +597,22 @@ async fn cleanup_connection(
             }
         }
         Role::Voyager => {
+            // Find the disconnecting voyager's device_key before removing
+            let disconnecting_key = session.voyagers.iter()
+                .find(|v| v.tx.same_channel(tx))
+                .and_then(|v| v.device_key.clone());
+
             session.voyagers.retain(|v| !v.tx.same_channel(tx));
+
+            // Notify Horizon about the disconnect
+            if let Some(horizon) = session.horizon.as_ref() {
+                let disconnect_msg = serde_json::json!({
+                    "v": 1,
+                    "type": "voyager_disconnect",
+                    "deviceKey": disconnecting_key
+                });
+                let _ = horizon.send(Message::Text(disconnect_msg.to_string()));
+            }
         }
     }
 

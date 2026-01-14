@@ -120,11 +120,14 @@ class HorizonController extends ChangeNotifier {
   String _customSessionId = '';
   static const _uuid = Uuid();
 
+  // Wormhole client tracking
+  int _wormholeClientCount = 0;
+
   bool get running => _running;
   String? get error => _error;
   String? get accessMessage => _accessMessage;
   List<String> get addresses => _addresses;
-  int get clientCount => _wsServer.clientCount;
+  int get clientCount => _wsServer.clientCount + _wormholeClientCount;
   int get port => _wsServer.port;
   bool get lanEnabled => _lanEnabled;
   bool get wormholeEnabled => _wormholeEnabled;
@@ -477,6 +480,7 @@ class HorizonController extends ChangeNotifier {
     _wormholeSocket = null;
     _wormholeReconnectTimer?.cancel();
     _wormholeReconnectTimer = null;
+    _wormholeClientCount = 0;
   }
 
   void _sendToWormhole(Object message) {
@@ -517,6 +521,15 @@ class HorizonController extends ChangeNotifier {
       final deviceKey = decoded?['deviceKey'] as String?;
       final deviceName = decoded?['deviceName'] as String? ?? 'Unknown Device';
       await _handleVoyagerConnect(deviceKey, deviceName);
+      return;
+    }
+    if (type == 'voyager_disconnect') {
+      final deviceKey = decoded?['deviceKey'] as String?;
+      debugPrint('[Horizon] Voyager disconnected: $deviceKey');
+      if (_wormholeClientCount > 0) {
+        _wormholeClientCount--;
+        notifyListeners();
+      }
       return;
     }
     if (type == 'error') {
@@ -800,7 +813,9 @@ class HorizonController extends ChangeNotifier {
       paired.lastSeenAt = DateTime.now();
       await _savePairedDevices();
       _sendPairingResponse(deviceKey!, approved: true);
+      _wormholeClientCount++;
       debugPrint('[Horizon] Auto-approved paired device: $deviceName');
+      notifyListeners();
       return;
     }
 
@@ -838,6 +853,7 @@ class HorizonController extends ChangeNotifier {
       approved: true,
       assignedKey: assignedKey,
     );
+    _wormholeClientCount++;
     debugPrint('[Horizon] Approved pairing for: ${_pendingPairing!.deviceName}');
     _pendingPairing = null;
     notifyListeners();
