@@ -29,18 +29,34 @@
 
 | 按钮 | 功能 | 状态切换 |
 |------|------|----------|
-| **[+]** | 添加新分组 | 点击后创建 "分组N" |
-| **[编辑]** | 进入编辑模式 | 切换为 [保存] |
-| **[保存]** | 保存修改 | 切换回 [编辑] |
-| **[取消]** | 取消编辑（仅编辑模式显示） | 恢复原始状态 |
+| **[+]** | 添加新分组（立即生效） | - |
+| **[编辑]** | 进入编辑模式（仅改名） | 切换为 [保存] |
+| **[保存]** | 保存名称修改 | 切换回 [编辑] |
+| **[取消]** | 取消改名（仅编辑模式显示） | 恢复原始名称 |
 
-### 3. 编辑模式功能
+### 3. 操作模式说明
 
-- 分组名称可点击编辑（显示为 TextField）
+**普通模式：**
+- [+] 立即创建新分组（不进入编辑模式）
+- 点击分组展开/折叠
+- 点击终端切换到该终端
+- 长按分组显示操作菜单（重命名、删除）
+
+**编辑模式（仅用于批量改名）：**
+- 分组名称显示为 TextField，可直接编辑
 - **实时验证**: 空名称时显示红色边框和提示
-- 每个分组右侧显示删除按钮（默认分组除外）
-- 终端项显示移动按钮（点击弹出目标分组选择菜单）
-- 长按终端项显示移动菜单
+- [保存] 提交所有名称修改
+- [取消] 恢复所有名称到进入编辑模式前的状态
+
+**删除分组：**
+- 长按分组 → 菜单选择"删除"
+- 显示确认对话框
+- 确认后立即删除（终端移至默认分组）
+- 此操作不可通过[取消]恢复
+
+**移动终端：**
+- 长按终端 → 显示"移动到..."菜单
+- 选择目标分组后立即移动
 
 ## 数据模型
 
@@ -52,7 +68,7 @@ class TerminalGroup {
   String name;               // 分组名称
   List<String> sessionIds;   // 终端会话ID列表
   final DateTime createdAt;
-  int sortOrder;             // 排序顺序 (预留)
+  // int sortOrder;          // v2 预留
 
   bool get isDefault => id == defaultGroupId;
 
@@ -71,15 +87,13 @@ class TerminalGroup {
       "id": "default",
       "name": "默认分组",
       "sessionIds": ["session-1", "session-2"],
-      "createdAt": "2024-01-01T00:00:00Z",
-      "sortOrder": 0
+      "createdAt": "2024-01-01T00:00:00Z"
     },
     {
       "id": "uuid-xxx",
       "name": "项目A",
       "sessionIds": ["session-3"],
-      "createdAt": "2024-01-15T10:30:00Z",
-      "sortOrder": 1
+      "createdAt": "2024-01-15T10:30:00Z"
     }
   ],
   "activeGroupId": "default"
@@ -147,19 +161,20 @@ Future<void> loadGroups() async {
   // 2. 确保默认分组存在
   _ensureDefaultGroup(migrated);
 
-  // 3. 清理无效 sessionId (不在当前活跃 session 列表中的)
-  _cleanupStaleSessionIds(migrated);
-
-  // 4. 去重: 确保每个 sessionId 只在一个分组
+  // 3. 去重: 确保每个 sessionId 只在一个分组 (保留第一个出现的)
   _deduplicateSessionIds(migrated);
 
-  // 5. 验证 activeGroupId
+  // 4. 验证 activeGroupId (无效则回退到 default)
   _validateActiveGroupId(migrated);
 
-  // 6. 保存修复后的数据
+  // 5. 保存修复后的数据
   if (_isDirty) {
     await _saveToStorage(migrated);
   }
+
+  // 注意: 不在此处清理无效 sessionId
+  // 因为加载时尚未连接，无法获取活跃 session 列表
+  // 清理操作延迟到首次收到 session_list 时执行
 }
 ```
 
@@ -169,26 +184,44 @@ Future<void> loadGroups() async {
 
 ```dart
 class GroupManager {
-  // 当收到 session_list 消息时调用
+  /// 获取所有已分组的 sessionId
+  Set<String> get _allGroupedSessionIds {
+    return _groups.expand((g) => g.sessionIds).toSet();
+  }
+
+  /// 当收到 session_list 消息时调用
   void onSessionListReceived(List<String> activeSessions) {
-    // 清理不在 activeSessions 中的 sessionId
+    final activeSet = activeSessions.toSet();
+    final groupedSet = _allGroupedSessionIds;
+
+    // 1. 清理不在 activeSessions 中的 sessionId (失效的)
     for (final group in _groups) {
-      group.sessionIds.removeWhere((id) => !activeSessions.contains(id));
+      group.sessionIds.removeWhere((id) => !activeSet.contains(id));
     }
+
+    // 2. 将未分组的活跃 session 加入默认分组
+    final ungrouped = activeSet.difference(groupedSet);
+    if (ungrouped.isNotEmpty) {
+      _defaultGroup.sessionIds.addAll(ungrouped);
+    }
+
     _save();
   }
 
-  // 当收到 session_created 消息时调用
+  /// 当收到 session_created 消息时调用
   void onSessionCreated(String sessionId) {
+    // 先检查是否已存在于任何分组 (单分组约束)
+    if (_allGroupedSessionIds.contains(sessionId)) {
+      return; // 已存在，跳过
+    }
+
     // 添加到当前活跃分组（或默认分组）
     final targetGroup = _activeGroup ?? _defaultGroup;
-    if (!targetGroup.sessionIds.contains(sessionId)) {
-      targetGroup.sessionIds.add(sessionId);
-      _save();
-    }
+    targetGroup.sessionIds.add(sessionId);
+    _save();
   }
 
-  // 当收到 session_closed 消息时调用
+  /// 当收到 session_closed 消息时调用
   void onSessionClosed(String sessionId) {
     // 从所有分组中移除
     for (final group in _groups) {
@@ -197,13 +230,13 @@ class GroupManager {
     _save();
   }
 
-  // 当 WebSocket 断开时调用
+  /// 当 WebSocket 断开时调用
   void onDisconnected() {
     // 清空所有 sessionIds，等待重连后的 session_list
     for (final group in _groups) {
       group.sessionIds.clear();
     }
-    // 不保存，因为重连后会重新获取
+    // 不保存，因为重连后会重新同步
   }
 }
 ```
@@ -305,35 +338,54 @@ void _moveSession(String sessionId, String fromGroupId, String toGroupId) {
 ### 状态机
 
 ```
-[普通模式] ──点击[编辑]──→ [编辑模式]
-     ↑                        │
-     │                        ├──点击[保存]──→ 验证 → 成功 → [普通模式]
-     │                        │                  ↓
-     │                        │               失败 → 显示错误，保持编辑模式
-     │                        │
-     └────点击[取消]──────────┘
-              ↓
-        恢复原始数据
+                    ┌─────────────────────────────────────────┐
+                    │           [普通模式]                     │
+                    │  • [+] 立即创建分组                      │
+                    │  • 长按分组 → 删除(确认后立即生效)        │
+                    │  • 长按终端 → 移动(立即生效)             │
+                    └──────────────┬──────────────────────────┘
+                                   │ 点击[编辑]
+                                   ▼
+                    ┌─────────────────────────────────────────┐
+                    │           [编辑模式]                     │
+                    │  • 分组名称可直接编辑                    │
+                    │  • 实时验证空名称                        │
+                    └──────────────┬──────────────────────────┘
+                          ┌────────┴────────┐
+                   点击[保存]              点击[取消]
+                          ↓                     ↓
+                       验证名称            恢复原始名称
+                     ┌────┴────┐                │
+                   成功      失败               │
+                    │          │                │
+                    ↓          ↓                ↓
+              [普通模式]   保持编辑        [普通模式]
 ```
 
 ### 编辑模式状态
 
+编辑模式**仅用于批量修改分组名称**。新增/删除分组是独立操作，立即生效，不受编辑模式影响。
+
 ```dart
 class EditModeState {
   bool isEditing = false;
-  Map<String, String> originalNames = {};  // 用于取消时恢复
+  Map<String, String> originalNames = {};  // 用于取消时恢复名称
   Set<String> invalidGroups = {};          // 验证失败的分组ID
 
   void enterEditMode(List<TerminalGroup> groups) {
     isEditing = true;
+    // 只保存名称，不保存分组结构
     originalNames = {for (var g in groups) g.id: g.name};
     invalidGroups.clear();
   }
 
   void cancelEdit(List<TerminalGroup> groups) {
-    // 恢复原始名称
+    // 只恢复名称 (对于进入编辑模式时存在的分组)
     for (final group in groups) {
-      group.name = originalNames[group.id] ?? group.name;
+      if (originalNames.containsKey(group.id)) {
+        group.name = originalNames[group.id]!;
+      }
+      // 新增的分组 (不在 originalNames 中) 保持不变
     }
     isEditing = false;
     invalidGroups.clear();
@@ -458,8 +510,10 @@ group('GroupManager', () {
 
   group('Session Lifecycle', () {
     test('onSessionCreated adds to active group');
+    test('onSessionCreated skips if session already in a group');
     test('onSessionClosed removes from all groups');
     test('onSessionListReceived cleans up stale sessions');
+    test('onSessionListReceived adds ungrouped sessions to default group');
     test('onDisconnected clears all session ids');
   });
 
@@ -469,6 +523,7 @@ group('GroupManager', () {
     test('load creates default group if missing');
     test('load fixes invalid activeGroupId');
     test('load deduplicates sessionIds across groups');
+    test('load does not clean stale sessions (deferred to session_list)');
   });
 
   group('Schema Migration', () {
@@ -480,7 +535,8 @@ group('GroupManager', () {
 
 group('EditModeState', () {
   test('enterEditMode stores original names');
-  test('cancelEdit restores original names');
+  test('cancelEdit restores original names for existing groups');
+  test('cancelEdit keeps names of groups added during edit mode');
   test('validateAndSave rejects empty names');
   test('validateAndSave clears invalidGroups on success');
 });
