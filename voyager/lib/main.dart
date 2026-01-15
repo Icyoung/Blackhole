@@ -77,7 +77,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
   final GlobalKey _quickBarKey = GlobalKey();
   final Map<String, ScrollController> _scrollControllers = {};
   final ScrollController _idleScrollController = ScrollController();
-  final Map<String, double> _scrollBottomGapCache = {};
+  final Map<String, (double, double)> _scrollBottomGapCache = {};
   final TextEditingController _urlController = TextEditingController(
     text: 'ws://127.0.0.1:9527',
   );
@@ -153,9 +153,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
     final prefs = await SharedPreferences.getInstance();
     final savedDeviceName = prefs.getString('deviceName');
     // Re-fetch device name if saved value is a generic name
-    const genericNames = ['iPhone', 'Android', 'Mac', 'Windows', 'Linux', 'Web Browser', 'Unknown Device'];
-    final needsRefresh = savedDeviceName == null || genericNames.contains(savedDeviceName);
-    final deviceName = needsRefresh ? await _getDefaultDeviceName() : savedDeviceName;
+    final needsRefresh = _isGenericDeviceName(savedDeviceName);
+    final deviceName = needsRefresh ? await _getDefaultDeviceName() : savedDeviceName!;
     if (needsRefresh && savedDeviceName != deviceName) {
       await prefs.setString('deviceName', deviceName);
     }
@@ -182,13 +181,23 @@ class _VoyagerHomeState extends State<VoyagerHome>
       }
       if (Platform.isIOS) {
         final iosInfo = await deviceInfo.iosInfo;
-        debugPrint('[Voyager] iOS device info: name=${iosInfo.name}, machine=${iosInfo.utsname.machine}');
-        // iOS 16+ restricts UIDevice.name for privacy, use hardware model as fallback
-        final name = iosInfo.name;
-        if (name == 'iPhone' || name == 'iPad' || name == 'iPod touch') {
-          return iosInfo.utsname.machine; // e.g., "iPhone16,1"
+        debugPrint(
+          '[Voyager] iOS device info: name=${iosInfo.name}, modelName=${iosInfo.modelName}, machine=${iosInfo.utsname.machine}',
+        );
+        // iOS 16+ may return a generic name; keep the name if available.
+        final name = _normalizeDeviceName(iosInfo.name);
+        if (name.isNotEmpty && name != 'Unknown Device' && name != 'Unknown device') {
+          return name;
         }
-        return name;
+        final modelName = iosInfo.modelName.trim();
+        if (!_isGenericDeviceName(modelName)) {
+          return modelName; // e.g., "iPhone 15 Pro"
+        }
+        final machine = iosInfo.utsname.machine.trim();
+        if (!_isGenericDeviceName(machine)) {
+          return machine; // e.g., "iPhone16,1"
+        }
+        return name.isNotEmpty ? name : 'Unknown Device';
       }
       if (Platform.isAndroid) {
         final androidInfo = await deviceInfo.androidInfo;
@@ -210,6 +219,46 @@ class _VoyagerHomeState extends State<VoyagerHome>
       debugPrint('Failed to get device name: $e');
     }
     return 'Unknown Device';
+  }
+
+  String _normalizeDeviceName(String name) {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) {
+      return trimmed;
+    }
+    final duplicated = RegExp(r'^(.*)\\s*\\(\\1\\)$');
+    final match = duplicated.firstMatch(trimmed);
+    if (match != null) {
+      return match.group(1)!.trim();
+    }
+    return trimmed;
+  }
+
+  bool _isGenericDeviceName(String? name) {
+    if (name == null) {
+      return true;
+    }
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) {
+      return true;
+    }
+    const genericNames = {
+      'iPhone',
+      'iPad',
+      'iPod touch',
+      'Android',
+      'Mac',
+      'Windows',
+      'Linux',
+      'Web Browser',
+      'Unknown Device',
+      'Unknown device',
+    };
+    if (genericNames.contains(trimmed)) {
+      return true;
+    }
+    final duplicatedIosName = RegExp(r'^(iPhone|iPad|iPod touch)\\s*\\(\\1\\)$');
+    return duplicatedIosName.hasMatch(trimmed);
   }
 
   Future<void> _saveSettings() async {
@@ -728,23 +777,32 @@ class _VoyagerHomeState extends State<VoyagerHome>
       return;
     }
     final maxScroll = controller.position.maxScrollExtent;
-    final gap = (maxScroll - controller.offset).clamp(0.0, maxScroll);
-    _scrollBottomGapCache[sessionId] = gap;
+    final offset = controller.offset;
+    final gap = (maxScroll - offset).clamp(0.0, maxScroll);
+    // Cache both offset and gap - offset for when content shrinks, gap for when it grows
+    _scrollBottomGapCache[sessionId] = (offset, gap);
   }
 
   void _restoreScrollOffset(String sessionId) {
     final controller = _scrollControllers[sessionId];
-    final gap = _scrollBottomGapCache[sessionId];
-    if (controller == null || gap == null) {
+    final cached = _scrollBottomGapCache[sessionId];
+    if (controller == null || cached == null) {
       return;
     }
+    final (cachedOffset, gap) = cached;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !controller.hasClients) {
         return;
       }
       final maxScroll = controller.position.maxScrollExtent;
-      final target = (maxScroll - gap).clamp(0.0, maxScroll);
-      if ((controller.offset - target).abs() < 0.5) {
+      final currentOffset = controller.offset;
+      // Use gap-based calculation for content growth
+      var target = (maxScroll - gap).clamp(0.0, maxScroll);
+      // If gap-based calc would jump to top but user wasn't near top, preserve their position
+      if (target < 10.0 && cachedOffset > 10.0) {
+        target = cachedOffset.clamp(0.0, maxScroll);
+      }
+      if ((currentOffset - target).abs() < 0.5) {
         return;
       }
       controller.jumpTo(target);
