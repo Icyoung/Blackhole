@@ -11,6 +11,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:xterm/xterm.dart';
 
+import 'src/models/terminal_group.dart';
+import 'src/services/group_store.dart';
+import 'src/widgets/group_drawer.dart';
+
 enum _BinaryType {
   stdin(1),
   stdout(2),
@@ -126,6 +130,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
 
   final List<String> _sessions = [];
   String? _activeSessionId;
+  late final GroupStore _groupStore;
 
   bool _ctrl = false;
   bool _alt = false;
@@ -138,10 +143,14 @@ class _VoyagerHomeState extends State<VoyagerHome>
   String _deviceName = '';
   bool _pairingPending = false;
 
+  List<String> get _visibleSessions => _groupStore.activeGroupSessionIds;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _groupStore = GroupStore(onChanged: _handleGroupChange, sendCommand: _sendCommand);
+    unawaited(_groupStore.loadLocalOrder());
     _urlController.addListener(_handleAddressChange);
     _wormholeController.addListener(_handleAddressChange);
     _sessionController.addListener(_saveSettings);
@@ -170,6 +179,27 @@ class _VoyagerHomeState extends State<VoyagerHome>
       _deviceKey = prefs.getString('deviceKey');
       _deviceName = deviceName;
     });
+  }
+
+  void _handleGroupChange() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _syncActiveSessionWithGroup();
+    });
+  }
+
+  void _syncActiveSessionWithGroup() {
+    final sessions = _visibleSessions;
+    if (sessions.isEmpty) {
+      _activeSessionId = null;
+      return;
+    }
+    if (_activeSessionId == null || !sessions.contains(_activeSessionId)) {
+      _activeSessionId = sessions.first;
+      _terminalFor(_activeSessionId!);
+    }
   }
 
   Future<String> _getDefaultDeviceName() async {
@@ -381,8 +411,11 @@ class _VoyagerHomeState extends State<VoyagerHome>
     if (!mounted) {
       return;
     }
+    _groupStore.onDisconnected();
     setState(() {
       _connected = false;
+      _sessions.clear();
+      _activeSessionId = null;
     });
     _stopHeartbeat();
     _scheduleReconnect();
@@ -403,6 +436,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
   }
 
   void _disconnect() {
+    _groupStore.onDisconnected();
     _subscription?.cancel();
     _subscription = null;
     _channel?.sink.close();
@@ -458,6 +492,23 @@ class _VoyagerHomeState extends State<VoyagerHome>
       }
       return;
     }
+    if (type == 'group_sync' && decoded != null) {
+      _groupStore.applySync(Map<String, dynamic>.from(decoded));
+      return;
+    }
+    if (type == 'group_error') {
+      final message = decoded?['message'];
+      final code = decoded?['code'];
+      final text = message is String
+          ? message
+          : code is String
+              ? code
+              : 'Unknown group error';
+      setState(() {
+        _error = 'Group error: $text';
+      });
+      return;
+    }
     if (type == 'pairing_result') {
       final approved = decoded?['approved'] as bool? ?? false;
       final assignedKey = decoded?['assignedKey'] as String?;
@@ -493,10 +544,9 @@ class _VoyagerHomeState extends State<VoyagerHome>
           ..addAll(sessions.whereType<String>());
         if (_sessions.isEmpty) {
           _sendCreateSession();
-        } else {
-          _activeSessionId ??= _sessions.first;
-          _terminalFor(_activeSessionId!);
+          return;
         }
+        _syncActiveSessionWithGroup();
         setState(() {});
         _scheduleActiveResize();
         if (_activeSessionId != null) {
@@ -529,7 +579,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
         _scrollControllers.remove(sessionId)?.dispose();
         _scrollBottomGapCache.remove(sessionId);
         if (_activeSessionId == sessionId) {
-          _activeSessionId = _sessions.isNotEmpty ? _sessions.first : null;
+          final sessions = _visibleSessions;
+          _activeSessionId = sessions.isNotEmpty ? sessions.first : null;
         }
         setState(() {});
       }
@@ -871,13 +922,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
   }
 
   void _reorderSessions(int oldIndex, int newIndex) {
-    setState(() {
-      if (newIndex > oldIndex) {
-        newIndex -= 1;
-      }
-      final session = _sessions.removeAt(oldIndex);
-      _sessions.insert(newIndex, session);
-    });
+    _groupStore.reorderSession(_groupStore.activeGroupId, oldIndex, newIndex);
   }
 
   void _handleTerminalInput(String sessionId, String data) {
@@ -991,28 +1036,29 @@ class _VoyagerHomeState extends State<VoyagerHome>
     _stdoutProbeArmed = false;
   }
 
-  void _sendListSessions() {
+  void _sendCommand(Map<String, dynamic> payload) {
     final channel = _channel;
     if (channel == null) {
       return;
     }
-    channel.sink.add(_encodeMessage({'type': 'list'}));
+    channel.sink.add(_encodeMessage(payload));
+  }
+
+  void _sendListSessions() {
+    _sendCommand({'type': 'list'});
+    _groupStore.requestGroupList();
   }
 
   void _sendCreateSession() {
-    final channel = _channel;
-    if (channel == null) {
-      return;
-    }
-    channel.sink.add(_encodeMessage({'type': 'create'}));
+    final groupId = _groupStore.activeGroupId;
+    _sendCommand({
+      'type': 'create',
+      if (groupId != TerminalGroup.defaultGroupId) 'groupId': groupId,
+    });
   }
 
   void _sendCloseSession(String sessionId) {
-    final channel = _channel;
-    if (channel == null) {
-      return;
-    }
-    channel.sink.add(_encodeMessage({'type': 'close', 'sessionId': sessionId}));
+    _sendCommand({'type': 'close', 'sessionId': sessionId});
   }
 
   String _encodeMessage(Map<String, dynamic> payload) {
@@ -1163,7 +1209,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
     final scrollController = _activeScrollController ?? _idleScrollController;
     // connectionContent: 32 + 16(padding) = 48, tab栏: 36, 合计 82
     final terminalTopInset =
-        _chromeHidden ? (_sessions.length <= 1 ? 0 : 36) : 48 + 36;
+        _chromeHidden ? (_visibleSessions.length <= 1 ? 0 : 36) : 48 + 36;
     
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -1174,7 +1220,11 @@ class _VoyagerHomeState extends State<VoyagerHome>
     return Scaffold(
       key: _scaffoldKey,
       backgroundColor: Colors.black,
+      drawer: _buildGroupDrawer(context),
       endDrawer: _buildSettingsDrawer(context),
+      onDrawerChanged: (isOpened) {
+        _groupStore.setDeferredSync(isOpened);
+      },
       body: Stack(
         children: [
           Positioned.fill(
@@ -1196,8 +1246,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
                       } else if (width >= 1000) {
                         columns = 2;
                       }
-                      final sessions = _sessions.isNotEmpty
-                          ? _sessions
+                      final sessions = _visibleSessions.isNotEmpty
+                          ? _visibleSessions
                           : (_activeSessionId != null
                               ? [_activeSessionId!]
                               : <String>[]);
@@ -1317,7 +1367,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
                 _scheduleActiveResize();
               },
               onAddSession: _sendCreateSession,
-              sessions: _sessions,
+              sessions: _visibleSessions,
               activeSessionId: _activeSessionId,
               onSelectSession: (id) => _setActiveSession(id, requestKeyboard: true),
               onCloseSession: _sendCloseSession,
@@ -1394,43 +1444,49 @@ class _VoyagerHomeState extends State<VoyagerHome>
         ? _wormholeController.text.trim()
         : _urlController.text.trim();
     return Padding(
-      padding: const EdgeInsets.only(left: 16, top: 8, bottom: 8),
+      padding: const EdgeInsets.only(top: 8, bottom: 8),
       child: SizedBox(
         height: 32, // 固定高度，避免 Switch/IconButton 在不同平台撑高 Row
         child: Row(
           children: [
+            IconButton(
+              icon: const Icon(Icons.menu, color: Colors.white70, size: 20),
+              onPressed: () => _scaffoldKey.currentState?.openDrawer(),
+              tooltip: 'Groups',
+            ),
+            const SizedBox(width: 4),
             _StatusDot(connected: _connected, size: 8),
             const SizedBox(width: 14),
             Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  _multiWindow ? 'GRID OVERVIEW' : (_useWormhole ? 'WORMHOLE REMOTE' : 'LAN CONNECTION'),
-                  style: const TextStyle(
-                    color: Color(0xFF4B7AA6),
-                    fontSize: 10,
-                    height: 1.2,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 0.8,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _multiWindow ? 'GRID OVERVIEW' : (_useWormhole ? 'WORMHOLE REMOTE' : 'LAN CONNECTION'),
+                    style: const TextStyle(
+                      color: Color(0xFF4B7AA6),
+                      fontSize: 10,
+                      height: 1.2,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.8,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  urlText.isEmpty ? 'Not Configured' : urlText,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    height: 1.2,
-                    fontWeight: FontWeight.w500,
+                  const SizedBox(height: 2),
+                  Text(
+                    urlText.isEmpty ? 'Not Configured' : urlText,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      height: 1.2,
+                      fontWeight: FontWeight.w500,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
           const SizedBox(width: 16),
           Switch(
             value: _connected,
@@ -1454,6 +1510,15 @@ class _VoyagerHomeState extends State<VoyagerHome>
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildGroupDrawer(BuildContext context) {
+    return GroupDrawer(
+      manager: _groupStore,
+      activeSessionId: _activeSessionId,
+      onSelectSession: (sessionId) => _setActiveSession(sessionId, requestKeyboard: true),
+      onCloseSession: _sendCloseSession,
     );
   }
 
@@ -2102,7 +2167,7 @@ class _ChromeTabPill extends StatelessWidget {
         child: Container(
           width: width,
           height: 36,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 17),
           decoration: active ? BoxDecoration(
             border: Border(
               top: BorderSide(color: Colors.white.withValues(alpha: 0.1), width: 1),

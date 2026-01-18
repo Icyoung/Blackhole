@@ -7,8 +7,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:uuid/uuid.dart';
 
-import 'terminal_service.dart';
-import 'ws_server.dart';
+import '../services/group_manager.dart';
+import '../services/terminal_service.dart';
+import '../services/ws_server.dart';
 
 /// Represents a paired device that has been approved to connect
 class PairedDevice {
@@ -91,6 +92,7 @@ class HorizonController extends ChangeNotifier {
   final TerminalPlugin _terminal = TerminalPlugin();
   final MethodChannel _systemChannel = const MethodChannel('com.blackhole/system');
   final WsServer _wsServer;
+  final GroupManager _groupManager = GroupManager();
   String? _wormholeBaseUrl;
   String? _wormholeToken;
   bool _wormholeEnabled;
@@ -185,6 +187,10 @@ class HorizonController extends ChangeNotifier {
 
     // Load paired devices
     await _loadPairedDevices();
+    await _groupManager.load();
+    if (_groupManager.reconcileSessions(_sessions)) {
+      unawaited(_groupManager.save());
+    }
 
     try {
       if (devModeEnabled) {
@@ -303,6 +309,69 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     final type = decoded?['type'];
+    if (type == 'group_list') {
+      _handleGroupList(socket: socket);
+      return;
+    }
+    if (type == 'group_create') {
+      final name = decoded?['name'];
+      unawaited(_handleGroupCreate(name is String ? name : null, socket: socket));
+      return;
+    }
+    if (type == 'group_rename') {
+      final groupId = decoded?['groupId'];
+      final name = decoded?['name'];
+      if (groupId is String && name is String) {
+        _handleGroupRename(groupId, name, socket: socket);
+      }
+      return;
+    }
+    if (type == 'group_delete') {
+      final groupId = decoded?['groupId'];
+      if (groupId is String) {
+        _handleGroupDelete(groupId, socket: socket);
+      }
+      return;
+    }
+    if (type == 'group_move_session') {
+      final sessionId = decoded?['sessionId'];
+      final groupId = decoded?['groupId'];
+      final oldIndex = decoded?['oldIndex'];
+      final newIndex = decoded?['newIndex'];
+      if (sessionId is String && groupId is String) {
+        _handleGroupMoveSession(
+          sessionId,
+          groupId,
+          socket: socket,
+          oldIndex: oldIndex is int ? oldIndex : null,
+          newIndex: newIndex is int ? newIndex : null,
+        );
+      }
+      return;
+    }
+    if (type == 'session_rename') {
+      final sessionId = decoded?['sessionId'];
+      final name = decoded?['name'];
+      if (sessionId is String && name is String) {
+        _handleSessionRename(sessionId, name, socket: socket);
+      }
+      return;
+    }
+    if (type == 'group_reorder') {
+      final groupId = decoded?['groupId'];
+      final newIndex = decoded?['newIndex'];
+      if (groupId is String && newIndex is int) {
+        _handleGroupReorder(groupId, newIndex, socket: socket);
+      }
+      return;
+    }
+    if (type == 'group_delete_with_sessions') {
+      final groupId = decoded?['groupId'];
+      if (groupId is String) {
+        unawaited(_handleGroupDeleteWithSessions(groupId, socket: socket));
+      }
+      return;
+    }
     if (type == 'ping') {
       _wsServer.sendTo(socket, _buildPongMessage());
       return;
@@ -312,6 +381,16 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     if (type == 'create') {
+      final groupId = decoded?['groupId'];
+      if (groupId is String && groupId.isNotEmpty) {
+        final sessionId = await _createSessionInGroup(groupId);
+        if (sessionId != null) {
+          unawaited(_groupManager.save());
+          _broadcastGroupSync();
+          _notifySessionCreated(sessionId, socket: socket);
+        }
+        return;
+      }
       final sessionId = await _createSession();
       if (sessionId != null) {
         _notifySessionCreated(sessionId, socket: socket);
@@ -364,6 +443,7 @@ class HorizonController extends ChangeNotifier {
   }
 
   void _sendSessionList(WebSocket socket) {
+    final changed = _reconcileGroupSessions();
     _wsServer.sendTo(
       socket,
       _encodeMessage({
@@ -371,11 +451,33 @@ class HorizonController extends ChangeNotifier {
         'sessions': _sessions.toList(),
       }),
     );
+    if (changed) {
+      _broadcastGroupSync();
+    } else {
+      _sendGroupSync(socket: socket);
+    }
   }
 
   Future<String?> _createSession() async {
     final sessionId = await _terminal.startShell(rows: 24, cols: 80);
     _sessions.add(sessionId);
+    if (_groupManager.onSessionCreated(sessionId)) {
+      unawaited(_groupManager.save());
+      _broadcastGroupSync();
+    }
+    return sessionId;
+  }
+
+  Future<String?> _createSessionInGroup(String groupId) async {
+    final sessionId = await _terminal.startShell(rows: 24, cols: 80);
+    _sessions.add(sessionId);
+    final result = _groupManager.moveSession(sessionId, groupId);
+    if (!result.ok) {
+      if (_groupManager.onSessionCreated(sessionId)) {
+        unawaited(_groupManager.save());
+        _broadcastGroupSync();
+      }
+    }
     return sessionId;
   }
 
@@ -385,6 +487,10 @@ class HorizonController extends ChangeNotifier {
     }
     await _terminal.kill(sessionId);
     _sessions.remove(sessionId);
+    if (_groupManager.onSessionClosed(sessionId)) {
+      unawaited(_groupManager.save());
+      _broadcastGroupSync();
+    }
   }
 
   Future<void> _killAllSessions() async {
@@ -393,6 +499,9 @@ class HorizonController extends ChangeNotifier {
       await _terminal.kill(sessionId);
     }
     _sessions.clear();
+    if (_groupManager.reconcileSessions(_sessions)) {
+      unawaited(_groupManager.save());
+    }
   }
 
   Future<List<String>> _resolveAddresses() async {
@@ -504,6 +613,69 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     final type = decoded?['type'];
+    if (type == 'group_list') {
+      _handleGroupList(fromWormhole: true);
+      return;
+    }
+    if (type == 'group_create') {
+      final name = decoded?['name'];
+      unawaited(_handleGroupCreate(name is String ? name : null, fromWormhole: true));
+      return;
+    }
+    if (type == 'group_rename') {
+      final groupId = decoded?['groupId'];
+      final name = decoded?['name'];
+      if (groupId is String && name is String) {
+        _handleGroupRename(groupId, name, fromWormhole: true);
+      }
+      return;
+    }
+    if (type == 'group_delete') {
+      final groupId = decoded?['groupId'];
+      if (groupId is String) {
+        _handleGroupDelete(groupId, fromWormhole: true);
+      }
+      return;
+    }
+    if (type == 'group_move_session') {
+      final sessionId = decoded?['sessionId'];
+      final groupId = decoded?['groupId'];
+      final oldIndex = decoded?['oldIndex'];
+      final newIndex = decoded?['newIndex'];
+      if (sessionId is String && groupId is String) {
+        _handleGroupMoveSession(
+          sessionId,
+          groupId,
+          fromWormhole: true,
+          oldIndex: oldIndex is int ? oldIndex : null,
+          newIndex: newIndex is int ? newIndex : null,
+        );
+      }
+      return;
+    }
+    if (type == 'session_rename') {
+      final sessionId = decoded?['sessionId'];
+      final name = decoded?['name'];
+      if (sessionId is String && name is String) {
+        _handleSessionRename(sessionId, name, fromWormhole: true);
+      }
+      return;
+    }
+    if (type == 'group_reorder') {
+      final groupId = decoded?['groupId'];
+      final newIndex = decoded?['newIndex'];
+      if (groupId is String && newIndex is int) {
+        _handleGroupReorder(groupId, newIndex, fromWormhole: true);
+      }
+      return;
+    }
+    if (type == 'group_delete_with_sessions') {
+      final groupId = decoded?['groupId'];
+      if (groupId is String) {
+        unawaited(_handleGroupDeleteWithSessions(groupId, fromWormhole: true));
+      }
+      return;
+    }
     if (type == 'ping') {
       _sendToWormhole(_buildPongMessage());
       return;
@@ -578,6 +750,16 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     if (type == 'create') {
+      final groupId = decoded?['groupId'];
+      if (groupId is String && groupId.isNotEmpty) {
+        final sessionId = await _createSessionInGroup(groupId);
+        if (sessionId != null) {
+          unawaited(_groupManager.save());
+          _broadcastGroupSync();
+          _notifySessionCreated(sessionId);
+        }
+        return;
+      }
       final sessionId = await _createSession();
       if (sessionId != null) {
         _notifySessionCreated(sessionId);
@@ -635,12 +817,18 @@ class HorizonController extends ChangeNotifier {
   }
 
   void _sendSessionListToWormhole() {
+    final changed = _reconcileGroupSessions();
     _sendToWormhole(
       _encodeMessage({
         'type': 'session_list',
         'sessions': _sessions.toList(),
       }),
     );
+    if (changed) {
+      _broadcastGroupSync();
+    } else {
+      _sendGroupSync(toWormhole: true);
+    }
   }
 
   void _notifySessionCreated(String sessionId, {WebSocket? socket}) {
@@ -663,6 +851,249 @@ class HorizonController extends ChangeNotifier {
     });
     _wsServer.broadcast(message);
     _sendToWormhole(message);
+  }
+
+  bool _reconcileGroupSessions() {
+    final changed = _groupManager.reconcileSessions(_sessions);
+    if (changed) {
+      unawaited(_groupManager.save());
+    }
+    return changed;
+  }
+
+  void _broadcastGroupSync() {
+    final message = _encodeMessage(_groupManager.buildSyncPayload());
+    _wsServer.broadcast(message);
+    _sendToWormhole(message);
+  }
+
+  void _sendGroupSync({WebSocket? socket, bool toWormhole = false}) {
+    final message = _encodeMessage(_groupManager.buildSyncPayload());
+    if (socket != null) {
+      _wsServer.sendTo(socket, message);
+    }
+    if (toWormhole) {
+      _sendToWormhole(message);
+    }
+  }
+
+  void _sendGroupError({
+    WebSocket? socket,
+    bool toWormhole = false,
+    required String code,
+    required String message,
+  }) {
+    final payload = _encodeMessage({
+      'type': 'group_error',
+      'code': code,
+      'message': message,
+    });
+    if (socket != null) {
+      _wsServer.sendTo(socket, payload);
+    }
+    if (toWormhole) {
+      _sendToWormhole(payload);
+    }
+  }
+
+  void _handleGroupList({WebSocket? socket, bool fromWormhole = false}) {
+    final changed = _reconcileGroupSessions();
+    if (changed) {
+      _broadcastGroupSync();
+      return;
+    }
+    if (fromWormhole) {
+      _sendGroupSync(toWormhole: true);
+    } else if (socket != null) {
+      _sendGroupSync(socket: socket);
+    }
+  }
+
+  Future<void> _handleGroupCreate(
+    String? name, {
+    WebSocket? socket,
+    bool fromWormhole = false,
+  }) async {
+    final result = _groupManager.createGroup(name: name);
+    if (!result.ok) {
+      _sendGroupError(
+        socket: socket,
+        toWormhole: fromWormhole,
+        code: result.errorCode ?? 'invalid_request',
+        message: result.errorMessage ?? 'Invalid group request.',
+      );
+      return;
+    }
+    if (result.changed && result.groupId != null) {
+      // Create a terminal session and assign it to the new group
+      final sessionId = await _createSessionInGroup(result.groupId!);
+      unawaited(_groupManager.save());
+      _broadcastGroupSync();
+      if (sessionId != null) {
+        _notifySessionCreated(sessionId, socket: socket);
+      }
+    }
+  }
+
+  void _handleGroupRename(
+    String groupId,
+    String name, {
+    WebSocket? socket,
+    bool fromWormhole = false,
+  }) {
+    final result = _groupManager.renameGroup(groupId, name);
+    if (!result.ok) {
+      _sendGroupError(
+        socket: socket,
+        toWormhole: fromWormhole,
+        code: result.errorCode ?? 'invalid_request',
+        message: result.errorMessage ?? 'Invalid group request.',
+      );
+      return;
+    }
+    if (result.changed) {
+      unawaited(_groupManager.save());
+      _broadcastGroupSync();
+    }
+  }
+
+  void _handleGroupDelete(
+    String groupId, {
+    WebSocket? socket,
+    bool fromWormhole = false,
+  }) {
+    final result = _groupManager.deleteGroup(groupId);
+    if (!result.ok) {
+      _sendGroupError(
+        socket: socket,
+        toWormhole: fromWormhole,
+        code: result.errorCode ?? 'invalid_request',
+        message: result.errorMessage ?? 'Invalid group request.',
+      );
+      return;
+    }
+    if (result.changed) {
+      unawaited(_groupManager.save());
+      _broadcastGroupSync();
+    }
+  }
+
+  void _handleGroupMoveSession(
+    String sessionId,
+    String groupId, {
+    WebSocket? socket,
+    bool fromWormhole = false,
+    int? oldIndex,
+    int? newIndex,
+  }) {
+    if (!_sessions.contains(sessionId)) {
+      _sendGroupError(
+        socket: socket,
+        toWormhole: fromWormhole,
+        code: 'session_not_found',
+        message: 'Session not found.',
+      );
+      return;
+    }
+    final result = _groupManager.moveSession(
+      sessionId,
+      groupId,
+      oldIndex: oldIndex,
+      newIndex: newIndex,
+    );
+    if (!result.ok) {
+      _sendGroupError(
+        socket: socket,
+        toWormhole: fromWormhole,
+        code: result.errorCode ?? 'invalid_request',
+        message: result.errorMessage ?? 'Invalid group request.',
+      );
+      return;
+    }
+    if (result.changed) {
+      unawaited(_groupManager.save());
+      _broadcastGroupSync();
+    }
+  }
+
+  void _handleSessionRename(
+    String sessionId,
+    String name, {
+    WebSocket? socket,
+    bool fromWormhole = false,
+  }) {
+    if (!_sessions.contains(sessionId)) {
+      _sendGroupError(
+        socket: socket,
+        toWormhole: fromWormhole,
+        code: 'session_not_found',
+        message: 'Session not found.',
+      );
+      return;
+    }
+    final result = _groupManager.renameSession(sessionId, name);
+    if (!result.ok) {
+      _sendGroupError(
+        socket: socket,
+        toWormhole: fromWormhole,
+        code: result.errorCode ?? 'invalid_request',
+        message: result.errorMessage ?? 'Invalid rename request.',
+      );
+      return;
+    }
+    if (result.changed) {
+      unawaited(_groupManager.save());
+      _broadcastGroupSync();
+    }
+  }
+
+  void _handleGroupReorder(
+    String groupId,
+    int newIndex, {
+    WebSocket? socket,
+    bool fromWormhole = false,
+  }) {
+    final result = _groupManager.reorderGroup(groupId, newIndex);
+    if (!result.ok) {
+      _sendGroupError(
+        socket: socket,
+        toWormhole: fromWormhole,
+        code: result.errorCode ?? 'invalid_request',
+        message: result.errorMessage ?? 'Invalid reorder request.',
+      );
+      return;
+    }
+    if (result.changed) {
+      unawaited(_groupManager.save());
+      _broadcastGroupSync();
+    }
+  }
+
+  Future<void> _handleGroupDeleteWithSessions(
+    String groupId, {
+    WebSocket? socket,
+    bool fromWormhole = false,
+  }) async {
+    final result = _groupManager.deleteGroup(groupId, closeSessions: true);
+    if (!result.ok) {
+      _sendGroupError(
+        socket: socket,
+        toWormhole: fromWormhole,
+        code: result.errorCode ?? 'invalid_request',
+        message: result.errorMessage ?? 'Invalid delete request.',
+      );
+      return;
+    }
+    // Close all sessions that were in the group
+    final sessionsToClose = result.sessionIds ?? [];
+    for (final sessionId in sessionsToClose) {
+      await _closeSession(sessionId);
+      _notifySessionClosed(sessionId);
+    }
+    if (result.changed) {
+      unawaited(_groupManager.save());
+      _broadcastGroupSync();
+    }
   }
 
   Map<String, dynamic>? _decodeBinaryMessage(Uint8List data) {

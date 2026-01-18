@@ -636,7 +636,19 @@ fn build_no_horizon_reply(msg: &Message) -> Option<Message> {
     };
     let is_control = matches!(
         typ.as_str(),
-        "list" | "create" | "close" | "stdin" | "resize"
+        "list"
+            | "create"
+            | "close"
+            | "stdin"
+            | "resize"
+            | "group_list"
+            | "group_create"
+            | "group_rename"
+            | "group_delete"
+            | "group_reorder"
+            | "group_delete_with_sessions"
+            | "group_move_session"
+            | "session_rename"
     );
     if !is_control {
         return None;

@@ -4,7 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import 'src/horizon_controller.dart';
+import 'src/controllers/horizon_controller.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
