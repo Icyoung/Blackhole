@@ -81,11 +81,64 @@ Single-file Rust server (`wormhole/src/main.rs`) using Axum + Tokio:
 - Token-based authentication via `WORMHOLE_TOKEN` env var
 - No persistent storage (memory-only session routing)
 
-## Commit Message Convention
-Use component prefix: `Horizon: fix tab reorder`, `Voyager: add reconnect`, `Wormhole: add token auth`
+## Code Style
+- Dart: `dart format .` + `flutter analyze`
+- Rust: `cargo fmt` + `cargo clippy`
+
+## Testing
+- Flutter: `flutter test` (tests in `*/test/*_test.dart`)
+- Rust: `cargo test`
+
+## Commit Convention
+Component prefix: `Horizon: fix tab reorder`, `Voyager: add reconnect`, `Wormhole: add token auth`
+
+## Project Structure
+
+```
+Blackhole/
+├── horizon/                 # Host terminal server (Flutter)
+│   ├── lib/src/
+│   │   ├── controllers/horizon_controller.dart
+│   │   ├── models/terminal_group.dart
+│   │   ├── pages/home_page.dart
+│   │   ├── services/
+│   │   │   ├── terminal_service.dart
+│   │   │   ├── ws_server.dart
+│   │   │   ├── connection_manager.dart
+│   │   │   └── group_manager.dart
+│   │   └── widgets/
+│   ├── macos/Runner/PtyManager.swift    # macOS PTY
+│   ├── linux/runner/pty_manager.cc      # Linux PTY
+│   └── windows/runner/pty_manager.cpp   # Windows ConPTY
+│
+├── voyager/                 # Remote terminal client (Flutter)
+│   ├── lib/src/
+│   │   ├── models/terminal_group.dart
+│   │   ├── pages/home_page.dart
+│   │   ├── services/
+│   │   │   ├── connection_manager.dart
+│   │   │   ├── terminal_manager.dart
+│   │   │   └── group_manager.dart
+│   │   └── widgets/keyboard/    # HHKB virtual keyboard
+│   └── [ios|macos|android|web|linux|windows]/
+│
+└── wormhole/                # Relay server (Rust)
+    ├── Cargo.toml
+    ├── Dockerfile
+    └── src/main.rs
+```
 
 ## Environment Variables
 
 ### Wormhole Server
 - `WORMHOLE_TOKEN` - Required authentication token
 - `PORT` - Server port (default: 6666)
+
+## Build Prerequisites
+
+- Flutter SDK 3.7+
+- Rust 1.70+ (for Wormhole)
+- Xcode (for macOS/iOS)
+- Android Studio (for Android)
+- Visual Studio (for Windows)
+- GTK3 dev libraries (for Linux)

@@ -1,5 +1,10 @@
 # Repository Guidelines
 
+## Architecture
+```
+Voyager (Client) ←→ [WebSocket] ←→ Wormhole (Relay) ←→ [WebSocket] ←→ Horizon (Host) ←→ PTY/Shell
+```
+
 ## Project Structure
 Blackhole is a multi-component system with three main modules:
 - `horizon/` is the host terminal server (Flutter). Core Dart code lives in `horizon/lib/`, with platform PTY integrations under `horizon/macos/`, `horizon/linux/`, and `horizon/windows/`.
@@ -33,3 +38,69 @@ Add tests for protocol handling and reconnection flows where possible.
 ## Configuration & Security
 - `WORMHOLE_TOKEN` is required for the relay server; `PORT` defaults to `6666`.
 - Do not commit secrets or host addresses; use env vars and local config where needed.
+
+## WebSocket Protocol
+
+Communication uses a binary WebSocket protocol:
+
+| Byte | Description |
+|------|-------------|
+| 0 | Version (1) |
+| 1 | Message type |
+| 2-3 | Session ID length (big-endian) |
+| 4-N | Session ID |
+| N+1... | Payload |
+
+### Binary Message Types
+
+| Type | Value | Description |
+|------|-------|-------------|
+| Stdin | 0x01 | Terminal input from client |
+| Stdout | 0x02 | Terminal output to client |
+| Resize | 0x03 | Terminal resize (cols, rows) |
+| Ping | 0x04 | Heartbeat ping |
+| Pong | 0x05 | Heartbeat pong |
+
+### JSON Control Messages
+
+Control messages use JSON format with `type` field:
+
+| Type | Direction | Description |
+|------|-----------|-------------|
+| `session_assigned` | Wormhole → Horizon | Assigns 6-char session ID |
+| `voyager_connect` | Wormhole → Horizon | Client connected |
+| `voyager_disconnect` | Wormhole → Horizon | Client disconnected |
+| `pairing_request` | Voyager → Horizon | Device pairing request |
+| `pairing_response` | Horizon → Voyager | Accept/reject pairing |
+| `pairing_result` | Horizon → Voyager | Pairing outcome |
+| `list` | Voyager → Horizon | List terminal sessions |
+| `create` | Voyager → Horizon | Create new terminal |
+| `close` | Voyager → Horizon | Close terminal session |
+| `group_*` | Both | Terminal group operations |
+
+## Platform Channels (Flutter ↔ Native)
+
+**MethodChannel:** `com.blackhole/pty`
+- `create` - Create new PTY session
+- `write` - Write to PTY stdin
+- `resize` - Resize PTY
+- `close` - Close PTY session
+
+**EventChannel:** `com.blackhole/pty/output`
+- Streams PTY stdout data to Dart
+
+## Key Implementation Files
+
+### Horizon
+- `horizon_controller.dart` - Main state management
+- `terminal_service.dart` - PTY interface
+- `ws_server.dart` - LAN WebSocket server
+- `PtyManager.swift/cc/cpp` - Native PTY per platform
+
+### Voyager
+- `connection_manager.dart` - WebSocket client
+- `terminal_manager.dart` - Session state
+- `hhkb_keyboard.dart` - Mobile keyboard
+
+### Wormhole
+- `main.rs` - Single-file Axum server
