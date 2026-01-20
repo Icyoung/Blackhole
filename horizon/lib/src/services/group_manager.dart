@@ -161,6 +161,7 @@ class GroupManager {
       name: trimmed?.isNotEmpty == true ? trimmed! : _nextGroupName(),
       sessionIds: const [],
       createdAt: DateTime.now(),
+      sortOrder: _groups.length,
     );
     _groups.add(group);
     return GroupActionResult.success(changed: true, groupId: groupId);
@@ -421,6 +422,7 @@ class GroupManager {
       name: TerminalGroup.defaultGroupName,
       sessionIds: const [],
       createdAt: DateTime.now(),
+      sortOrder: 0,
     );
   }
 

@@ -1,16 +1,30 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:device_info_plus/device_info_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:xterm/xterm.dart';
 
 import '../controllers/horizon_controller.dart';
 import '../models/dev_mode_config.dart';
-import '../widgets/cards/access_card.dart';
-import '../widgets/cards/address_card.dart';
-import '../widgets/cards/connection_card.dart';
-import '../widgets/cards/dev_mode_card.dart';
-import '../widgets/cards/paired_devices_card.dart';
-import '../widgets/cards/status_card.dart';
+import '../models/terminal_group.dart';
+import '../services/connection_manager.dart';
+import '../services/group_store.dart';
+import '../services/terminal_manager.dart';
+import '../services/terminal_service.dart';
+import '../widgets/add_terminal_card.dart';
+import '../widgets/chrome/header_chrome.dart';
 import '../widgets/common/status_dot.dart';
+import '../widgets/group_drawer.dart';
+import '../widgets/keyboard/hhkb_keyboard.dart';
+import '../widgets/quick_actions_bar.dart';
+import '../widgets/settings_drawer.dart';
+import '../widgets/terminal_window_card.dart';
 import '../widgets/dialogs/pairing_dialog.dart';
 
 class HorizonHome extends StatefulWidget {
@@ -22,60 +36,367 @@ class HorizonHome extends StatefulWidget {
   State<HorizonHome> createState() => _HorizonHomeState();
 }
 
-class _HorizonHomeState extends State<HorizonHome> {
-  late final HorizonController _controller;
-  late final TextEditingController _wormholeUrlController;
-  late final TextEditingController _wormholeTokenController;
-  late final TextEditingController _customSessionController;
-  bool _pairingDialogShown = false;
+class _HorizonHomeState extends State<HorizonHome>
+    with WidgetsBindingObserver {
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  final GlobalKey _quickBarKey = GlobalKey();
+  final TextEditingController _urlController = TextEditingController(
+    text: 'ws://127.0.0.1:9527',
+  );
+  final TextEditingController _wormholeController = TextEditingController(
+    text: 'ws://127.0.0.1:8080/ws',
+  );
+  final TextEditingController _sessionController = TextEditingController();
+  final TextEditingController _tokenController = TextEditingController();
+  Timer? _metricsDebounce;
+
+  late final HorizonController _hostController;
+  late final TextEditingController _hostWormholeUrlController;
+  late final TextEditingController _hostWormholeTokenController;
+  late final TextEditingController _hostCustomSessionController;
+  bool _hostPairingDialogShown = false;
+  String? _remoteDeviceName;
+
+  late final ConnectionManager _connectionManager;
+  late final TerminalManager _terminalManager;
+
+  bool _connected = false;
+  bool _autoReconnect = true;
+  bool _chromeHidden = false;
+  bool _useWormhole = false;
+  bool _isHorizonMode = true; // true = Horizon (host), false = Voyager (client)
+  bool _showKeyboardTools = true;
+  bool _showHHKB = false;
+  bool _hhkbFn = false;
+  bool _hhkbShift = false;
+  bool _multiWindow = false;
+  double _quickBarHeight = 0;
+  static const double _hhkbKeyboardHeight = 242; // 5*42 + 4*4 + 16 padding
+
+  double get _bottomBarHeight =>
+      (_showKeyboardTools ? _quickBarHeight : 0) +
+      (_showHHKB ? _hhkbKeyboardHeight : 0);
+  double _lastMetricsInsetsBottom = 0;
+  Size _lastMetricsSize = Size.zero;
+
+  final List<String> _sessions = [];
+  String? _activeSessionId;
+  late final GroupStore _groupStore;
+
+  bool _ctrl = false;
+  bool _alt = false;
+  bool _meta = false;
+
+  String? _error;
+
+  // Device pairing related state
+  String? _deviceKey;
+  String _deviceName = '';
+  bool _clientPairingPending = false;
+
+  // Local mode (Horizon) output subscription
+  StreamSubscription<TerminalOutput>? _localOutputSub;
+
+  List<String> get _visibleSessions => _groupStore.activeGroupSessionIds;
 
   @override
   void initState() {
     super.initState();
-    _controller = HorizonController(
+    WidgetsBinding.instance.addObserver(this);
+    _hostController = HorizonController(
       devModeRequested: widget.devModeConfig.requested,
       requireDevModeConfirmation: widget.devModeConfig.requiresConfirmation,
     );
-    _wormholeUrlController =
-        TextEditingController(text: _controller.wormholeBaseUrl);
-    _wormholeTokenController =
-        TextEditingController(text: _controller.wormholeToken);
-    _customSessionController =
-        TextEditingController(text: _controller.customSessionId);
-    _wormholeUrlController.addListener(_syncWormholeConfig);
-    _wormholeTokenController.addListener(_syncWormholeConfig);
-    _customSessionController.addListener(_syncCustomSession);
-    if (!_controller.requiresDevModeConfirmation) {
-      _controller.start();
+    _terminalManager = TerminalManager(
+      onInput: _handleTerminalInput,
+      onResize: _handleResize,
+    );
+    _connectionManager = ConnectionManager(
+      onConnected: ({required waitForPairing}) {
+        if (!waitForPairing) {
+          _sendListSessions();
+        }
+        _terminalManager.activeViewKey?.currentState?.requestKeyboard();
+      },
+      onConnectedChanged: (connected) {
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _connected = connected;
+        });
+      },
+      onDisconnected: _handleDisconnected,
+      onPairingPendingChanged: (pending) {
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _clientPairingPending = pending;
+        });
+      },
+      onHostInfo: (hostName) {
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _remoteDeviceName = hostName;
+        });
+      },
+      onError: (message) {
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _error = message;
+          _clientPairingPending = false;
+        });
+      },
+      onGroupSync: (payload) {
+        _groupStore.applySync(payload);
+      },
+      onGroupError: (message) {
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _error = 'Group error: $message';
+        });
+      },
+      onPairingResult: ({required approved, String? assignedKey}) {
+        if (approved) {
+          if (assignedKey != null && assignedKey.isNotEmpty) {
+            _deviceKey = assignedKey;
+            _saveSettings();
+          }
+          if (mounted) {
+            setState(() {
+              _clientPairingPending = false;
+              _error = null;
+            });
+          }
+          debugPrint('[Voyager] Pairing approved, deviceKey: $_deviceKey');
+          _sendListSessions();
+        } else {
+          if (mounted) {
+            setState(() {
+              _clientPairingPending = false;
+              _error = 'Connection rejected';
+              _connected = false;
+            });
+          }
+          debugPrint('[Voyager] Pairing rejected');
+        }
+      },
+      onSessionList: _handleSessionList,
+      onSessionCreated: _handleRemoteSessionCreated,
+      onSessionClosed: _handleRemoteSessionClosed,
+      onStdout: _handleStdout,
+    );
+    _groupStore = GroupStore(
+      onChanged: _handleGroupChange,
+      sendCommand: _sendGroupCommand,
+    );
+    unawaited(_groupStore.loadLocalOrder());
+    _hostWormholeUrlController =
+        TextEditingController(text: _hostController.wormholeBaseUrl);
+    _hostWormholeTokenController =
+        TextEditingController(text: _hostController.wormholeToken);
+    _hostCustomSessionController =
+        TextEditingController(text: _hostController.customSessionId);
+    _hostWormholeUrlController.addListener(_syncHostWormholeConfig);
+    _hostWormholeTokenController.addListener(_syncHostWormholeConfig);
+    _hostCustomSessionController.addListener(_syncHostCustomSession);
+    _hostController.addListener(_handleHostChange);
+    if (!_hostController.requiresDevModeConfirmation) {
+      _hostController.start();
+    }
+    _urlController.addListener(_handleAddressChange);
+    _wormholeController.addListener(_handleAddressChange);
+    _sessionController.addListener(_saveSettings);
+    _tokenController.addListener(_saveSettings);
+    _loadSettings();
+  }
+
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedDeviceName = prefs.getString('deviceName');
+    // Re-fetch device name if saved value is a generic name
+    final needsRefresh = _isGenericDeviceName(savedDeviceName);
+    final deviceName = needsRefresh ? await _getDefaultDeviceName() : savedDeviceName!;
+    if (needsRefresh && savedDeviceName != deviceName) {
+      await prefs.setString('deviceName', deviceName);
+    }
+    setState(() {
+      _urlController.text = prefs.getString('lanAddress') ?? 'ws://127.0.0.1:9527';
+      _wormholeController.text = prefs.getString('wormholeAddress') ?? 'ws://127.0.0.1:8080/ws';
+      _sessionController.text = prefs.getString('sessionId') ?? '';
+      _tokenController.text = prefs.getString('token') ?? '';
+      _useWormhole = prefs.getBool('useWormhole') ?? false;
+      _autoReconnect = prefs.getBool('autoReconnect') ?? true;
+      _multiWindow = prefs.getBool('multiWindow') ?? false;
+      _showKeyboardTools = prefs.getBool('showKeyboardTools') ?? true;
+      _showHHKB = prefs.getBool('showHHKB') ?? false;
+      _isHorizonMode = prefs.getBool('isHorizonMode') ?? true;
+      _deviceKey = prefs.getString('deviceKey');
+      _deviceName = deviceName;
+    });
+    _hostController.setHostDeviceName(deviceName);
+    _connectionManager.updateAutoReconnect(_autoReconnect);
+
+    // Always subscribe to local output (for Horizon mode)
+    if (_hostController.running) {
+      _subscribeLocalOutput();
+      if (_isHorizonMode) {
+        _loadLocalSessions();
+      }
+    }
+    // Always try to connect Voyager client (for Voyager mode)
+    _maybeAutoConnectLocal();
+  }
+
+  void _handleGroupChange() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _syncActiveSessionWithGroup();
+    });
+  }
+
+  void _handleHostChange() {
+    if (!mounted) {
+      return;
+    }
+    if (_hostController.running) {
+      // Always subscribe to local output (for Horizon mode data)
+      if (_localOutputSub == null) {
+        _subscribeLocalOutput();
+        // If in Horizon mode and no sessions, load local sessions
+        if (_isHorizonMode && _sessions.isEmpty) {
+          _loadLocalSessions();
+        }
+      }
+      // Always try to auto-connect Voyager client (for Voyager mode data)
+      _maybeAutoConnectLocal();
+      return;
+    }
+    if (_isHorizonMode) {
+      _sessions.clear();
+      _activeSessionId = null;
+      _terminalManager.activeSessionId = null;
+      _terminalManager.clear();
+      setState(() {});
     }
   }
 
-  @override
-  void dispose() {
-    _wormholeUrlController.removeListener(_syncWormholeConfig);
-    _wormholeTokenController.removeListener(_syncWormholeConfig);
-    _customSessionController.removeListener(_syncCustomSession);
-    _wormholeUrlController.dispose();
-    _wormholeTokenController.dispose();
-    _customSessionController.dispose();
-    _controller.dispose();
-    super.dispose();
+  void _handleModeSwitch(bool isHorizon) {
+    debugPrint('[Mode] Switching to ${isHorizon ? "Horizon" : "Voyager"} mode, connected=$_connected');
+    if (isHorizon) {
+      if (_hostController.running) {
+        _subscribeLocalOutput();
+        _loadLocalSessions();
+      } else {
+        _sessions.clear();
+        _activeSessionId = null;
+        _terminalManager.activeSessionId = null;
+        _terminalManager.clear();
+      }
+      if (mounted) {
+        setState(() {});
+      }
+      return;
+    }
+
+    final keepSessions = _isLocalVoyagerTarget();
+    if (!keepSessions) {
+      _sessions.clear();
+      _activeSessionId = null;
+      _terminalManager.activeSessionId = null;
+      _terminalManager.clear();
+    }
+    if (_connected) {
+      _sendListSessions();
+      _syncActiveTerminalView();
+    } else {
+      _maybeAutoConnectLocal();
+    }
+    if (mounted) {
+      setState(() {});
+    }
   }
 
-  void _syncWormholeConfig() {
-    _controller.updateWormholeConfig(
-      baseUrl: _wormholeUrlController.text,
-      token: _wormholeTokenController.text,
+  void _subscribeLocalOutput() {
+    _unsubscribeLocalOutput();
+    _localOutputSub = _hostController.localOutputStream.listen(
+      _handleLocalOutput,
+      onError: (error) {
+        debugPrint('[Horizon Local] Output error: $error');
+      },
     );
   }
 
-  void _syncCustomSession() {
-    _controller.setCustomSessionId(_customSessionController.text);
+  void _unsubscribeLocalOutput() {
+    _localOutputSub?.cancel();
+    _localOutputSub = null;
+  }
+
+  void _handleLocalOutput(TerminalOutput output) {
+    // Only process if in Horizon mode (direct local access)
+    if (!_isHorizonMode) {
+      return;
+    }
+    final text = utf8.decode(output.data, allowMalformed: true);
+    _terminalManager.writeToTerminal(output.sessionId, text);
+    if (output.sessionId == _activeSessionId && mounted) {
+      setState(() {});
+    }
+  }
+
+  void _loadLocalSessions() {
+    final localSessions = _hostController.localSessions;
+    debugPrint('[Mode] Loading local sessions: ${localSessions.length}');
+    _sessions
+      ..clear()
+      ..addAll(localSessions);
+
+    // If no sessions exist, create one
+    if (_sessions.isEmpty) {
+      debugPrint('[Mode] No local sessions, creating one');
+      _createLocalSession();
+      return;
+    }
+
+    // Apply group sync
+    final syncPayload = _hostController.getLocalGroupSync();
+    _groupStore.applySync(syncPayload);
+
+    // Set active session
+    _syncActiveSessionWithGroup();
+    // Fall back to first session if group not ready
+    if (_activeSessionId == null && _sessions.isNotEmpty) {
+      _activeSessionId = _sessions.first;
+    }
+    debugPrint('[Mode] Active session: $_activeSessionId');
+    _terminalManager.activeSessionId = _activeSessionId;
+    if (_activeSessionId != null) {
+      _terminalFor(_activeSessionId!);
+    }
+
+    if (mounted) {
+      setState(() {});
+    }
+    _scheduleActiveResize();
+    if (_activeSessionId != null) {
+      _restoreScrollOffset(_activeSessionId!);
+    }
   }
 
   void _showPairingDialog(PendingPairing pending) {
-    if (_pairingDialogShown) return;
-    _pairingDialogShown = true;
+    if (_hostPairingDialogShown) {
+      return;
+    }
+    _hostPairingDialogShown = true;
 
     showDialog<void>(
       context: context,
@@ -84,73 +405,1210 @@ class _HorizonHomeState extends State<HorizonHome> {
         pending: pending,
         onApprove: (remember) {
           Navigator.of(context).pop();
-          _pairingDialogShown = false;
-          _controller.approvePairing(remember: remember);
+          _hostPairingDialogShown = false;
+          _hostController.approvePairing(remember: remember);
         },
         onReject: () {
           Navigator.of(context).pop();
-          _pairingDialogShown = false;
-          _controller.rejectPairing();
+          _hostPairingDialogShown = false;
+          _hostController.rejectPairing();
         },
       ),
     );
   }
 
+  void _syncHostWormholeConfig() {
+    _hostController.updateWormholeConfig(
+      baseUrl: _hostWormholeUrlController.text,
+      token: _hostWormholeTokenController.text,
+    );
+  }
+
+  void _syncHostCustomSession() {
+    _hostController.setCustomSessionId(_hostCustomSessionController.text);
+  }
+
+  void _syncActiveSessionWithGroup() {
+    final sessions = _visibleSessions;
+    if (sessions.isEmpty) {
+      if (_sessions.isNotEmpty) {
+        if (_activeSessionId == null || !_sessions.contains(_activeSessionId)) {
+          _activeSessionId = _sessions.first;
+        }
+        _terminalManager.activeSessionId = _activeSessionId;
+        if (_activeSessionId != null) {
+          _terminalFor(_activeSessionId!);
+        }
+      } else {
+        _activeSessionId = null;
+        _terminalManager.activeSessionId = null;
+      }
+      return;
+    }
+    if (_activeSessionId == null || !sessions.contains(_activeSessionId)) {
+      _activeSessionId = sessions.first;
+      _terminalManager.activeSessionId = _activeSessionId;
+      _terminalFor(_activeSessionId!);
+    }
+  }
+
+  Future<String> _getDefaultDeviceName() async {
+    final deviceInfo = DeviceInfoPlugin();
+    try {
+      if (kIsWeb) {
+        final webInfo = await deviceInfo.webBrowserInfo;
+        return webInfo.browserName.name;
+      }
+      if (Platform.isIOS) {
+        final iosInfo = await deviceInfo.iosInfo;
+        debugPrint(
+          '[Voyager] iOS device info: name=${iosInfo.name}, modelName=${iosInfo.modelName}, machine=${iosInfo.utsname.machine}',
+        );
+        // iOS 16+ may return a generic name; keep the name if available.
+        final name = _normalizeDeviceName(iosInfo.name);
+        if (name.isNotEmpty && name != 'Unknown Device' && name != 'Unknown device') {
+          return name;
+        }
+        final modelName = iosInfo.modelName.trim();
+        if (!_isGenericDeviceName(modelName)) {
+          return modelName; // e.g., "iPhone 15 Pro"
+        }
+        final machine = iosInfo.utsname.machine.trim();
+        if (!_isGenericDeviceName(machine)) {
+          return machine; // e.g., "iPhone16,1"
+        }
+        return name.isNotEmpty ? name : 'Unknown Device';
+      }
+      if (Platform.isAndroid) {
+        final androidInfo = await deviceInfo.androidInfo;
+        return androidInfo.model;
+      }
+      if (Platform.isMacOS) {
+        final macInfo = await deviceInfo.macOsInfo;
+        return macInfo.computerName;
+      }
+      if (Platform.isWindows) {
+        final windowsInfo = await deviceInfo.windowsInfo;
+        return windowsInfo.computerName;
+      }
+      if (Platform.isLinux) {
+        final linuxInfo = await deviceInfo.linuxInfo;
+        return linuxInfo.prettyName;
+      }
+    } catch (e) {
+      debugPrint('Failed to get device name: $e');
+    }
+    return 'Unknown Device';
+  }
+
+  String _normalizeDeviceName(String name) {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) {
+      return trimmed;
+    }
+    final duplicated = RegExp(r'^(.*)\\s*\\(\\1\\)$');
+    final match = duplicated.firstMatch(trimmed);
+    if (match != null) {
+      return match.group(1)!.trim();
+    }
+    return trimmed;
+  }
+
+  bool _isGenericDeviceName(String? name) {
+    if (name == null) {
+      return true;
+    }
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) {
+      return true;
+    }
+    const genericNames = {
+      'iPhone',
+      'iPad',
+      'iPod touch',
+      'Android',
+      'Mac',
+      'Windows',
+      'Linux',
+      'Web Browser',
+      'Unknown Device',
+      'Unknown device',
+    };
+    if (genericNames.contains(trimmed)) {
+      return true;
+    }
+    final duplicatedIosName = RegExp(r'^(iPhone|iPad|iPod touch)\\s*\\(\\1\\)$');
+    return duplicatedIosName.hasMatch(trimmed);
+  }
+
+  Future<void> _saveSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('lanAddress', _urlController.text);
+    await prefs.setString('wormholeAddress', _wormholeController.text);
+    await prefs.setString('sessionId', _sessionController.text);
+    await prefs.setString('token', _tokenController.text);
+    await prefs.setBool('useWormhole', _useWormhole);
+    await prefs.setBool('autoReconnect', _autoReconnect);
+    await prefs.setBool('multiWindow', _multiWindow);
+    await prefs.setBool('showKeyboardTools', _showKeyboardTools);
+    await prefs.setBool('showHHKB', _showHHKB);
+    await prefs.setBool('isHorizonMode', _isHorizonMode);
+    if (_deviceKey != null) {
+      await prefs.setString('deviceKey', _deviceKey!);
+    }
+    await prefs.setString('deviceName', _deviceName);
+  }
+
+  @override
+  void dispose() {
+    _connectionManager.disconnect(shouldReconnect: false);
+    _unsubscribeLocalOutput();
+    WidgetsBinding.instance.removeObserver(this);
+    _hostController.removeListener(_handleHostChange);
+    _hostWormholeUrlController.removeListener(_syncHostWormholeConfig);
+    _hostWormholeTokenController.removeListener(_syncHostWormholeConfig);
+    _hostCustomSessionController.removeListener(_syncHostCustomSession);
+    _urlController.removeListener(_handleAddressChange);
+    _wormholeController.removeListener(_handleAddressChange);
+    _sessionController.removeListener(_saveSettings);
+    _tokenController.removeListener(_saveSettings);
+    _hostWormholeUrlController.dispose();
+    _hostWormholeTokenController.dispose();
+    _hostCustomSessionController.dispose();
+    _urlController.dispose();
+    _wormholeController.dispose();
+    _sessionController.dispose();
+    _tokenController.dispose();
+    _metricsDebounce?.cancel();
+    _terminalManager.dispose();
+    _hostController.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeMetrics() {
+    _metricsDebounce?.cancel();
+    _metricsDebounce = Timer(const Duration(milliseconds: 220), () {
+      if (!mounted) {
+        return;
+      }
+      final media = MediaQuery.of(context);
+      final bottom = media.viewInsets.bottom;
+      final size = media.size;
+      final sameInsets = (bottom - _lastMetricsInsetsBottom).abs() < 0.5;
+      final sameSize = (size.width - _lastMetricsSize.width).abs() < 0.5 &&
+          (size.height - _lastMetricsSize.height).abs() < 0.5;
+      if (sameInsets && sameSize) {
+        return;
+      }
+      _lastMetricsInsetsBottom = bottom;
+      _lastMetricsSize = size;
+      _scheduleActiveResize();
+    });
+  }
+
+  void _handleAddressChange() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
+    _saveSettings();
+  }
+
+  void _handleDisconnected() {
+    _groupStore.onDisconnected();
+    _remoteDeviceName = null;
+
+    // Only update UI if in Voyager mode
+    if (!_isHorizonMode) {
+      _sessions.clear();
+      _activeSessionId = null;
+      _terminalManager.activeSessionId = null;
+      _terminalManager.clear();
+      if (mounted) {
+        setState(() {});
+      }
+    }
+  }
+
+  void _handleSessionList(List<String> sessions) {
+    debugPrint('[Mode] Received session list: ${sessions.length} sessions, isHorizonMode=$_isHorizonMode');
+    // Only update UI if in Voyager mode
+    if (_isHorizonMode) {
+      debugPrint('[Mode] Ignoring session list (in Horizon mode)');
+      return;
+    }
+
+    _sessions
+      ..clear()
+      ..addAll(sessions);
+    if (_sessions.isEmpty) {
+      _sendCreateSession();
+      return;
+    }
+    // Try to sync with group, but fall back to first session if group not ready
+    _syncActiveSessionWithGroup();
+    if (_activeSessionId == null && _sessions.isNotEmpty) {
+      _activeSessionId = _sessions.first;
+    }
+    _terminalManager.activeSessionId = _activeSessionId;
+    if (_activeSessionId != null) {
+      _terminalFor(_activeSessionId!);
+    }
+    if (mounted) {
+      setState(() {});
+    }
+    _scheduleActiveResize();
+    if (_activeSessionId != null) {
+      _restoreScrollOffset(_activeSessionId!);
+    }
+  }
+
+  // Handler for local session created (Horizon mode direct access)
+  void _handleLocalSessionCreated(String sessionId) {
+    // Only update UI if in Horizon mode
+    if (!_isHorizonMode) {
+      return;
+    }
+    if (!_sessions.contains(sessionId)) {
+      _sessions.add(sessionId);
+    }
+    _activeSessionId = sessionId;
+    _terminalManager.activeSessionId = sessionId;
+    _terminalFor(sessionId);
+    if (mounted) {
+      setState(() {});
+    }
+    _scheduleActiveResize();
+    _restoreScrollOffset(sessionId);
+  }
+
+  // Handler for remote session created (Voyager mode / network callback)
+  void _handleRemoteSessionCreated(String sessionId) {
+    // Only update UI if in Voyager mode
+    if (_isHorizonMode) {
+      return;
+    }
+    if (!_sessions.contains(sessionId)) {
+      _sessions.add(sessionId);
+    }
+    _activeSessionId = sessionId;
+    _terminalManager.activeSessionId = sessionId;
+    _terminalFor(sessionId);
+    if (mounted) {
+      setState(() {});
+    }
+    _scheduleActiveResize();
+    _restoreScrollOffset(sessionId);
+  }
+
+  // Handler for local session closed (Horizon mode direct access)
+  void _handleLocalSessionClosed(String sessionId) {
+    // Only update UI if in Horizon mode
+    if (!_isHorizonMode) {
+      return;
+    }
+    _sessions.remove(sessionId);
+    _terminalManager.removeSession(sessionId);
+    if (_activeSessionId == sessionId) {
+      final sessions = _visibleSessions;
+      _activeSessionId = sessions.isNotEmpty ? sessions.first : null;
+      _terminalManager.activeSessionId = _activeSessionId;
+    }
+    if (_activeSessionId == null) {
+      _terminalManager.activeSessionId = null;
+    }
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  // Handler for remote session closed (Voyager mode / network callback)
+  void _handleRemoteSessionClosed(String sessionId) {
+    // Only update UI if in Voyager mode
+    if (_isHorizonMode) {
+      return;
+    }
+    _sessions.remove(sessionId);
+    _terminalManager.removeSession(sessionId);
+    if (_activeSessionId == sessionId) {
+      final sessions = _visibleSessions;
+      _activeSessionId = sessions.isNotEmpty ? sessions.first : null;
+      _terminalManager.activeSessionId = _activeSessionId;
+    }
+    if (_activeSessionId == null) {
+      _terminalManager.activeSessionId = null;
+    }
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _handleStdout(String sessionId, String text) {
+    // Only update terminal if in Voyager mode
+    if (_isHorizonMode) {
+      return;
+    }
+    _terminalManager.writeToTerminal(sessionId, text);
+    if (sessionId == _activeSessionId && mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<void> _connect() async {
+    if (mounted) {
+      setState(() {
+        _error = null;
+        _clientPairingPending = false;
+      });
+    }
+    final uri = _useWormhole
+        ? _buildWormholeUri()
+        : Uri.parse(_urlController.text.trim());
+    await _connectionManager.connect(
+      uri: uri,
+      waitForPairing: _useWormhole,
+      autoReconnect: _autoReconnect,
+    );
+  }
+
+  void _maybeAutoConnectLocal() {
+    if (_connected || _useWormhole) {
+      return;
+    }
+    final uri = Uri.tryParse(_urlController.text.trim());
+    if (uri == null) {
+      return;
+    }
+    if (_isLocalHost(uri.host)) {
+      _connect();
+    }
+  }
+
+  Uri _buildWormholeUri() {
+    final base = Uri.parse(_wormholeController.text.trim());
+    final query = Map<String, String>.from(base.queryParameters);
+    query['role'] = 'voyager';
+    final session = _sessionController.text.trim();
+    if (session.isNotEmpty) {
+      query['session'] = session;
+    }
+    final token = _tokenController.text.trim();
+    if (token.isNotEmpty) {
+      query['token'] = token;
+    }
+    // Add device information for pairing
+    if (_deviceKey != null && _deviceKey!.isNotEmpty) {
+      query['device_key'] = _deviceKey!;
+    }
+    query['device_name'] = _deviceName;
+    return base.replace(queryParameters: query);
+  }
+
+  Terminal _terminalFor(String sessionId) {
+    return _terminalManager.terminalFor(sessionId);
+  }
+
+  void _scheduleActiveResize() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      _forceResizeActiveTerminal();
+    });
+  }
+
+  void _syncActiveTerminalView() {
+    final sessionId = _activeSessionId;
+    if (sessionId == null) {
+      return;
+    }
+    _terminalManager.activeSessionId = sessionId;
+    _terminalFor(sessionId);
+    _scheduleActiveResize();
+    _restoreScrollOffset(sessionId);
+  }
+
+  void _updateQuickBarHeight() {
+    final context = _quickBarKey.currentContext;
+    if (context == null) {
+      return;
+    }
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) {
+      return;
+    }
+    final height = box.size.height;
+    if ((height - _quickBarHeight).abs() < 0.5) {
+      return;
+    }
+    setState(() {
+      _quickBarHeight = height;
+    });
+    _scheduleActiveResize();
+  }
+
+  void _forceResizeActiveTerminal() {
+    _terminalManager.activeSessionId = _activeSessionId;
+    _terminalManager.forceResizeActiveTerminal(
+      multiWindow: _multiWindow,
+      bottomBarHeight: _bottomBarHeight,
+    );
+  }
+
+  TerminalController _controllerFor(String sessionId) {
+    return _terminalManager.controllerFor(sessionId);
+  }
+
+  ScrollController _scrollControllerFor(String sessionId) {
+    return _terminalManager.scrollControllerFor(sessionId);
+  }
+
+  void _restoreScrollOffset(String sessionId) {
+    _terminalManager.restoreScrollOffset(sessionId);
+  }
+
+  GlobalKey<TerminalViewState> _viewKeyFor(String sessionId) {
+    return _terminalManager.viewKeyFor(sessionId);
+  }
+
+  GlobalKey<TerminalViewState>? get _activeViewKey {
+    return _terminalManager.activeViewKey;
+  }
+
+  Terminal? get _activeTerminal {
+    return _terminalManager.activeTerminal;
+  }
+
+  TerminalController? get _activeController {
+    return _terminalManager.activeController;
+  }
+
+  ScrollController? get _activeScrollController {
+    return _terminalManager.activeScrollController;
+  }
+
+  Terminal get _idleTerminal => _terminalManager.idleTerminal;
+
+  TerminalController get _idleController => _terminalManager.idleController;
+
+  GlobalKey<TerminalViewState> get _idleTerminalViewKey =>
+      _terminalManager.idleTerminalViewKey;
+
+  ScrollController get _idleScrollController =>
+      _terminalManager.idleScrollController;
+
+  void _setActiveSession(String sessionId, {bool requestKeyboard = false}) {
+    if (_activeSessionId == sessionId) {
+      if (requestKeyboard && !_multiWindow) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _viewKeyFor(sessionId).currentState?.requestKeyboard();
+        });
+      }
+      return;
+    }
+    setState(() {
+      _activeSessionId = sessionId;
+      _terminalManager.activeSessionId = sessionId;
+      _terminalFor(sessionId);
+    });
+    _scheduleActiveResize();
+    _restoreScrollOffset(sessionId);
+    if (requestKeyboard && !_multiWindow) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _viewKeyFor(sessionId).currentState?.requestKeyboard();
+      });
+    }
+  }
+
+  void _reorderSessions(int oldIndex, int newIndex) {
+    _groupStore.reorderSession(_groupStore.activeGroupId, oldIndex, newIndex);
+  }
+
+  void _handleTerminalInput(String sessionId, String data) {
+    if (_activeSessionId != sessionId) {
+      _activeSessionId = sessionId;
+      _terminalManager.activeSessionId = sessionId;
+      if (mounted) {
+        setState(() {});
+      }
+    }
+    var output = data.replaceAll('\n', '\r');
+    if (_ctrl) {
+      output = _applyCtrl(output);
+      _ctrl = false;
+    }
+    if (_alt || _meta) {
+      output = _applyAlt(output);
+      _alt = false;
+      _meta = false;
+    }
+    _sendRawFor(sessionId, output);
+  }
+
+  String _applyCtrl(String data) {
+    final codes = data.runes.map((rune) {
+      final ch = String.fromCharCode(rune);
+      final upper = ch.toUpperCase();
+      if (upper.codeUnitAt(0) >= 65 && upper.codeUnitAt(0) <= 90) {
+        return String.fromCharCode(upper.codeUnitAt(0) - 64);
+      }
+      return ch;
+    }).join();
+    return codes;
+  }
+
+  String _applyAlt(String data) {
+    final buffer = StringBuffer();
+    for (final rune in data.runes) {
+      buffer.writeCharCode(0x1b);
+      buffer.writeCharCode(rune);
+    }
+    return buffer.toString();
+  }
+
+  void _sendCtrl(String key) {
+    _sendRaw(_applyCtrl(key));
+  }
+
+  void _handleResize(
+    String sessionId,
+    int cols,
+    int rows,
+    int pixelWidth,
+    int pixelHeight,
+  ) {
+    if (!_multiWindow && _activeSessionId != sessionId) {
+      return;
+    }
+    if (_isHorizonMode) {
+      _hostController.resizeLocalSession(sessionId, rows, cols);
+    } else {
+      _connectionManager.sendResize(sessionId, cols, rows);
+    }
+  }
+
+  void _sendRaw(String data) {
+    final sessionId = _activeSessionId;
+    if (sessionId == null) {
+      return;
+    }
+    _sendRawFor(sessionId, data);
+  }
+
+  void _sendRawFor(String sessionId, String data) {
+    if (_isHorizonMode) {
+      final bytes = Uint8List.fromList(utf8.encode(data));
+      _hostController.writeLocalStdin(sessionId, bytes);
+    } else {
+      _connectionManager.sendRaw(sessionId, data);
+    }
+  }
+
+  void _sendCommand(Map<String, dynamic> payload) {
+    _connectionManager.sendCommand(payload);
+  }
+
+  void _sendGroupCommand(Map<String, dynamic> payload) {
+    if (_isHorizonMode) {
+      unawaited(_hostController.applyLocalGroupCommand(payload));
+      return;
+    }
+    _connectionManager.sendCommand(payload);
+  }
+
+  void _sendListSessions() {
+    _sendCommand({'type': 'list'});
+    _groupStore.requestGroupList();
+  }
+
+  void _sendCreateSession() {
+    if (_isHorizonMode) {
+      _createLocalSession();
+      return;
+    }
+    final groupId = _groupStore.activeGroupId;
+    _sendCommand({
+      'type': 'create',
+      if (groupId != TerminalGroup.defaultGroupId) 'groupId': groupId,
+    });
+  }
+
+  void _sendCreateSessionInGroup(String groupId) {
+    _groupStore.setActiveGroup(groupId);
+    _sendCreateSession();
+  }
+
+  Future<void> _createLocalSession() async {
+    final groupId = _groupStore.activeGroupId;
+    final sessionId = await _hostController.createLocalSession(
+      groupId: groupId != TerminalGroup.defaultGroupId ? groupId : null,
+    );
+    if (sessionId != null) {
+      _handleLocalSessionCreated(sessionId);
+      // Refresh group sync
+      final syncPayload = _hostController.getLocalGroupSync();
+      _groupStore.applySync(syncPayload);
+    }
+  }
+
+  void _sendCloseSession(String sessionId) {
+    if (_isHorizonMode) {
+      _closeLocalSession(sessionId);
+      return;
+    }
+    _sendCommand({'type': 'close', 'sessionId': sessionId});
+  }
+
+  Future<void> _closeLocalSession(String sessionId) async {
+    await _hostController.closeLocalSession(sessionId);
+    _handleLocalSessionClosed(sessionId);
+    // Refresh group sync
+    final syncPayload = _hostController.getLocalGroupSync();
+    _groupStore.applySync(syncPayload);
+  }
+
+  void _sendKey(TerminalKey key) {
+    _activeTerminal?.keyInput(key);
+  }
+
+  Future<void> _pasteClipboard() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text;
+    if (text != null && text.isNotEmpty) {
+      _sendRaw(text);
+    }
+  }
+
+  Future<void> _copySelection() async {
+    final controller = _activeController;
+    final terminal = _activeTerminal;
+    if (controller == null || terminal == null) {
+      return;
+    }
+    final selection = controller.selection;
+    if (selection == null) {
+      return;
+    }
+    final text = terminal.buffer.getText(selection);
+    await Clipboard.setData(ClipboardData(text: text));
+    controller.clearSelection();
+  }
+
+  void _scrollToBottom() {
+    final controller = _activeScrollController ?? _idleScrollController;
+    if (!controller.hasClients) {
+      return;
+    }
+    controller.jumpTo(
+      controller.position.maxScrollExtent,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    const barColor = Color(0xFF111620);
+    const activeColor = Color(0xFF1E2D3D); // Slightly lighter for contrast
+    const overlayColor = Colors.transparent; // No longer need overlay with solid background
+    final isInputActive =
+        _isHorizonMode ? _hostController.running : _connected;
+    final terminal = _activeTerminal ?? _idleTerminal;
+    final controller = _activeController ?? _idleController;
+    final scrollController = _activeScrollController ?? _idleScrollController;
+    // connectionContent: 32 + 16(padding) = 48, tab栏: 36, 合计 82
+    final terminalTopInset =
+        _chromeHidden ? (_visibleSessions.length <= 1 ? 0 : 36) : 48 + 36;
+    
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _updateQuickBarHeight();
+      }
+    });
+
     return AnimatedBuilder(
-      animation: _controller,
+      animation: _hostController,
       builder: (context, _) {
-        final pending = _controller.pendingPairing;
-        if (pending != null && !_pairingDialogShown) {
+        final pending = _hostController.pendingPairing;
+        if (pending != null && !_hostPairingDialogShown) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             _showPairingDialog(pending);
           });
         }
 
         return Scaffold(
-          appBar: AppBar(
-            title: const Text('Horizon'),
-            actions: [
-              if (_controller.running)
-                Padding(
-                  padding: const EdgeInsets.only(right: 16),
-                  child: StatusDot(connected: _controller.running),
-                ),
-            ],
+          key: _scaffoldKey,
+          backgroundColor: Colors.black,
+          drawer: _buildGroupDrawer(context),
+          endDrawer: _buildSettingsDrawer(context),
+          onDrawerChanged: (isOpened) {
+            _groupStore.setDeferredSync(isOpened && !_isHorizonMode);
+          },
+          body: Stack(
+            children: [
+          Positioned.fill(
+            child: Container(color: Colors.black),
           ),
-          body: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (_controller.devModeRequested)
-                  DevModeCard(controller: _controller),
-                if (_controller.devModeRequested) const SizedBox(height: 16),
-                StatusCard(controller: _controller),
-                const SizedBox(height: 16),
-                ConnectionCard(
-                  controller: _controller,
-                  wormholeUrlController: _wormholeUrlController,
-                  wormholeTokenController: _wormholeTokenController,
-                  customSessionController: _customSessionController,
+          Positioned.fill(
+            top: terminalTopInset.toDouble(),
+            child: _multiWindow
+                ? LayoutBuilder(
+                    builder: (context, constraints) {
+                      final width = constraints.maxWidth;
+                      var columns = 1;
+                      if (width >= 2500) {
+                        columns = 5;
+                      } else if (width >= 2000) {
+                        columns = 4;
+                      } else if (width >= 1500) {
+                        columns = 3;
+                      } else if (width >= 1000) {
+                        columns = 2;
+                      }
+                      final sessions = _visibleSessions.isNotEmpty
+                          ? _visibleSessions
+                          : (_activeSessionId != null
+                              ? [_activeSessionId!]
+                              : <String>[]);
+                      final displaySessions = sessions.isEmpty
+                          ? <String>[]
+                          : sessions;
+                      final aspectRatio = columns == 1 
+                          ? 1.4 
+                          : (columns == 2 ? 1.5 : (columns == 3 ? 1.6 : (columns == 4 ? 1.7 : 1.8)));
+                      final padding = EdgeInsets.fromLTRB(16, 12, 16, _bottomBarHeight + 20);
+
+                      if (displaySessions.isEmpty) {
+                        return Padding(
+                          padding: padding,
+                          child: TerminalView(
+                            _idleTerminal,
+                            key: _idleTerminalViewKey,
+                            controller: _idleController,
+                            scrollController: _idleScrollController,
+                            autoResize: true,
+                            autofocus: true,
+                            deleteDetection: true,
+                            readOnly: _showHHKB,
+                            keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
+                            backgroundOpacity: 1.0,
+                            padding: const EdgeInsets.all(8),
+                            textStyle: const TerminalStyle(
+                              fontFamily: 'JetBrainsMono',
+                              fontSize: 14,
+                            ),
+                          ),
+                        );
+                      }
+
+                      return GridView.builder(
+                        padding: padding,
+                        physics: const BouncingScrollPhysics(),
+                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: columns,
+                          crossAxisSpacing: 12,
+                          mainAxisSpacing: 12,
+                          childAspectRatio: aspectRatio,
+                        ),
+                        itemCount: displaySessions.length + 1,
+                        itemBuilder: (context, index) {
+                          if (index == displaySessions.length) {
+                            return AddTerminalCard(onTap: _sendCreateSession);
+                          }
+                          final sessionId = displaySessions[index];
+                          return TerminalWindowCard(
+                            sessionId: sessionId,
+                            terminal: _terminalFor(sessionId),
+                            controller: _controllerFor(sessionId),
+                            scrollController: _scrollControllerFor(sessionId),
+                            viewKey: _viewKeyFor(sessionId),
+                            label: 'TERM ${index + 1}',
+                            isActive: sessionId == _activeSessionId,
+                            showHHKB: _showHHKB,
+                            onTap: () => _setActiveSession(sessionId, requestKeyboard: true),
+                            onClose: () => _sendCloseSession(sessionId),
+                          );
+                        },
+                      );
+                    },
+                  )
+                : TerminalView(
+                    terminal,
+                    key: _activeViewKey ?? _idleTerminalViewKey,
+                    controller: controller,
+                    scrollController: scrollController,
+                    autoResize: false,
+                    autofocus: true,
+                    deleteDetection: true,
+                    readOnly: _showHHKB,
+                    keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
+                    backgroundOpacity: 1.0,
+                    padding: EdgeInsets.fromLTRB(8, 4, 8, _bottomBarHeight + 8),
+                    textStyle: const TerminalStyle(
+                      fontFamily: 'JetBrainsMono',
+                      fontSize: 14,
+                    ),
+                  ),
+          ),
+          if (!_chromeHidden)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 82,
+              left: 0,
+              right: 0,
+              height: 24,
+              child: IgnorePointer(
+                child: Container(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Colors.black.withValues(alpha: 0.4), Colors.transparent],
+                    ),
+                  ),
                 ),
-                if (Platform.isMacOS) ...[
-                  const SizedBox(height: 16),
-                  AccessCard(controller: _controller),
-                ],
-                const SizedBox(height: 16),
-                AddressCard(controller: _controller),
-                if (_controller.wormholeEnabled) ...[
-                  const SizedBox(height: 16),
-                  PairedDevicesCard(controller: _controller),
-                ],
-                const SizedBox(height: 24),
-              ],
+              ),
             ),
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: HeaderChrome(
+              hidden: _chromeHidden,
+              color: barColor,
+              activeColor: activeColor,
+              overlayColor: overlayColor,
+              error: _error,
+              pairingPending: _clientPairingPending,
+              onToggle: () {
+                setState(() {
+                  _chromeHidden = !_chromeHidden;
+                });
+                _scheduleActiveResize();
+              },
+              onAddSession: _sendCreateSession,
+              sessions: _visibleSessions,
+              activeSessionId: _activeSessionId,
+              sessionLabelBuilder: (sessionId, index) {
+                return _groupStore.getSessionName(sessionId, index);
+              },
+              onSelectSession: (id) => _setActiveSession(id, requestKeyboard: true),
+              onCloseSession: _sendCloseSession,
+              onReorderSessions: _reorderSessions,
+              connectionContent: _buildConnectionContent(context),
+            ),
+          ),
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: SafeArea(
+              top: false,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  KeyedSubtree(
+                    key: _quickBarKey,
+                    child: _showKeyboardTools
+                        ? QuickActionsBar(
+                            connected: isInputActive,
+                            ctrl: _ctrl,
+                            alt: _alt,
+                            meta: _meta,
+                            onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
+                            onToggleAlt: () => setState(() => _alt = !_alt),
+                            onToggleMeta: () => setState(() => _meta = !_meta),
+                            onKey: _sendKey,
+                            onPaste: _pasteClipboard,
+                            onCopy: _copySelection,
+                            onSend: _sendRaw,
+                            onScrollToBottom: _scrollToBottom,
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+                  if (_showHHKB)
+                    HHKBKeyboard(
+                      connected: isInputActive,
+                      fn: _hhkbFn,
+                      ctrl: _ctrl,
+                      alt: _alt,
+                      shift: _hhkbShift,
+                      onKey: (key, {bool isSpecial = false}) {
+                        if (_ctrl && !isSpecial) {
+                          _sendCtrl(key);
+                        } else if (_alt && !isSpecial) {
+                          _sendRaw('\x1b$key');
+                        } else {
+                          _sendRaw(key);
+                        }
+                        // Reset modifiers after key press (except Fn)
+                        if (_ctrl || _alt || _hhkbShift) {
+                          setState(() {
+                            _ctrl = false;
+                            _alt = false;
+                            _hhkbShift = false;
+                          });
+                        }
+                      },
+                      onToggleFn: () => setState(() => _hhkbFn = !_hhkbFn),
+                      onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
+                      onToggleAlt: () => setState(() => _alt = !_alt),
+                      onToggleShift: () => setState(() => _hhkbShift = !_hhkbShift),
+                    ),
+                ],
+              ),
+            ),
+          ),
+            ],
           ),
         );
       },
+    );
+  }
+
+  Widget _buildConnectionContent(BuildContext context) {
+    // Determine title and subtitle based on mode
+    String title;
+    String subtitle;
+    bool switchValue;
+    void Function(bool) onSwitchChanged;
+
+    if (_isHorizonMode) {
+      // Horizon mode (host)
+      final localName = _hostController.hostDeviceName;
+      final isRunning = _hostController.running;
+      final clientCount = _hostController.clientCount;
+      final lanEnabled = _hostController.lanEnabled;
+      final wormholeEnabled = _hostController.wormholeEnabled;
+      final wormholeConnected = _hostController.wormholeConnected;
+
+      title = 'Horizon · $localName';
+
+      if (!isRunning) {
+        subtitle = 'Service stopped';
+      } else {
+        final modes = <String>[];
+        if (lanEnabled) modes.add('LAN');
+        if (wormholeEnabled) {
+          modes.add(wormholeConnected ? 'Wormhole' : 'Wormhole (connecting)');
+        }
+        final modeStr = modes.isEmpty ? 'No sharing' : modes.join(' + ');
+        subtitle = '$modeStr · $clientCount client${clientCount == 1 ? '' : 's'}';
+      }
+
+      switchValue = isRunning;
+      onSwitchChanged = (value) {
+        if (value) {
+          _hostController.start();
+        } else {
+          _hostController.stop();
+        }
+      };
+    } else {
+      // Voyager mode (client)
+      final connectionLabel = _useWormhole
+          ? _wormholeController.text.trim()
+          : _urlController.text.trim();
+      final isRemote = _isRemoteTarget();
+      final localName = _deviceName.trim();
+      final remoteName =
+          _remoteDeviceName ?? _fallbackRemoteName(connectionLabel);
+
+      title = isRemote
+          ? 'Voyager · $remoteName'
+          : (localName.isEmpty ? 'Voyager' : 'Voyager · $localName');
+      subtitle = _connected
+          ? 'Connected to ${connectionLabel.isEmpty ? 'unknown' : connectionLabel}'
+          : 'Disconnected';
+
+      switchValue = _connected;
+      onSwitchChanged = (value) {
+        if (value) {
+          _connect();
+        } else {
+          _connectionManager.disconnect(shouldReconnect: false);
+        }
+      };
+    }
+
+    final isActive = _isHorizonMode ? _hostController.running : _connected;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8, bottom: 8),
+      child: SizedBox(
+        height: 32,
+        child: Row(
+          children: [
+            IconButton(
+              icon: const Icon(Icons.menu, color: Colors.white70, size: 20),
+              onPressed: () => _scaffoldKey.currentState?.openDrawer(),
+              tooltip: 'Sessions',
+            ),
+            const SizedBox(width: 4),
+            StatusDot(connected: isActive, size: 8),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      color: Color(0xFF4B7AA6),
+                      fontSize: 11,
+                      height: 1.2,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Color(0xFF9AA6B2),
+                      fontSize: 12,
+                      height: 1.2,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 16),
+            Switch(
+              value: switchValue,
+              onChanged: onSwitchChanged,
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              icon: const Icon(
+                  Icons.settings_outlined, color: Colors.white70, size: 20),
+              onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
+              tooltip: 'Settings',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  bool _isRemoteTarget() {
+    if (!_connected) {
+      return false;
+    }
+    if (_useWormhole) {
+      return true;
+    }
+    final uri = Uri.tryParse(_urlController.text.trim());
+    if (uri == null) {
+      return false;
+    }
+    return !_isLocalHost(uri.host);
+  }
+
+  bool _isLocalVoyagerTarget() {
+    if (_useWormhole) {
+      return false;
+    }
+    final uri = Uri.tryParse(_urlController.text.trim());
+    if (uri == null) {
+      return false;
+    }
+    return _isLocalHost(uri.host);
+  }
+
+  bool _isLocalHost(String host) {
+    final normalized = host.trim().toLowerCase();
+    if (normalized.isEmpty) {
+      return false;
+    }
+    if (normalized == 'localhost' ||
+        normalized == '127.0.0.1' ||
+        normalized == '::1') {
+      return true;
+    }
+    return _hostController.addresses.contains(host);
+  }
+
+  String _fallbackRemoteName(String connectionLabel) {
+    final uri = Uri.tryParse(connectionLabel);
+    final host = uri?.host ?? connectionLabel;
+    return host.isEmpty ? 'Remote Device' : host;
+  }
+
+  Widget _buildGroupDrawer(BuildContext context) {
+    return GroupDrawer(
+      manager: _groupStore,
+      activeSessionId: _activeSessionId,
+      onSelectSession: (sessionId) => _setActiveSession(sessionId, requestKeyboard: true),
+      onCloseSession: _sendCloseSession,
+      onAddSession: _sendCreateSessionInGroup,
+    );
+  }
+
+  Widget _buildSettingsDrawer(BuildContext context) {
+    return SettingsDrawer(
+      isHorizonMode: _isHorizonMode,
+      onModeChanged: (isHorizon) {
+        setState(() => _isHorizonMode = isHorizon);
+        _saveSettings();
+        _handleModeSwitch(isHorizon);
+      },
+      useWormhole: _useWormhole,
+      autoReconnect: _autoReconnect,
+      multiWindow: _multiWindow,
+      showKeyboardTools: _showKeyboardTools,
+      showHHKB: _showHHKB,
+      urlController: _urlController,
+      wormholeController: _wormholeController,
+      sessionController: _sessionController,
+      tokenController: _tokenController,
+      onUseWormholeChanged: (value) {
+        if (_useWormhole == value) {
+          return;
+        }
+        setState(() => _useWormhole = value);
+        _connectionManager.disconnect(shouldReconnect: false);
+        _saveSettings();
+        if (!value) {
+          _maybeAutoConnectLocal();
+        }
+      },
+      onAutoReconnectChanged: (value) {
+        setState(() => _autoReconnect = value);
+        _connectionManager.updateAutoReconnect(value);
+        _saveSettings();
+      },
+      onMultiWindowChanged: (value) {
+        setState(() => _multiWindow = value);
+        _saveSettings();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _scheduleActiveResize();
+        });
+      },
+      onShowKeyboardToolsChanged: (value) {
+        setState(() {
+          _showKeyboardTools = value;
+          if (!value) {
+            _quickBarHeight = 0;
+          }
+        });
+        _saveSettings();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _scheduleActiveResize();
+        });
+      },
+      onShowHHKBChanged: (value) {
+        setState(() => _showHHKB = value);
+        _saveSettings();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _scheduleActiveResize();
+        });
+      },
+      hostController: _hostController,
+      hostWormholeUrlController: _hostWormholeUrlController,
+      hostWormholeTokenController: _hostWormholeTokenController,
+      hostCustomSessionController: _hostCustomSessionController,
     );
   }
 }

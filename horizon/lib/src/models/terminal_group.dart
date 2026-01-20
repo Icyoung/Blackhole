@@ -6,12 +6,14 @@ class TerminalGroup {
     required this.name,
     required List<String> sessionIds,
     required this.createdAt,
+    this.sortOrder = 0,
   }) : sessionIds = List<String>.from(sessionIds);
 
   final String id;
   String name;
   List<String> sessionIds;
   final DateTime createdAt;
+  int sortOrder;
 
   bool get isDefault => id == defaultGroupId;
 
@@ -21,6 +23,7 @@ class TerminalGroup {
       'name': name,
       'sessionIds': List<String>.from(sessionIds),
       'createdAt': createdAt.toUtc().toIso8601String(),
+      'sortOrder': sortOrder,
     };
   }
 
@@ -32,11 +35,13 @@ class TerminalGroup {
     } else {
       createdAt = DateTime.now();
     }
+    final sortOrder = json['sortOrder'];
     return TerminalGroup(
       id: json['id'] as String? ?? _fallbackId(createdAt),
       name: json['name'] as String? ?? defaultGroupName,
       sessionIds: _parseSessionIds(json['sessionIds']),
       createdAt: createdAt,
+      sortOrder: sortOrder is int ? sortOrder : 0,
     );
   }
 

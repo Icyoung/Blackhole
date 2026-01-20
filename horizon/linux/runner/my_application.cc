@@ -41,14 +41,25 @@ static void my_application_activate(GApplication* application) {
   if (use_header_bar) {
     GtkHeaderBar* header_bar = GTK_HEADER_BAR(gtk_header_bar_new());
     gtk_widget_show(GTK_WIDGET(header_bar));
-    gtk_header_bar_set_title(header_bar, "horizon");
+    gtk_header_bar_set_title(header_bar, "Horizon");
     gtk_header_bar_set_show_close_button(header_bar, TRUE);
     gtk_window_set_titlebar(window, GTK_WIDGET(header_bar));
   } else {
-    gtk_window_set_title(window, "horizon");
+    gtk_window_set_title(window, "Horizon");
   }
 
   gtk_window_set_default_size(window, 1280, 720);
+
+  // Set window icon
+  GError* icon_error = nullptr;
+  GdkPixbuf* icon = gdk_pixbuf_new_from_file("resources/app_icon.png", &icon_error);
+  if (icon != nullptr) {
+    gtk_window_set_icon(window, icon);
+    g_object_unref(icon);
+  } else {
+    g_clear_error(&icon_error);
+  }
+
   gtk_widget_show(GTK_WIDGET(window));
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();

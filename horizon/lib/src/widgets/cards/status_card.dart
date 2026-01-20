@@ -5,9 +5,14 @@ import '../../controllers/horizon_controller.dart';
 import '../common/status_dot.dart';
 
 class StatusCard extends StatelessWidget {
-  const StatusCard({super.key, required this.controller});
+  const StatusCard({
+    super.key,
+    required this.controller,
+    this.flat = false,
+  });
 
   final HorizonController controller;
+  final bool flat;
 
   @override
   Widget build(BuildContext context) {
@@ -15,82 +20,89 @@ class StatusCard extends StatelessWidget {
     final canStart = !controller.requiresDevModeConfirmation;
     final sessionId = controller.wormholeSessionId;
     final showSession = controller.wormholeEnabled && controller.running;
+    final contentPadding = flat
+        ? const EdgeInsets.symmetric(vertical: 20)
+        : const EdgeInsets.all(20);
 
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                StatusDot(connected: controller.running),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    statusText,
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                    ),
+    final content = Padding(
+      padding: contentPadding,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              StatusDot(connected: controller.running),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  statusText,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
                   ),
-                ),
-                Switch(
-                  value: controller.running,
-                  onChanged: (value) {
-                    if (value) {
-                      if (canStart) controller.start();
-                    } else {
-                      controller.stop();
-                    }
-                  },
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                InfoItem(label: 'Port', value: '${controller.port}'),
-                const SizedBox(width: 24),
-                InfoItem(label: 'Clients', value: '${controller.clientCount}'),
-              ],
-            ),
-            if (showSession) ...[
-              const SizedBox(height: 20),
-              SessionIdDisplay(sessionId: sessionId),
-            ],
-            if (controller.error != null) ...[
-              const SizedBox(height: 16),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFFF5C5C).withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                    color: const Color(0xFFFF5C5C).withValues(alpha: 0.2),
-                  ),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.error_outline,
-                        size: 16, color: Color(0xFFFF5C5C)),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        controller.error!,
-                        style: const TextStyle(
-                            color: Color(0xFFFF5C5C), fontSize: 13),
-                      ),
-                    ),
-                  ],
                 ),
               ),
+              Switch(
+                value: controller.running,
+                onChanged: (value) {
+                  if (value) {
+                    if (canStart) controller.start();
+                  } else {
+                    controller.stop();
+                  }
+                },
+              ),
             ],
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              InfoItem(label: 'Port', value: '${controller.port}'),
+              const SizedBox(width: 24),
+              InfoItem(label: 'Connections', value: '${controller.clientCount}'),
+            ],
+          ),
+          if (showSession) ...[
+            const SizedBox(height: 20),
+            SessionIdDisplay(sessionId: sessionId),
           ],
-        ),
+          if (controller.error != null) ...[
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFF5C5C).withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: const Color(0xFFFF5C5C).withValues(alpha: 0.2),
+                ),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.error_outline,
+                      size: 16, color: Color(0xFFFF5C5C)),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      controller.error!,
+                      style: const TextStyle(
+                          color: Color(0xFFFF5C5C), fontSize: 13),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
       ),
     );
+
+    if (flat) {
+      return content;
+    }
+
+    return Card(child: content);
   }
 }
 

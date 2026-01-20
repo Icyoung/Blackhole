@@ -12,6 +12,7 @@ class HorizonApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Blackhole Horizon',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
         scaffoldBackgroundColor: const Color(0xFF0F141B),
@@ -19,6 +20,10 @@ class HorizonApp extends StatelessWidget {
           seedColor: const Color(0xFF1A2A3A),
           brightness: Brightness.dark,
           surface: const Color(0xFF111620),
+        ),
+        textTheme: const TextTheme(
+          bodyMedium: TextStyle(color: Colors.white70),
+          titleMedium: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
         ),
         cardTheme: CardThemeData(
           color: const Color(0xFF111620),
@@ -29,16 +34,6 @@ class HorizonApp extends StatelessWidget {
               color: Colors.white.withValues(alpha: 0.05),
               width: 1,
             ),
-          ),
-        ),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFF0F141B),
-          elevation: 0,
-          centerTitle: false,
-          titleTextStyle: TextStyle(
-            fontSize: 20,
-            fontWeight: FontWeight.bold,
-            color: Colors.white,
           ),
         ),
         useMaterial3: true,

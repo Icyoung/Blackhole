@@ -12,24 +12,29 @@ import '../services/terminal_service.dart';
 import '../services/ws_server.dart';
 
 /// Represents a paired device that has been approved to connect
+enum DeviceType { mobile, desktop, web, unknown }
+
 class PairedDevice {
   PairedDevice({
     required this.deviceKey,
     required this.deviceName,
     required this.firstPairedAt,
     required this.lastSeenAt,
+    this.deviceType = DeviceType.unknown,
   });
 
   final String deviceKey;
   String deviceName;
   final DateTime firstPairedAt;
   DateTime lastSeenAt;
+  DeviceType deviceType;
 
   Map<String, dynamic> toJson() => {
         'deviceKey': deviceKey,
         'deviceName': deviceName,
         'firstPairedAt': firstPairedAt.toIso8601String(),
         'lastSeenAt': lastSeenAt.toIso8601String(),
+        'deviceType': deviceType.name,
       };
 
   factory PairedDevice.fromJson(Map<String, dynamic> json) => PairedDevice(
@@ -37,7 +42,21 @@ class PairedDevice {
         deviceName: json['deviceName'] as String,
         firstPairedAt: DateTime.parse(json['firstPairedAt'] as String),
         lastSeenAt: DateTime.parse(json['lastSeenAt'] as String),
+        deviceType: _parseDeviceType(json['deviceType'] as String?),
       );
+
+  static DeviceType _parseDeviceType(String? type) {
+    switch (type) {
+      case 'mobile':
+        return DeviceType.mobile;
+      case 'desktop':
+        return DeviceType.desktop;
+      case 'web':
+        return DeviceType.web;
+      default:
+        return DeviceType.unknown;
+    }
+  }
 }
 
 /// Represents a pending pairing request waiting for user confirmation
@@ -46,11 +65,13 @@ class PendingPairing {
     required this.deviceKey,
     required this.deviceName,
     required this.requestedAt,
+    this.deviceType = DeviceType.unknown,
   });
 
   final String? deviceKey;
   final String deviceName;
   final DateTime requestedAt;
+  final DeviceType deviceType;
 }
 
 enum _BinaryType {
@@ -87,16 +108,21 @@ class HorizonController extends ChangeNotifier {
         _wormholeBaseUrl = Platform.environment['WORMHOLE_URL'],
         _wormholeToken = Platform.environment['WORMHOLE_TOKEN'],
         _wormholeEnabled =
-            (Platform.environment['WORMHOLE_URL'] ?? '').isNotEmpty;
+            (Platform.environment['WORMHOLE_URL'] ?? '').isNotEmpty,
+        _hostDeviceName = Platform.localHostname;
 
   final TerminalPlugin _terminal = TerminalPlugin();
+  final StreamController<TerminalOutput> _localOutputController =
+      StreamController<TerminalOutput>.broadcast();
   final MethodChannel _systemChannel = const MethodChannel('com.blackhole/system');
   final WsServer _wsServer;
   final GroupManager _groupManager = GroupManager();
   String? _wormholeBaseUrl;
   String? _wormholeToken;
   bool _wormholeEnabled;
+  bool _wormholeConnecting = false;
   bool _lanEnabled = true;
+  String? _hostDeviceName;
 
   final Set<String> _sessions = {};
   final bool _devModeRequested;
@@ -133,10 +159,16 @@ class HorizonController extends ChangeNotifier {
   int get port => _wsServer.port;
   bool get lanEnabled => _lanEnabled;
   bool get wormholeEnabled => _wormholeEnabled;
+  bool get wormholeConnecting => _wormholeConnecting;
+  bool get wormholeConnected => _wormholeEnabled && _wormholeSocket != null;
   String get wormholeBaseUrl => _wormholeBaseUrl ?? '';
   String get wormholeToken => _wormholeToken ?? '';
   String? get wormholeSessionId => _wormholeSessionId;
   String get wormholeSessionLabel => _wormholeSessionId ?? 'Connecting...';
+  String get hostDeviceName =>
+      _hostDeviceName?.trim().isNotEmpty == true
+          ? _hostDeviceName!.trim()
+          : Platform.localHostname;
   bool get devModeRequested => _devModeRequested;
   bool get devModeEnabled =>
       _devModeRequested && (!_requireDevModeConfirmation || _devModeConfirmed);
@@ -149,6 +181,137 @@ class HorizonController extends ChangeNotifier {
   bool get customSessionEnabled => _customSessionEnabled;
   String get customSessionId => _customSessionId;
 
+  // ============ Local Mode API (for Horizon mode direct access) ============
+
+  /// Get list of local session IDs
+  List<String> get localSessions => _sessions.toList();
+
+  /// Get the local terminal output stream (for direct subscription)
+  Stream<TerminalOutput> get localOutputStream =>
+      _localOutputController.stream;
+
+  Future<void> applyLocalGroupCommand(Map<String, dynamic> payload) async {
+    final type = payload['type'];
+    if (type == 'group_create') {
+      final name = payload['name'];
+      await _handleGroupCreate(name is String ? name : null);
+      return;
+    }
+    if (type == 'group_rename') {
+      final groupId = payload['groupId'];
+      final name = payload['name'];
+      if (groupId is String && name is String) {
+        _handleGroupRename(groupId, name);
+      }
+      return;
+    }
+    if (type == 'group_delete') {
+      final groupId = payload['groupId'];
+      if (groupId is String) {
+        _handleGroupDelete(groupId);
+      }
+      return;
+    }
+    if (type == 'group_delete_with_sessions') {
+      final groupId = payload['groupId'];
+      if (groupId is String) {
+        await _handleGroupDeleteWithSessions(groupId);
+      }
+      return;
+    }
+    if (type == 'group_move_session') {
+      final sessionId = payload['sessionId'];
+      final groupId = payload['groupId'];
+      final oldIndex = payload['oldIndex'];
+      final newIndex = payload['newIndex'];
+      if (sessionId is String && groupId is String) {
+        _handleGroupMoveSession(
+          sessionId,
+          groupId,
+          oldIndex: oldIndex is int ? oldIndex : null,
+          newIndex: newIndex is int ? newIndex : null,
+        );
+      }
+      return;
+    }
+    if (type == 'group_reorder') {
+      final groupId = payload['groupId'];
+      final newIndex = payload['newIndex'];
+      if (groupId is String && newIndex is int) {
+        _handleGroupReorder(groupId, newIndex);
+      }
+      return;
+    }
+    if (type == 'session_rename') {
+      final sessionId = payload['sessionId'];
+      final name = payload['name'];
+      if (sessionId is String && name is String) {
+        _handleSessionRename(sessionId, name);
+      }
+    }
+  }
+
+  /// Create a new local session (without network broadcast)
+  Future<String?> createLocalSession({String? groupId}) async {
+    if (!_running) {
+      return null;
+    }
+    final sessionId = await _terminal.startShell(rows: 24, cols: 80);
+    _sessions.add(sessionId);
+    var changed = false;
+    if (groupId != null && groupId.isNotEmpty) {
+      final result = _groupManager.moveSession(sessionId, groupId);
+      changed = result.changed;
+    } else {
+      changed = _groupManager.onSessionCreated(sessionId);
+    }
+    unawaited(_groupManager.save());
+    _notifySessionCreated(sessionId);
+    if (changed) {
+      _broadcastGroupSync();
+    }
+    notifyListeners();
+    return sessionId;
+  }
+
+  /// Close a local session (without network broadcast)
+  Future<void> closeLocalSession(String sessionId) async {
+    if (!_sessions.contains(sessionId)) {
+      return;
+    }
+    await _terminal.kill(sessionId);
+    _sessions.remove(sessionId);
+    final changed = _groupManager.onSessionClosed(sessionId);
+    unawaited(_groupManager.save());
+    _notifySessionClosed(sessionId);
+    if (changed) {
+      _broadcastGroupSync();
+    }
+    notifyListeners();
+  }
+
+  /// Write stdin to a local session
+  Future<void> writeLocalStdin(String sessionId, Uint8List data) async {
+    if (!_sessions.contains(sessionId)) {
+      return;
+    }
+    await _terminal.writeStdin(sessionId, data);
+  }
+
+  /// Resize a local session
+  Future<void> resizeLocalSession(String sessionId, int rows, int cols) async {
+    if (!_sessions.contains(sessionId)) {
+      return;
+    }
+    await _terminal.resize(sessionId, rows, cols);
+  }
+
+  /// Get group sync payload for local mode
+  Map<String, dynamic> getLocalGroupSync() {
+    _groupManager.reconcileSessions(_sessions);
+    return _groupManager.buildSyncPayload();
+  }
+
   void confirmDevMode() {
     if (!requiresDevModeConfirmation) {
       return;
@@ -156,6 +319,18 @@ class HorizonController extends ChangeNotifier {
     _devModeConfirmed = true;
     notifyListeners();
     start();
+  }
+
+  void setHostDeviceName(String name) {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty || trimmed == _hostDeviceName) {
+      return;
+    }
+    _hostDeviceName = trimmed;
+    if (_running) {
+      _broadcastHostInfo();
+    }
+    notifyListeners();
   }
 
   Future<void> requestFolderAccess() async {
@@ -217,6 +392,7 @@ class HorizonController extends ChangeNotifier {
       }
       _addresses = _lanEnabled ? await _resolveAddresses() : const [];
       _running = true;
+      _broadcastHostInfo();
       notifyListeners();
     } catch (error) {
       await _wsServer.stop();
@@ -249,14 +425,24 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     _lanEnabled = enabled;
-    if (_running) {
-      if (_lanEnabled) {
-        await _wsServer.start(onMessage: _handleMessage);
-        _addresses = await _resolveAddresses();
+    if (!_lanEnabled && !_wormholeEnabled) {
+      if (_running) {
+        await stop();
       } else {
-        await _wsServer.stop();
-        _addresses = const [];
+        notifyListeners();
       }
+      return;
+    }
+    if (!_running) {
+      await start();
+      return;
+    }
+    if (_lanEnabled) {
+      await _wsServer.start(onMessage: _handleMessage);
+      _addresses = await _resolveAddresses();
+    } else {
+      await _wsServer.stop();
+      _addresses = const [];
     }
     notifyListeners();
   }
@@ -266,12 +452,22 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     _wormholeEnabled = enabled;
-    if (_running) {
-      if (_wormholeEnabled) {
-        await _connectWormhole();
+    if (!_lanEnabled && !_wormholeEnabled) {
+      if (_running) {
+        await stop();
       } else {
-        await _disconnectWormhole();
+        notifyListeners();
       }
+      return;
+    }
+    if (!_running) {
+      await start();
+      return;
+    }
+    if (_wormholeEnabled) {
+      await _connectWormhole();
+    } else {
+      await _disconnectWormhole();
     }
     notifyListeners();
   }
@@ -435,6 +631,7 @@ class HorizonController extends ChangeNotifier {
     if (!_sessions.contains(output.sessionId)) {
       return;
     }
+    _localOutputController.add(output);
     _logDeleteProbe('Horizon/stdout', output.data);
     _logStdoutProbe(output.data);
     final message = _buildStdoutMessage(output.sessionId, output.data);
@@ -451,6 +648,7 @@ class HorizonController extends ChangeNotifier {
         'sessions': _sessions.toList(),
       }),
     );
+    _wsServer.sendTo(socket, _buildHostInfoMessage());
     if (changed) {
       _broadcastGroupSync();
     } else {
@@ -518,7 +716,7 @@ class HorizonController extends ChangeNotifier {
     return addresses;
   }
 
-  Future<void> _connectWormhole() async {
+  Future<void> _connectWormhole({bool isReconnect = false}) async {
     if (!_wormholeEnabled) {
       return;
     }
@@ -533,9 +731,16 @@ class HorizonController extends ChangeNotifier {
     if (uri == null) {
       return;
     }
+
+    if (!isReconnect) {
+      _wormholeConnecting = true;
+      notifyListeners();
+    }
+
     try {
       final socket = await WebSocket.connect(uri.toString());
       _wormholeSocket = socket;
+      _wormholeConnecting = false;
       _wormholeSub = socket.listen(
         _handleWormholeMessage,
         onDone: () {
@@ -550,10 +755,19 @@ class HorizonController extends ChangeNotifier {
         },
       );
       _wormholeReconnectDelaySeconds = 2;
-    } catch (error) {
-      _error = 'Failed to connect Wormhole: $error';
+      _sendToWormhole(_buildHostInfoMessage());
       notifyListeners();
-      _scheduleWormholeReconnect();
+    } catch (error) {
+      _wormholeConnecting = false;
+      if (!isReconnect) {
+        // First attempt failed - disable wormhole
+        _wormholeEnabled = false;
+        _error = 'Failed to connect Wormhole: $error';
+      }
+      notifyListeners();
+      if (isReconnect) {
+        _scheduleWormholeReconnect();
+      }
     }
   }
 
@@ -692,7 +906,10 @@ class HorizonController extends ChangeNotifier {
     if (type == 'voyager_connect') {
       final deviceKey = decoded?['deviceKey'] as String?;
       final deviceName = decoded?['deviceName'] as String? ?? 'Unknown Device';
-      await _handleVoyagerConnect(deviceKey, deviceName);
+      final deviceType =
+          PairedDevice._parseDeviceType(decoded?['deviceType'] as String?);
+      await _handleVoyagerConnect(deviceKey, deviceName, deviceType);
+      _sendToWormhole(_buildHostInfoMessage());
       return;
     }
     if (type == 'voyager_disconnect') {
@@ -814,6 +1031,19 @@ class HorizonController extends ChangeNotifier {
 
   Object _buildPongMessage() {
     return _encodeBinaryMessage(_BinaryType.pong, '', data: Uint8List(0));
+  }
+
+  Object _buildHostInfoMessage() {
+    return _encodeMessage({
+      'type': 'host_info',
+      'hostName': hostDeviceName,
+    });
+  }
+
+  void _broadcastHostInfo() {
+    final message = _buildHostInfoMessage();
+    _wsServer.broadcast(message);
+    _sendToWormhole(message);
   }
 
   void _sendSessionListToWormhole() {
@@ -1226,7 +1456,7 @@ class HorizonController extends ChangeNotifier {
         if (!_running) {
           return;
         }
-        _connectWormhole();
+        _connectWormhole(isReconnect: true);
       },
     );
     _wormholeReconnectDelaySeconds =
@@ -1235,13 +1465,20 @@ class HorizonController extends ChangeNotifier {
 
   // ============ Pairing Methods ============
 
-  Future<void> _handleVoyagerConnect(String? deviceKey, String deviceName) async {
+  Future<void> _handleVoyagerConnect(
+    String? deviceKey,
+    String deviceName,
+    DeviceType deviceType,
+  ) async {
     // Check if this is a paired device
-    final paired = _pairedDevices.where((d) => d.deviceKey == deviceKey).firstOrNull;
+    final paired =
+        _pairedDevices.where((d) => d.deviceKey == deviceKey).firstOrNull;
 
     if (paired != null) {
-      // Already paired, auto-approve
+      // Already paired, auto-approve and update info
       paired.lastSeenAt = DateTime.now();
+      paired.deviceName = deviceName;
+      paired.deviceType = deviceType;
       await _savePairedDevices();
       _sendPairingResponse(deviceKey!, approved: true);
       _wormholeClientCount++;
@@ -1255,6 +1492,7 @@ class HorizonController extends ChangeNotifier {
       deviceKey: deviceKey,
       deviceName: deviceName,
       requestedAt: DateTime.now(),
+      deviceType: deviceType,
     );
     debugPrint('[Horizon] New device requesting pairing: $deviceName');
     notifyListeners();
@@ -1274,6 +1512,7 @@ class HorizonController extends ChangeNotifier {
         deviceName: _pendingPairing!.deviceName,
         firstPairedAt: DateTime.now(),
         lastSeenAt: DateTime.now(),
+        deviceType: _pendingPairing!.deviceType,
       );
       _pairedDevices.add(device);
       _savePairedDevices();
@@ -1392,6 +1631,7 @@ class HorizonController extends ChangeNotifier {
     _disconnectWormhole();
     _outputSub?.cancel();
     _outputSub = null;
+    _localOutputController.close();
     super.dispose();
   }
 }

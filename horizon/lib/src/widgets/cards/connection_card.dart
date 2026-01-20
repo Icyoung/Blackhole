@@ -11,80 +11,89 @@ class ConnectionCard extends StatelessWidget {
     required this.wormholeUrlController,
     required this.wormholeTokenController,
     required this.customSessionController,
+    this.flat = false,
   });
 
   final HorizonController controller;
   final TextEditingController wormholeUrlController;
   final TextEditingController wormholeTokenController;
   final TextEditingController customSessionController;
+  final bool flat;
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+    final contentPadding = flat
+        ? const EdgeInsets.symmetric(vertical: 20)
+        : const EdgeInsets.all(20);
+    final content = Padding(
+      padding: contentPadding,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const SectionTitle(
+            title: 'Connection Modes',
+            icon: Icons.settings_input_component_outlined,
+          ),
+          const SizedBox(height: 12),
+          ConfigRow(
+            label: 'LAN Connection',
+            subtitle: 'Allow direct connections on local network',
+            value: controller.lanEnabled,
+            onChanged: (v) => controller.setLanEnabled(v),
+          ),
+          const Divider(height: 24, color: Colors.white10),
+          ConfigRow(
+            label: 'Wormhole Connection',
+            subtitle: 'Enable secure remote access via relay',
+            value: controller.wormholeEnabled,
+            onChanged: (v) => controller.setWormholeEnabled(v),
+          ),
+          if (controller.wormholeEnabled) ...[
+            const SizedBox(height: 24),
             const SectionTitle(
-              title: 'Connection Modes',
-              icon: Icons.settings_input_component_outlined,
+              title: 'Wormhole Settings',
+              icon: Icons.hub_outlined,
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 16),
+            StyledTextField(
+              controller: wormholeUrlController,
+              label: 'Base URL',
+              hint: 'wss://wormhole.example.com',
+            ),
+            const SizedBox(height: 16),
+            StyledTextField(
+              controller: wormholeTokenController,
+              label: 'Access Token',
+              hint: 'Optional authentication token',
+              isPassword: true,
+            ),
+            const Divider(height: 32, color: Colors.white10),
             ConfigRow(
-              label: 'LAN Connection',
-              subtitle: 'Allow direct connections on local network',
-              value: controller.lanEnabled,
-              onChanged: (v) => controller.setLanEnabled(v),
+              label: 'Custom Session ID',
+              subtitle: 'Use a fixed 6-character code (requires token)',
+              value: controller.customSessionEnabled,
+              onChanged: (v) => controller.setCustomSessionEnabled(v),
             ),
-            const Divider(height: 24, color: Colors.white10),
-            ConfigRow(
-              label: 'Wormhole Connection',
-              subtitle: 'Enable secure remote access via relay',
-              value: controller.wormholeEnabled,
-              onChanged: (v) => controller.setWormholeEnabled(v),
-            ),
-            if (controller.wormholeEnabled) ...[
-              const SizedBox(height: 24),
-              const SectionTitle(
-                title: 'Wormhole Settings',
-                icon: Icons.hub_outlined,
-              ),
+            if (controller.customSessionEnabled) ...[
               const SizedBox(height: 16),
               StyledTextField(
-                controller: wormholeUrlController,
-                label: 'Base URL',
-                hint: 'wss://wormhole.example.com',
+                controller: customSessionController,
+                label: 'Session ID',
+                hint: 'e.g., ABC123',
+                maxLength: 6,
+                textCapitalization: TextCapitalization.characters,
               ),
-              const SizedBox(height: 16),
-              StyledTextField(
-                controller: wormholeTokenController,
-                label: 'Access Token',
-                hint: 'Optional authentication token',
-                isPassword: true,
-              ),
-              const Divider(height: 32, color: Colors.white10),
-              ConfigRow(
-                label: 'Custom Session ID',
-                subtitle: 'Use a fixed 6-character code (requires token)',
-                value: controller.customSessionEnabled,
-                onChanged: (v) => controller.setCustomSessionEnabled(v),
-              ),
-              if (controller.customSessionEnabled) ...[
-                const SizedBox(height: 16),
-                StyledTextField(
-                  controller: customSessionController,
-                  label: 'Session ID',
-                  hint: 'e.g., ABC123',
-                  maxLength: 6,
-                  textCapitalization: TextCapitalization.characters,
-                ),
-              ],
             ],
           ],
-        ),
+        ],
       ),
     );
+
+    if (flat) {
+      return content;
+    }
+
+    return Card(child: content);
   }
 }
 
