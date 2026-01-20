@@ -5,6 +5,7 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xterm/xterm.dart';
 
@@ -782,8 +783,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
                             keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
                             backgroundOpacity: 1.0,
                             padding: const EdgeInsets.all(8),
-                            textStyle: const TerminalStyle(
-                              fontFamily: 'JetBrainsMono',
+                            textStyle: TerminalStyle(
+                              fontFamily: kIsWeb ? GoogleFonts.jetBrainsMono().fontFamily! : 'JetBrainsMono',
                               fontSize: 14,
                             ),
                           ),
@@ -833,8 +834,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
                     keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
                     backgroundOpacity: 1.0,
                     padding: EdgeInsets.fromLTRB(8, 4, 8, _bottomBarHeight + 8),
-                    textStyle: const TerminalStyle(
-                      fontFamily: 'JetBrainsMono',
+                    textStyle: TerminalStyle(
+                      fontFamily: kIsWeb ? GoogleFonts.jetBrainsMono().fontFamily! : 'JetBrainsMono',
                       fontSize: 14,
                     ),
                   ),

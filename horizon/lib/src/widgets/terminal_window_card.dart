@@ -73,14 +73,6 @@ class _TerminalWindowCardState extends State<TerminalWindowCard>
                 : Colors.white.withValues(alpha: 0.05),
             width: widget.isActive ? 1.5 : 1.0,
           ),
-          boxShadow: [
-            if (widget.isActive)
-              BoxShadow(
-                color: const Color(0xFF4B7AA6).withValues(alpha: 0.1),
-                blurRadius: 10,
-                spreadRadius: 0,
-              ),
-          ],
         ),
         child: Column(
           children: [
@@ -116,24 +108,13 @@ class _TerminalWindowCardState extends State<TerminalWindowCard>
                     ),
                   ),
                   if (widget.isActive)
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(
-                          Icons.keyboard_arrow_right,
-                          size: 12,
-                          color: Color(0xFF4B7AA6),
-                        ),
-                        const SizedBox(width: 8),
-                        GestureDetector(
-                          onTap: widget.onClose,
-                          child: Icon(
-                            Icons.close_rounded,
-                            size: 14,
-                            color: Colors.white.withValues(alpha: 0.3),
-                          ),
-                        ),
-                      ],
+                    GestureDetector(
+                      onTap: widget.onClose,
+                      child: Icon(
+                        Icons.close_rounded,
+                        size: 14,
+                        color: Colors.white.withValues(alpha: 0.3),
+                      ),
                     ),
                 ],
               ),

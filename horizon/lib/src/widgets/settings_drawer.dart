@@ -32,6 +32,7 @@ class SettingsDrawer extends StatefulWidget {
     required this.hostWormholeUrlController,
     required this.hostWormholeTokenController,
     required this.hostCustomSessionController,
+    required this.onHostWormholeConfigCommit,
   });
 
   final bool isHorizonMode;
@@ -54,6 +55,7 @@ class SettingsDrawer extends StatefulWidget {
   final TextEditingController hostWormholeUrlController;
   final TextEditingController hostWormholeTokenController;
   final TextEditingController hostCustomSessionController;
+  final VoidCallback onHostWormholeConfigCommit;
 
   @override
   State<SettingsDrawer> createState() => _SettingsDrawerState();
@@ -74,11 +76,17 @@ class _SettingsDrawerState extends State<SettingsDrawer>
   static const double _footerGap = 28;
 
   String? _remoteAccessError;
+  bool _showRemoteAccessFields = false;
+  final FocusNode _wormholeUrlFocus = FocusNode();
+  final FocusNode _wormholeTokenFocus = FocusNode();
   late TabController _tabController;
 
   @override
   void initState() {
     super.initState();
+    _showRemoteAccessFields = widget.hostController.wormholeEnabled;
+    _wormholeUrlFocus.addListener(_handleWormholeFieldFocus);
+    _wormholeTokenFocus.addListener(_handleWormholeFieldFocus);
     _tabController = TabController(
       length: 2,
       vsync: this,
@@ -91,6 +99,10 @@ class _SettingsDrawerState extends State<SettingsDrawer>
   void dispose() {
     _tabController.removeListener(_onTabChanged);
     _tabController.dispose();
+    _wormholeUrlFocus.removeListener(_handleWormholeFieldFocus);
+    _wormholeTokenFocus.removeListener(_handleWormholeFieldFocus);
+    _wormholeUrlFocus.dispose();
+    _wormholeTokenFocus.dispose();
     super.dispose();
   }
 
@@ -107,6 +119,57 @@ class _SettingsDrawerState extends State<SettingsDrawer>
         setState(() => _remoteAccessError = null);
       }
     });
+  }
+
+  void _handleWormholeFieldFocus() {
+    if (_wormholeUrlFocus.hasFocus || _wormholeTokenFocus.hasFocus) {
+      return;
+    }
+    widget.onHostWormholeConfigCommit();
+  }
+
+  String? _validateRemoteAccess() {
+    final url = widget.hostWormholeUrlController.text.trim();
+    if (url.isEmpty) {
+      return 'Please enter a Wormhole URL';
+    }
+    final uri = Uri.tryParse(url);
+    if (uri == null ||
+        (uri.scheme != 'ws' && uri.scheme != 'wss') ||
+        uri.host.isEmpty) {
+      return 'Please enter a valid Wormhole URL';
+    }
+    final token = widget.hostWormholeTokenController.text.trim();
+    if (token.isNotEmpty && token.contains(RegExp(r'\\s'))) {
+      return 'Access token cannot contain spaces';
+    }
+    final customSessionValid = !widget.hostController.customSessionEnabled ||
+        widget.hostCustomSessionController.text.trim().length == 6;
+    if (!customSessionValid) {
+      return 'Custom Session ID must be 6 characters';
+    }
+    return null;
+  }
+
+  void _handleRemoteAccessToggle(bool value) {
+    if (!value) {
+      setState(() => _showRemoteAccessFields = false);
+      widget.hostController.setWormholeEnabled(false);
+      return;
+    }
+    setState(() => _showRemoteAccessFields = true);
+    widget.hostController.setWormholeEnabled(true);
+  }
+
+  void _handleRemoteAccessTest() {
+    final error = _validateRemoteAccess();
+    if (error != null) {
+      _showRemoteAccessError(error);
+      return;
+    }
+    if (_remoteAccessError != null) {
+      setState(() => _remoteAccessError = null);
+    }
   }
 
   @override
@@ -388,10 +451,23 @@ class _SettingsDrawerState extends State<SettingsDrawer>
     final statusColor = widget.hostController.running
         ? const Color(0xFF41C87A)
         : const Color(0xFFFF5C5C);
+    final showRemoteFields =
+        _showRemoteAccessFields || widget.hostController.wormholeEnabled;
+    final wormholeEnabled = widget.hostController.wormholeEnabled;
+    final wormholeConnecting = widget.hostController.wormholeConnecting;
+    final wormholeConnected = widget.hostController.wormholeConnected;
+    final wormholeStatusText = wormholeConnected
+        ? 'Online'
+        : (wormholeConnecting ? 'Connecting' : 'Offline');
+    final wormholeStatusColor = wormholeConnected
+        ? const Color(0xFF41C87A)
+        : (wormholeConnecting
+            ? const Color(0xFFFFC857)
+            : const Color(0xFFFF8A80));
     final sessionId = widget.hostController.customSessionEnabled
         ? widget.hostController.customSessionId
         : widget.hostController.wormholeSessionId;
-    final isWormholeConnected = widget.hostController.wormholeEnabled &&
+    final isWormholeConnected = wormholeEnabled &&
         sessionId != null &&
         sessionId.isNotEmpty &&
         sessionId != 'Connecting...';
@@ -429,6 +505,29 @@ class _SettingsDrawerState extends State<SettingsDrawer>
                   ),
                 ],
               ),
+              const SizedBox(height: _tightGap),
+              if (wormholeEnabled) ...[
+                const SizedBox(height: _tightGap),
+                Row(
+                  children: [
+                    StatusDot(connected: wormholeConnected, size: 8),
+                    const SizedBox(width: 8),
+                    const Text(
+                      'Wormhole Status',
+                      style: TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                    const Spacer(),
+                    Text(
+                      wormholeStatusText,
+                      style: TextStyle(
+                        color: wormholeStatusColor,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
               const SizedBox(height: _tightGap),
               Row(
                 children: [
@@ -537,60 +636,92 @@ class _SettingsDrawerState extends State<SettingsDrawer>
           (value) => widget.hostController.setLanEnabled(value),
         ),
         _buildRemoteAccessSwitch(),
-        const SizedBox(height: _blockGap),
-        TextField(
-          controller: widget.hostWormholeUrlController,
-          decoration: _buildInputDecoration(
-            'Wormhole Base URL',
-            fill,
-            border,
-            hint: 'wss://wormhole.example.com',
-          ),
-          style: const TextStyle(color: Colors.white, fontSize: 14),
-        ),
-        const SizedBox(height: _blockGap),
-        TextField(
-          controller: widget.hostWormholeTokenController,
-          decoration: _buildInputDecoration(
-            'Access Token',
-            fill,
-            border,
-            hint: 'Optional authentication token',
-          ),
-          style: const TextStyle(color: Colors.white, fontSize: 14),
-          obscureText: true,
-        ),
-        const SizedBox(height: _blockGap),
-        _buildDrawerSwitch(
-          'Use Custom Session ID',
-          widget.hostController.customSessionEnabled,
-          (value) => widget.hostController.setCustomSessionEnabled(value),
-        ),
-        if (widget.hostController.customSessionEnabled) ...[
+        if (showRemoteFields) ...[
           const SizedBox(height: _blockGap),
           TextField(
-            controller: widget.hostCustomSessionController,
-            textCapitalization: TextCapitalization.characters,
+            controller: widget.hostWormholeUrlController,
+            focusNode: _wormholeUrlFocus,
             decoration: _buildInputDecoration(
-              'Session ID',
+              'Wormhole Base URL',
               fill,
               border,
-              hint: 'e.g., ABC123',
-              suffixText:
-                  '${widget.hostCustomSessionController.text.length}/6',
+              hint: 'wss://wormhole.example.com',
             ),
-            maxLength: 6,
-            buildCounter: (context,
-                    {required currentLength,
-                    required isFocused,
-                    required maxLength}) =>
-                null,
-            style: const TextStyle(
-              color: Colors.white,
-              letterSpacing: 4,
-              fontWeight: FontWeight.bold,
-            ),
+            style: const TextStyle(color: Colors.white, fontSize: 14),
           ),
+          const SizedBox(height: _blockGap),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: widget.hostWormholeTokenController,
+                  focusNode: _wormholeTokenFocus,
+                  decoration: _buildInputDecoration(
+                    'Access Token',
+                    fill,
+                    border,
+                    hint: 'Optional authentication token',
+                  ),
+                  style: const TextStyle(color: Colors.white, fontSize: 14),
+                  obscureText: true,
+                ),
+              ),
+              const SizedBox(width: 10),
+              IntrinsicHeight(
+                child: ElevatedButton(
+                  onPressed: widget.hostController.wormholeConnecting
+                      ? null
+                      : _handleRemoteAccessTest,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF284058),
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
+                  ),
+                  child: const Text('Test'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: _blockGap),
+        ],
+        if (showRemoteFields) ...[
+          _buildDrawerSwitch(
+            'Use Custom Session ID',
+            widget.hostController.customSessionEnabled,
+            (value) => widget.hostController.setCustomSessionEnabled(value),
+          ),
+          if (widget.hostController.customSessionEnabled) ...[
+            const SizedBox(height: _blockGap),
+            TextField(
+              controller: widget.hostCustomSessionController,
+              textCapitalization: TextCapitalization.characters,
+              decoration: _buildInputDecoration(
+                'Session ID',
+                fill,
+                border,
+                hint: 'e.g., ABC123',
+                suffixText:
+                    '${widget.hostCustomSessionController.text.length}/6',
+              ),
+              maxLength: 6,
+              buildCounter: (context,
+                      {required currentLength,
+                      required isFocused,
+                      required maxLength}) =>
+                  null,
+              style: const TextStyle(
+                color: Colors.white,
+                letterSpacing: 4,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
         ],
       ],
     );
@@ -832,17 +963,6 @@ class _SettingsDrawerState extends State<SettingsDrawer>
     final isConnecting = controller.wormholeConnecting;
     final isEnabled = controller.wormholeEnabled;
 
-    // Validation: URL must be valid
-    final url = widget.hostWormholeUrlController.text.trim();
-    final isUrlValid = url.isNotEmpty &&
-        (url.startsWith('ws://') || url.startsWith('wss://'));
-
-    // Validation: Custom session must be valid if enabled
-    final customSessionValid = !controller.customSessionEnabled ||
-        widget.hostCustomSessionController.text.trim().length == 6;
-
-    final canEnable = isUrlValid && customSessionValid;
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -860,21 +980,7 @@ class _SettingsDrawerState extends State<SettingsDrawer>
                 opacity: isConnecting ? 0.5 : 1.0,
                 child: Switch(
                   value: isEnabled,
-                  onChanged: isConnecting
-                      ? null
-                      : (value) {
-                          if (value && !canEnable) {
-                            if (!isUrlValid) {
-                              _showRemoteAccessError(
-                                  'Please enter a valid Wormhole URL');
-                            } else if (!customSessionValid) {
-                              _showRemoteAccessError(
-                                  'Custom Session ID must be 6 characters');
-                            }
-                            return;
-                          }
-                          controller.setWormholeEnabled(value);
-                        },
+                  onChanged: isConnecting ? null : _handleRemoteAccessToggle,
                 ),
               ),
             ],

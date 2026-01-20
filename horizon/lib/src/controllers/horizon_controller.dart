@@ -488,6 +488,7 @@ class HorizonController extends ChangeNotifier {
       await _disconnectWormhole();
       await _connectWormhole();
     }
+    unawaited(_savePairedDevices());
     notifyListeners();
   }
 
@@ -759,15 +760,9 @@ class HorizonController extends ChangeNotifier {
       notifyListeners();
     } catch (error) {
       _wormholeConnecting = false;
-      if (!isReconnect) {
-        // First attempt failed - disable wormhole
-        _wormholeEnabled = false;
-        _error = 'Failed to connect Wormhole: $error';
-      }
+      _error = 'Failed to connect Wormhole: $error';
       notifyListeners();
-      if (isReconnect) {
-        _scheduleWormholeReconnect();
-      }
+      _scheduleWormholeReconnect();
     }
   }
 
@@ -1592,6 +1587,16 @@ class HorizonController extends ChangeNotifier {
       final settings = json['settings'] as Map<String, dynamic>? ?? {};
       _customSessionEnabled = settings['customSessionEnabled'] as bool? ?? false;
       _customSessionId = settings['customSessionId'] as String? ?? '';
+      final savedBase = settings['wormholeBaseUrl'] as String?;
+      if (savedBase != null) {
+        final trimmed = savedBase.trim();
+        _wormholeBaseUrl = trimmed.isEmpty ? null : trimmed;
+      }
+      final savedToken = settings['wormholeToken'] as String?;
+      if (savedToken != null) {
+        final trimmed = savedToken.trim();
+        _wormholeToken = trimmed.isEmpty ? null : trimmed;
+      }
 
       debugPrint('[Horizon] Loaded ${_pairedDevices.length} paired devices');
     } catch (e) {
@@ -1614,6 +1619,8 @@ class HorizonController extends ChangeNotifier {
         'settings': {
           'customSessionEnabled': _customSessionEnabled,
           'customSessionId': _customSessionId,
+          'wormholeBaseUrl': _wormholeBaseUrl ?? '',
+          'wormholeToken': _wormholeToken ?? '',
         },
       };
 

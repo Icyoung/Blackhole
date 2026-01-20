@@ -3,9 +3,11 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:xterm/xterm.dart';
 
@@ -885,8 +887,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
                             keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
                             backgroundOpacity: 1.0,
                             padding: const EdgeInsets.all(8),
-                            textStyle: const TerminalStyle(
-                              fontFamily: 'Menlo',
+                            textStyle: TerminalStyle(
+                              fontFamily: kIsWeb ? GoogleFonts.jetBrainsMono().fontFamily! : 'JetBrainsMono',
                               fontSize: 14,
                             ),
                           ),
@@ -936,8 +938,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
                     keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
                     backgroundOpacity: 1.0,
                     padding: EdgeInsets.fromLTRB(8, 4, 8, _bottomBarHeight + 8),
-                    textStyle: const TerminalStyle(
-                      fontFamily: 'Menlo',
+                    textStyle: TerminalStyle(
+                      fontFamily: kIsWeb ? GoogleFonts.jetBrainsMono().fontFamily! : 'JetBrainsMono',
                       fontSize: 14,
                     ),
                   ),
@@ -2341,8 +2343,8 @@ class _TerminalWindowCard extends StatelessWidget {
                   keyboardType: showHHKB ? TextInputType.none : TextInputType.text,
                   backgroundOpacity: 1.0,
                   padding: const EdgeInsets.all(8),
-                  textStyle: const TerminalStyle(
-                    fontFamily: 'Menlo',
+                  textStyle: TerminalStyle(
+                    fontFamily: kIsWeb ? GoogleFonts.jetBrainsMono().fontFamily! : 'JetBrainsMono',
                     fontSize: 12,
                   ),
                 ),

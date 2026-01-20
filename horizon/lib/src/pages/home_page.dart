@@ -93,6 +93,7 @@ class _HorizonHomeState extends State<HorizonHome>
   String? _deviceKey;
   String _deviceName = '';
   bool _clientPairingPending = false;
+  bool _hostConfigSynced = false;
 
   // Local mode (Horizon) output subscription
   StreamSubscription<TerminalOutput>? _localOutputSub;
@@ -204,8 +205,6 @@ class _HorizonHomeState extends State<HorizonHome>
         TextEditingController(text: _hostController.wormholeToken);
     _hostCustomSessionController =
         TextEditingController(text: _hostController.customSessionId);
-    _hostWormholeUrlController.addListener(_syncHostWormholeConfig);
-    _hostWormholeTokenController.addListener(_syncHostWormholeConfig);
     _hostCustomSessionController.addListener(_syncHostCustomSession);
     _hostController.addListener(_handleHostChange);
     if (!_hostController.requiresDevModeConfirmation) {
@@ -269,6 +268,12 @@ class _HorizonHomeState extends State<HorizonHome>
       return;
     }
     if (_hostController.running) {
+      if (!_hostConfigSynced) {
+        _hostWormholeUrlController.text = _hostController.wormholeBaseUrl;
+        _hostWormholeTokenController.text = _hostController.wormholeToken;
+        _hostCustomSessionController.text = _hostController.customSessionId;
+        _hostConfigSynced = true;
+      }
       // Always subscribe to local output (for Horizon mode data)
       if (_localOutputSub == null) {
         _subscribeLocalOutput();
@@ -565,8 +570,6 @@ class _HorizonHomeState extends State<HorizonHome>
     _unsubscribeLocalOutput();
     WidgetsBinding.instance.removeObserver(this);
     _hostController.removeListener(_handleHostChange);
-    _hostWormholeUrlController.removeListener(_syncHostWormholeConfig);
-    _hostWormholeTokenController.removeListener(_syncHostWormholeConfig);
     _hostCustomSessionController.removeListener(_syncHostCustomSession);
     _urlController.removeListener(_handleAddressChange);
     _wormholeController.removeListener(_handleAddressChange);
@@ -1609,6 +1612,7 @@ class _HorizonHomeState extends State<HorizonHome>
       hostWormholeUrlController: _hostWormholeUrlController,
       hostWormholeTokenController: _hostWormholeTokenController,
       hostCustomSessionController: _hostCustomSessionController,
+      onHostWormholeConfigCommit: _syncHostWormholeConfig,
     );
   }
 }
