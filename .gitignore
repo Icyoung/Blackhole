@@ -1,4 +1,5 @@
-docs/architecture.md
+docs/
+landing/
 
 # Rust build artifacts
 wormhole/target/
