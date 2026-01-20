@@ -19,7 +19,7 @@ A cross-platform remote terminal system for secure shell access across devices.
 
 ## Components
 
-### Horizon for Blackhole (Host Terminal Server)
+### Horizon (Host Terminal Server)
 
 The host application that runs on the machine you want to access remotely. Provides PTY (pseudo-terminal) functionality with native platform support. Also integrates Voyager client functionality for connecting to other Horizon hosts.
 
@@ -115,5 +115,5 @@ If you intend to use Blackhole for commercial purposes without
 releasing your source code under GPL-3.0, you must obtain a
 commercial license.
 
-Contact: licensing@blackhole.dev
+Contact: dev@blackhole-ai.com
 

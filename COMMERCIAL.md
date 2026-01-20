@@ -72,7 +72,7 @@ This Agreement shall be governed by and construed in accordance with applicable 
 For commercial licensing inquiries, please contact:
 
 - GitHub: https://github.com/icyoung/blackhole
-- Email: [contact email]
+- Email: dev@blackhole-ai.com
 
 ---
 
