@@ -2,22 +2,6 @@
 
 A cross-platform remote terminal system for secure shell access across devices.
 
-## License
-
-Blackhole is dual-licensed:
-
-- **[GPL-3.0](LICENSE)** for open source use, modification, and redistribution.
-- **[Commercial License](LICENSE-COMMERCIAL.md)** for proprietary use, including:
-  - App Store / Google Play distribution
-  - Closed-source deployments
-  - Commercial SaaS offerings
-
-If you intend to use Blackhole for commercial purposes without
-releasing your source code under GPL-3.0, you must obtain a
-commercial license.
-
-Contact: licensing@blackhole.dev
-
 ## Architecture
 
 ```
@@ -244,4 +228,20 @@ Control messages use JSON format with `type` field:
 - `pairing_response` / `pairing_result` - Device pairing workflow
 - `list` / `create` / `close` - Terminal session management
 - `group_*` - Terminal group operations
+
+## License
+
+Blackhole is dual-licensed:
+
+- **[GPL-3.0](LICENSE)** for open source use, modification, and redistribution.
+- **[Commercial License](LICENSE-COMMERCIAL.md)** for proprietary use, including:
+  - App Store / Google Play distribution
+  - Closed-source deployments
+  - Commercial SaaS offerings
+
+If you intend to use Blackhole for commercial purposes without
+releasing your source code under GPL-3.0, you must obtain a
+commercial license.
+
+Contact: licensing@blackhole.dev
 
