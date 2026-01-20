@@ -2,16 +2,32 @@
 
 A cross-platform remote terminal system for secure shell access across devices.
 
+## License
+
+Blackhole is dual-licensed:
+
+- **[GPL-3.0](LICENSE)** for open source use, modification, and redistribution.
+- **[Commercial License](LICENSE-COMMERCIAL.md)** for proprietary use, including:
+  - App Store / Google Play distribution
+  - Closed-source deployments
+  - Commercial SaaS offerings
+
+If you intend to use Blackhole for commercial purposes without
+releasing your source code under GPL-3.0, you must obtain a
+commercial license.
+
+Contact: licensing@blackhole.dev
+
 ## Architecture
 
 ```
-┌─────────────┐         ┌─────────────┐         ┌─────────────┐
-│   Voyager   │◄───────►│  Wormhole   │◄───────►│   Horizon   │
-│  (Client)   │   WS    │   (Relay)   │   WS    │   (Host)    │
-└─────────────┘         └─────────────┘         └─────────────┘
-     iOS                     Rust                   macOS
-    macOS                   Server                  Linux
-   Android                                         Windows
+┌─────────────┐         ┌─────────────┐         ┌─────────────────────┐
+│   Voyager   │◄───────►│  Wormhole   │◄───────►│       Horizon       │
+│  (Client)   │   WS    │   (Relay)   │   WS    │       (Host)        │
+└─────────────┘         └─────────────┘         └─────────────────────┘
+     iOS                     Rust                        macOS
+    macOS                   Server                       Linux
+   Android                                              Windows
      Web
    Windows
     Linux
@@ -19,9 +35,9 @@ A cross-platform remote terminal system for secure shell access across devices.
 
 ## Components
 
-### Horizon (Host Terminal Server)
+### Horizon for Blackhole (Host Terminal Server)
 
-The host application that runs on the machine you want to access remotely. Provides PTY (pseudo-terminal) functionality with native platform support.
+The host application that runs on the machine you want to access remotely. Provides PTY (pseudo-terminal) functionality with native platform support. Also integrates Voyager client functionality for connecting to other Horizon hosts.
 
 **Platforms:** macOS, Linux, Windows
 
@@ -30,6 +46,9 @@ The host application that runs on the machine you want to access remotely. Provi
 - LAN mode (direct WebSocket connection)
 - Wormhole mode (NAT traversal via relay)
 - 6-character session ID for easy pairing
+- Device pairing with approval workflow
+- Built-in Voyager client for remote access to other hosts
+- Terminal groups for session organization
 
 ### Voyager (Remote Terminal Client)
 
@@ -39,8 +58,9 @@ The client application for connecting to Horizon hosts from any device.
 
 **Features:**
 - Full terminal emulation (xterm)
-- Multi-session support
+- Multi-session support with terminal groups
 - LAN and Wormhole connection modes
+- HHKB-style virtual keyboard for mobile
 - Keyboard shortcuts (Ctrl, Alt, Meta)
 
 ### Wormhole (Relay Server)
@@ -50,9 +70,12 @@ A Rust-based relay server that enables connections between Voyager and Horizon w
 **Tech Stack:** Rust, Axum, Tokio
 
 **Features:**
-- WebSocket relay
-- Session ID assignment
+- WebSocket relay with binary protocol support
+- 6-character session ID assignment
 - Token-based authentication
+- Device pairing workflow support
+- Admin API for session management
+- Docker deployment ready
 
 ## Quick Start
 
@@ -136,30 +159,46 @@ Blackhole/
 │   ├── lib/
 │   │   ├── main.dart
 │   │   └── src/
-│   │       ├── horizon_controller.dart
-│   │       ├── terminal_service.dart
-│   │       └── ws_server.dart
-│   ├── macos/runner/
+│   │       ├── app.dart
+│   │       ├── controllers/
+│   │       │   └── horizon_controller.dart
+│   │       ├── models/
+│   │       │   └── terminal_group.dart
+│   │       ├── pages/
+│   │       │   └── home_page.dart
+│   │       ├── services/
+│   │       │   ├── terminal_service.dart
+│   │       │   ├── ws_server.dart
+│   │       │   ├── connection_manager.dart
+│   │       │   └── group_manager.dart
+│   │       └── widgets/
+│   ├── macos/Runner/
 │   │   └── PtyManager.swift      # macOS PTY
 │   ├── linux/runner/
-│   │   ├── pty_manager.cc        # Linux PTY
-│   │   └── pty_manager.h
+│   │   └── pty_manager.cc        # Linux PTY
 │   └── windows/runner/
-│       ├── pty_manager.cpp       # Windows ConPTY
-│       └── pty_manager.h
+│       └── pty_manager.cpp       # Windows ConPTY
 │
 ├── voyager/                 # Remote terminal client (Flutter)
 │   ├── lib/
-│   │   └── main.dart
-│   ├── ios/
-│   ├── macos/
-│   ├── android/
-│   ├── web/
-│   ├── linux/
-│   └── windows/
+│   │   ├── main.dart
+│   │   └── src/
+│   │       ├── app.dart
+│   │       ├── models/
+│   │       │   └── terminal_group.dart
+│   │       ├── pages/
+│   │       │   └── home_page.dart
+│   │       ├── services/
+│   │       │   ├── connection_manager.dart
+│   │       │   ├── terminal_manager.dart
+│   │       │   └── group_manager.dart
+│   │       └── widgets/
+│   │           └── keyboard/     # HHKB virtual keyboard
+│   └── [ios|macos|android|web|linux|windows]/
 │
 ├── wormhole/                # Relay server (Rust)
 │   ├── Cargo.toml
+│   ├── Dockerfile
 │   └── src/
 │       └── main.rs
 │
@@ -181,21 +220,28 @@ Communication uses a binary WebSocket protocol:
 
 | Byte | Description |
 |------|-------------|
-| 0 | Message type |
-| 1-4 | Session ID length (big-endian) |
-| 5-N | Session ID |
+| 0 | Version (1) |
+| 1 | Message type |
+| 2-3 | Session ID length (big-endian) |
+| 4-N | Session ID |
 | N+1... | Payload |
 
-### Message Types
+### Binary Message Types
 
 | Type | Value | Description |
 |------|-------|-------------|
-| Stdin | 0x00 | Terminal input |
-| Stdout | 0x01 | Terminal output |
-| Resize | 0x02 | Terminal resize |
-| Create | 0x10 | Create session |
-| Close | 0x11 | Close session |
+| Stdin | 0x01 | Terminal input |
+| Stdout | 0x02 | Terminal output |
+| Resize | 0x03 | Terminal resize |
+| Ping | 0x04 | Heartbeat ping |
+| Pong | 0x05 | Heartbeat pong |
 
-## License
+### JSON Message Types
 
-This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
+Control messages use JSON format with `type` field:
+- `session_assigned` - Wormhole assigns session ID to Horizon
+- `voyager_connect` / `voyager_disconnect` - Connection events
+- `pairing_response` / `pairing_result` - Device pairing workflow
+- `list` / `create` / `close` - Terminal session management
+- `group_*` - Terminal group operations
+
