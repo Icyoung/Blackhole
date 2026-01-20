@@ -119,6 +119,14 @@ class GroupStore {
   }
 
   void renameGroup(String groupId, String name) {
+    final trimmed = name.trim();
+    if (trimmed.isNotEmpty) {
+      final group = _findGroup(groupId);
+      if (group != null && group.name != trimmed) {
+        group.name = trimmed;
+        onChanged();
+      }
+    }
     _sendOrQueue(<String, dynamic>{
       'type': 'group_rename',
       'groupId': groupId,
@@ -156,6 +164,17 @@ class GroupStore {
   }
 
   void renameSession(String sessionId, String name) {
+    final trimmed = name.trim();
+    var changed = false;
+    if (trimmed.isEmpty) {
+      changed = _sessionNames.remove(sessionId) != null;
+    } else if (_sessionNames[sessionId] != trimmed) {
+      _sessionNames[sessionId] = trimmed;
+      changed = true;
+    }
+    if (changed) {
+      onChanged();
+    }
     _sendOrQueue(<String, dynamic>{
       'type': 'session_rename',
       'sessionId': sessionId,

@@ -6,6 +6,7 @@ class SettingsDrawer extends StatelessWidget {
     required this.useWormhole,
     required this.autoReconnect,
     required this.multiWindow,
+    required this.showKeyboardTools,
     required this.showHHKB,
     required this.urlController,
     required this.wormholeController,
@@ -14,12 +15,14 @@ class SettingsDrawer extends StatelessWidget {
     required this.onUseWormholeChanged,
     required this.onAutoReconnectChanged,
     required this.onMultiWindowChanged,
+    required this.onShowKeyboardToolsChanged,
     required this.onShowHHKBChanged,
   });
 
   final bool useWormhole;
   final bool autoReconnect;
   final bool multiWindow;
+  final bool showKeyboardTools;
   final bool showHHKB;
   final TextEditingController urlController;
   final TextEditingController wormholeController;
@@ -28,6 +31,7 @@ class SettingsDrawer extends StatelessWidget {
   final ValueChanged<bool> onUseWormholeChanged;
   final ValueChanged<bool> onAutoReconnectChanged;
   final ValueChanged<bool> onMultiWindowChanged;
+  final ValueChanged<bool> onShowKeyboardToolsChanged;
   final ValueChanged<bool> onShowHHKBChanged;
 
   @override
@@ -97,6 +101,12 @@ class SettingsDrawer extends StatelessWidget {
             const SizedBox(height: 24),
             _buildDrawerSection('Input'),
             const SizedBox(height: 8),
+            _buildDrawerSwitch(
+              'Keyboard Tools',
+              showKeyboardTools,
+              onShowKeyboardToolsChanged,
+            ),
+            const SizedBox(height: 6),
             _buildDrawerSwitch(
               'HHKB Keyboard',
               showHHKB,

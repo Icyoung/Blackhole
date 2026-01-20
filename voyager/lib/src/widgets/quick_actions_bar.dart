@@ -41,11 +41,37 @@ class _QuickActionsBarState extends State<QuickActionsBar> {
   final ScrollController _scrollController = ScrollController();
   final List<GlobalKey> _snapKeys = List.generate(5, (_) => GlobalKey());
   bool _isSnapping = false;
+  bool _didInitOffset = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _setInitialOffset());
+  }
 
   @override
   void dispose() {
     _scrollController.dispose();
     super.dispose();
+  }
+
+  void _setInitialOffset() {
+    if (!mounted || _didInitOffset || !_scrollController.hasClients) {
+      return;
+    }
+    final ctx = _snapKeys[0].currentContext;
+    final box = ctx?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _setInitialOffset());
+      return;
+    }
+    final offset = _getSnapOffset(box);
+    if (offset == null) {
+      return;
+    }
+    final maxScroll = _scrollController.position.maxScrollExtent;
+    _scrollController.jumpTo(offset.clamp(0.0, maxScroll));
+    _didInitOffset = true;
   }
 
   void _onScrollEnd() {

@@ -49,6 +49,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
   bool _autoReconnect = true;
   bool _chromeHidden = false;
   bool _useWormhole = false;
+  bool _showKeyboardTools = true;
   bool _showHHKB = false;
   bool _hhkbFn = false;
   bool _hhkbShift = false;
@@ -56,7 +57,9 @@ class _VoyagerHomeState extends State<VoyagerHome>
   double _quickBarHeight = 0;
   static const double _hhkbKeyboardHeight = 242; // 5*42 + 4*4 + 16 padding
 
-  double get _bottomBarHeight => _showHHKB ? _quickBarHeight + _hhkbKeyboardHeight : _quickBarHeight;
+  double get _bottomBarHeight =>
+      (_showKeyboardTools ? _quickBarHeight : 0) +
+      (_showHHKB ? _hhkbKeyboardHeight : 0);
   double _lastMetricsInsetsBottom = 0;
   Size _lastMetricsSize = Size.zero;
 
@@ -186,6 +189,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
       _useWormhole = prefs.getBool('useWormhole') ?? false;
       _autoReconnect = prefs.getBool('autoReconnect') ?? true;
       _multiWindow = prefs.getBool('multiWindow') ?? false;
+      _showKeyboardTools = prefs.getBool('showKeyboardTools') ?? true;
       _showHHKB = prefs.getBool('showHHKB') ?? false;
       _deviceKey = prefs.getString('deviceKey');
       _deviceName = deviceName;
@@ -314,6 +318,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
     await prefs.setBool('useWormhole', _useWormhole);
     await prefs.setBool('autoReconnect', _autoReconnect);
     await prefs.setBool('multiWindow', _multiWindow);
+    await prefs.setBool('showKeyboardTools', _showKeyboardTools);
     await prefs.setBool('showHHKB', _showHHKB);
     if (_deviceKey != null) {
       await prefs.setString('deviceKey', _deviceKey!);
@@ -468,6 +473,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
       query['device_key'] = _deviceKey!;
     }
     query['device_name'] = _deviceName;
+    query['device_type'] = _getDeviceType();
     return base.replace(queryParameters: query);
   }
 
@@ -888,20 +894,22 @@ class _VoyagerHomeState extends State<VoyagerHome>
                 children: [
                   KeyedSubtree(
                     key: _quickBarKey,
-                    child: QuickActionsBar(
-                      connected: _connected,
-                      ctrl: _ctrl,
-                      alt: _alt,
-                      meta: _meta,
-                      onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
-                      onToggleAlt: () => setState(() => _alt = !_alt),
-                      onToggleMeta: () => setState(() => _meta = !_meta),
-                      onKey: _sendKey,
-                      onPaste: _pasteClipboard,
-                      onCopy: _copySelection,
-                      onSend: _sendRaw,
-                      onScrollToBottom: _scrollToBottom,
-                    ),
+                    child: _showKeyboardTools
+                        ? QuickActionsBar(
+                            connected: _connected,
+                            ctrl: _ctrl,
+                            alt: _alt,
+                            meta: _meta,
+                            onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
+                            onToggleAlt: () => setState(() => _alt = !_alt),
+                            onToggleMeta: () => setState(() => _meta = !_meta),
+                            onKey: _sendKey,
+                            onPaste: _pasteClipboard,
+                            onCopy: _copySelection,
+                            onSend: _sendRaw,
+                            onScrollToBottom: _scrollToBottom,
+                          )
+                        : const SizedBox.shrink(),
                   ),
                   if (_showHHKB)
                     HHKBKeyboard(
@@ -1026,6 +1034,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
       useWormhole: _useWormhole,
       autoReconnect: _autoReconnect,
       multiWindow: _multiWindow,
+      showKeyboardTools: _showKeyboardTools,
       showHHKB: _showHHKB,
       urlController: _urlController,
       wormholeController: _wormholeController,
@@ -1047,6 +1056,18 @@ class _VoyagerHomeState extends State<VoyagerHome>
           _scheduleActiveResize();
         });
       },
+      onShowKeyboardToolsChanged: (value) {
+        setState(() {
+          _showKeyboardTools = value;
+          if (!value) {
+            _quickBarHeight = 0;
+          }
+        });
+        _saveSettings();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _scheduleActiveResize();
+        });
+      },
       onShowHHKBChanged: (value) {
         setState(() => _showHHKB = value);
         _saveSettings();
@@ -1055,5 +1076,15 @@ class _VoyagerHomeState extends State<VoyagerHome>
         });
       },
     );
+  }
+
+  String _getDeviceType() {
+    if (kIsWeb) {
+      return 'web';
+    }
+    if (Platform.isIOS || Platform.isAndroid) {
+      return 'mobile';
+    }
+    return 'desktop';
   }
 }
