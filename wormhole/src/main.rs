@@ -51,6 +51,7 @@ struct WsParams {
     token: Option<String>,
     device_key: Option<String>,
     device_name: Option<String>,
+    device_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +66,7 @@ struct VoyagerInfo {
     tx: mpsc::UnboundedSender<Message>,
     device_key: Option<String>,
     device_name: Option<String>,
+    device_type: Option<String>,
     pairing_state: PairingState,
 }
 
@@ -172,7 +174,18 @@ async fn ws_handler(
 
     let device_key = params.device_key.clone();
     let device_name = params.device_name.clone();
-    ws.on_upgrade(move |socket| handle_socket(state, role, session, device_key, device_name, socket))
+    let device_type = params.device_type.clone();
+    ws.on_upgrade(move |socket| {
+        handle_socket(
+            state,
+            role,
+            session,
+            device_key,
+            device_name,
+            device_type,
+            socket,
+        )
+    })
 }
 
 async fn list_sessions(
@@ -249,6 +262,7 @@ async fn handle_socket(
     session_param: Option<String>,
     device_key: Option<String>,
     device_name: Option<String>,
+    device_type: Option<String>,
     socket: WebSocket,
 ) {
     let (mut sender, mut receiver) = socket.split();
@@ -305,6 +319,7 @@ async fn handle_socket(
                         tx: tx.clone(),
                         device_key: device_key.clone(),
                         device_name: device_name.clone(),
+                        device_type: device_type.clone(),
                         pairing_state: PairingState::Pending,
                     };
                     session.voyagers.push(voyager_info);
@@ -326,7 +341,14 @@ async fn handle_socket(
         return;
     }
 
-    info!(session_id = %session_id, ?role, "client connected");
+    info!(
+        session_id = %session_id,
+        ?role,
+        device_key = ?device_key,
+        device_name = ?device_name,
+        device_type = ?device_type,
+        "client connected"
+    );
 
     // Send session_assigned message to Horizon
     if role == Role::Horizon {
@@ -349,7 +371,8 @@ async fn handle_socket(
             "v": 1,
             "type": "voyager_connect",
             "deviceKey": device_key,
-            "deviceName": device_name.clone().unwrap_or_else(|| "Unknown Device".to_string())
+            "deviceName": device_name.clone().unwrap_or_else(|| "Unknown Device".to_string()),
+            "deviceType": device_type,
         });
         let mut sessions = state.sessions.lock().await;
         if let Some(session) = sessions.get_mut(&session_id) {

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -29,8 +30,7 @@ class VoyagerHome extends StatefulWidget {
   State<VoyagerHome> createState() => _VoyagerHomeState();
 }
 
-class _VoyagerHomeState extends State<VoyagerHome>
-    with WidgetsBindingObserver {
+class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final GlobalKey _quickBarKey = GlobalKey();
   final TextEditingController _urlController = TextEditingController(
@@ -71,6 +71,11 @@ class _VoyagerHomeState extends State<VoyagerHome>
   bool _ctrl = false;
   bool _alt = false;
   bool _meta = false;
+  bool _dragging = false;
+  String? _dragTargetSessionId;
+
+  // GlobalKeys for terminal cards in multi-window mode (for hit testing)
+  final Map<String, GlobalKey> _terminalCardKeys = {};
 
   String? _error;
 
@@ -163,8 +168,10 @@ class _VoyagerHomeState extends State<VoyagerHome>
       onSessionClosed: _handleSessionClosed,
       onStdout: _handleStdout,
     );
-    _groupStore =
-        GroupStore(onChanged: _handleGroupChange, sendCommand: _connectionManager.sendCommand);
+    _groupStore = GroupStore(
+      onChanged: _handleGroupChange,
+      sendCommand: _connectionManager.sendCommand,
+    );
     unawaited(_groupStore.loadLocalOrder());
     _urlController.addListener(_handleAddressChange);
     _wormholeController.addListener(_handleAddressChange);
@@ -178,13 +185,16 @@ class _VoyagerHomeState extends State<VoyagerHome>
     final savedDeviceName = prefs.getString('deviceName');
     // Re-fetch device name if saved value is a generic name
     final needsRefresh = _isGenericDeviceName(savedDeviceName);
-    final deviceName = needsRefresh ? await _getDefaultDeviceName() : savedDeviceName!;
+    final deviceName =
+        needsRefresh ? await _getDefaultDeviceName() : savedDeviceName!;
     if (needsRefresh && savedDeviceName != deviceName) {
       await prefs.setString('deviceName', deviceName);
     }
     setState(() {
-      _urlController.text = prefs.getString('lanAddress') ?? 'ws://127.0.0.1:9527';
-      _wormholeController.text = prefs.getString('wormholeAddress') ?? 'ws://127.0.0.1:8080/ws';
+      _urlController.text =
+          prefs.getString('lanAddress') ?? 'ws://127.0.0.1:9527';
+      _wormholeController.text =
+          prefs.getString('wormholeAddress') ?? 'ws://127.0.0.1:8080/ws';
       _sessionController.text = prefs.getString('sessionId') ?? '';
       _tokenController.text = prefs.getString('token') ?? '';
       _useWormhole = prefs.getBool('useWormhole') ?? false;
@@ -230,12 +240,11 @@ class _VoyagerHomeState extends State<VoyagerHome>
       }
       if (Platform.isIOS) {
         final iosInfo = await deviceInfo.iosInfo;
-        debugPrint(
-          '[Voyager] iOS device info: name=${iosInfo.name}, modelName=${iosInfo.modelName}, machine=${iosInfo.utsname.machine}',
-        );
         // iOS 16+ may return a generic name; keep the name if available.
         final name = _normalizeDeviceName(iosInfo.name);
-        if (name.isNotEmpty && name != 'Unknown Device' && name != 'Unknown device') {
+        if (name.isNotEmpty &&
+            name != 'Unknown Device' &&
+            name != 'Unknown device') {
           return name;
         }
         final modelName = iosInfo.modelName.trim();
@@ -264,8 +273,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
         final linuxInfo = await deviceInfo.linuxInfo;
         return linuxInfo.prettyName;
       }
-    } catch (e) {
-      debugPrint('Failed to get device name: $e');
+    } catch (_) {
+      // Ignore device info errors
     }
     return 'Unknown Device';
   }
@@ -306,7 +315,9 @@ class _VoyagerHomeState extends State<VoyagerHome>
     if (genericNames.contains(trimmed)) {
       return true;
     }
-    final duplicatedIosName = RegExp(r'^(iPhone|iPad|iPod touch)\\s*\\(\\1\\)$');
+    final duplicatedIosName = RegExp(
+      r'^(iPhone|iPad|iPod touch)\\s*\\(\\1\\)$',
+    );
     return duplicatedIosName.hasMatch(trimmed);
   }
 
@@ -355,7 +366,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
       final bottom = media.viewInsets.bottom;
       final size = media.size;
       final sameInsets = (bottom - _lastMetricsInsetsBottom).abs() < 0.5;
-      final sameSize = (size.width - _lastMetricsSize.width).abs() < 0.5 &&
+      final sameSize =
+          (size.width - _lastMetricsSize.width).abs() < 0.5 &&
           (size.height - _lastMetricsSize.height).abs() < 0.5;
       if (sameInsets && sameSize) {
         return;
@@ -421,6 +433,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
   void _handleSessionClosed(String sessionId) {
     _sessions.remove(sessionId);
     _terminalManager.removeSession(sessionId);
+    _terminalCardKeys.remove(sessionId);
     if (_activeSessionId == sessionId) {
       final sessions = _visibleSessions;
       _activeSessionId = sessions.isNotEmpty ? sessions.first : null;
@@ -448,13 +461,37 @@ class _VoyagerHomeState extends State<VoyagerHome>
         _pairingPending = false;
       });
     }
+    if (_useWormhole) {
+      await _ensureDeviceNameReady();
+    }
     final uri =
-        _useWormhole ? _buildWormholeUri() : Uri.parse(_urlController.text.trim());
+        _useWormhole
+            ? _buildWormholeUri()
+            : Uri.parse(_urlController.text.trim());
     await _connectionManager.connect(
       uri: uri,
       waitForPairing: _useWormhole,
       autoReconnect: _autoReconnect,
     );
+  }
+
+  Future<void> _ensureDeviceNameReady() async {
+    if (!_isGenericDeviceName(_deviceName)) {
+      return;
+    }
+    final refreshed = await _getDefaultDeviceName();
+    final trimmed = refreshed.trim();
+    if (trimmed.isEmpty || trimmed == _deviceName) {
+      return;
+    }
+    if (mounted) {
+      setState(() {
+        _deviceName = trimmed;
+      });
+    } else {
+      _deviceName = trimmed;
+    }
+    await _saveSettings();
   }
 
   Uri _buildWormholeUri() {
@@ -473,9 +510,16 @@ class _VoyagerHomeState extends State<VoyagerHome>
     if (_deviceKey != null && _deviceKey!.isNotEmpty) {
       query['device_key'] = _deviceKey!;
     }
-    query['device_name'] = _deviceName;
+    // Ensure device_name is never empty (empty string causes URL param without value)
+    final deviceName = _deviceName.isNotEmpty ? _deviceName : 'Unknown Device';
+    query['device_name'] = deviceName;
     query['device_type'] = _getDeviceType();
-    return base.replace(queryParameters: query);
+    final uri = base.replace(queryParameters: query);
+    debugPrint('[Voyager] Wormhole URI: $uri');
+    debugPrint(
+      '[Voyager] device_name=$deviceName, device_type=${_getDeviceType()}, device_key=$_deviceKey',
+    );
+    return uri;
   }
 
   Terminal _terminalFor(String sessionId) {
@@ -605,14 +649,15 @@ class _VoyagerHomeState extends State<VoyagerHome>
   }
 
   String _applyCtrl(String data) {
-    final codes = data.runes.map((rune) {
-      final ch = String.fromCharCode(rune);
-      final upper = ch.toUpperCase();
-      if (upper.codeUnitAt(0) >= 65 && upper.codeUnitAt(0) <= 90) {
-        return String.fromCharCode(upper.codeUnitAt(0) - 64);
-      }
-      return ch;
-    }).join();
+    final codes =
+        data.runes.map((rune) {
+          final ch = String.fromCharCode(rune);
+          final upper = ch.toUpperCase();
+          if (upper.codeUnitAt(0) >= 65 && upper.codeUnitAt(0) <= 90) {
+            return String.fromCharCode(upper.codeUnitAt(0) - 64);
+          }
+          return ch;
+        }).join();
     return codes;
   }
 
@@ -650,6 +695,78 @@ class _VoyagerHomeState extends State<VoyagerHome>
     _connectionManager.sendRaw(sessionId, data);
   }
 
+  void _sendRawFor(String sessionId, String data) {
+    _connectionManager.sendRaw(sessionId, data);
+  }
+
+  GlobalKey _terminalCardKeyFor(String sessionId) {
+    return _terminalCardKeys.putIfAbsent(sessionId, () => GlobalKey());
+  }
+
+  String? _findTerminalAtPosition(Offset globalPosition) {
+    // In multi-window mode, find which terminal card contains the drop position
+    if (!_multiWindow) {
+      return _activeSessionId;
+    }
+
+    final sessions =
+        _visibleSessions.isNotEmpty
+            ? _visibleSessions
+            : (_activeSessionId != null ? [_activeSessionId!] : <String>[]);
+
+    for (final sessionId in sessions) {
+      final key = _terminalCardKeys[sessionId];
+      if (key == null) continue;
+
+      final renderBox = key.currentContext?.findRenderObject() as RenderBox?;
+      if (renderBox == null || !renderBox.hasSize) continue;
+
+      final cardPosition = renderBox.localToGlobal(Offset.zero);
+      final cardRect = cardPosition & renderBox.size;
+
+      if (cardRect.contains(globalPosition)) {
+        return sessionId;
+      }
+    }
+
+    // Fallback to active session if no card found
+    return _activeSessionId;
+  }
+
+  void _handleFileDrop(DropDoneDetails details) {
+    // Save the target session before resetting (calculated during drag)
+    final savedTargetId = _dragTargetSessionId;
+
+    // Reset drag state
+    setState(() {
+      _dragging = false;
+      _dragTargetSessionId = null;
+    });
+
+    if (details.files.isEmpty) {
+      return;
+    }
+
+    // Use saved target from drag, or find from drop position, or fall back to active
+    String? targetSessionId;
+    if (_multiWindow) {
+      targetSessionId =
+          savedTargetId ?? _findTerminalAtPosition(details.globalPosition);
+    }
+    targetSessionId ??= _activeSessionId;
+
+    if (targetSessionId == null) {
+      return;
+    }
+
+    // Build paths without quotes
+    final paths = details.files.map((file) => file.path).join(' ');
+
+    // Always select the target terminal first, then send the paths
+    _setActiveSession(targetSessionId);
+    _sendRawFor(targetSessionId, paths);
+  }
+
   void _sendCommand(Map<String, dynamic> payload) {
     _connectionManager.sendCommand(payload);
   }
@@ -679,7 +796,7 @@ class _VoyagerHomeState extends State<VoyagerHome>
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     final text = data?.text;
     if (text != null && text.isNotEmpty) {
-      _sendRaw(text);
+      _activeTerminal?.paste(text);
     }
   }
 
@@ -703,23 +820,22 @@ class _VoyagerHomeState extends State<VoyagerHome>
     if (!controller.hasClients) {
       return;
     }
-    controller.jumpTo(
-      controller.position.maxScrollExtent,
-    );
+    controller.jumpTo(controller.position.maxScrollExtent);
   }
 
   @override
   Widget build(BuildContext context) {
     const barColor = Color(0xFF111620);
     const activeColor = Color(0xFF1E2D3D); // Slightly lighter for contrast
-    const overlayColor = Colors.transparent; // No longer need overlay with solid background
+    const overlayColor =
+        Colors.transparent; // No longer need overlay with solid background
     final terminal = _activeTerminal ?? _idleTerminal;
     final controller = _activeController ?? _idleController;
     final scrollController = _activeScrollController ?? _idleScrollController;
     // connectionContent: 32 + 16(padding) = 48, tab栏: 36, 合计 82
     final terminalTopInset =
         _chromeHidden ? (_visibleSessions.length <= 1 ? 0 : 36) : 48 + 36;
-    
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         _updateQuickBarHeight();
@@ -736,109 +852,186 @@ class _VoyagerHomeState extends State<VoyagerHome>
       },
       body: Stack(
         children: [
-          Positioned.fill(
-            child: Container(color: Colors.black),
-          ),
+          Positioned.fill(child: Container(color: Colors.black)),
           Positioned.fill(
             top: terminalTopInset.toDouble(),
-            child: _multiWindow
-                ? LayoutBuilder(
-                    builder: (context, constraints) {
-                      final width = constraints.maxWidth;
-                      var columns = 1;
-                      if (width >= 2500) {
-                        columns = 5;
-                      } else if (width >= 2000) {
-                        columns = 4;
-                      } else if (width >= 1500) {
-                        columns = 3;
-                      } else if (width >= 1000) {
-                        columns = 2;
-                      }
-                      final sessions = _visibleSessions.isNotEmpty
-                          ? _visibleSessions
-                          : (_activeSessionId != null
-                              ? [_activeSessionId!]
-                              : <String>[]);
-                      final displaySessions = sessions.isEmpty
-                          ? <String>[]
-                          : sessions;
-                      final aspectRatio = columns == 1 
-                          ? 1.4 
-                          : (columns == 2 ? 1.5 : (columns == 3 ? 1.6 : (columns == 4 ? 1.7 : 1.8)));
-                      final padding = EdgeInsets.fromLTRB(16, 12, 16, _bottomBarHeight + 20);
-
-                      if (displaySessions.isEmpty) {
-                        return Padding(
-                          padding: padding,
-                          child: TerminalView(
-                            _idleTerminal,
-                            key: _idleTerminalViewKey,
-                            controller: _idleController,
-                            scrollController: _idleScrollController,
-                            autoResize: true,
-                            autofocus: true,
-                            deleteDetection: true,
-                            readOnly: _showHHKB,
-                            keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
-                            backgroundOpacity: 1.0,
-                            padding: const EdgeInsets.all(8),
-                            textStyle: TerminalStyle(
-                              fontFamily: kIsWeb ? GoogleFonts.jetBrainsMono().fontFamily! : 'JetBrainsMono',
-                              fontSize: 14,
-                            ),
-                          ),
-                        );
-                      }
-
-                      return GridView.builder(
-                        padding: padding,
-                        physics: const BouncingScrollPhysics(),
-                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: columns,
-                          crossAxisSpacing: 12,
-                          mainAxisSpacing: 12,
-                          childAspectRatio: aspectRatio,
-                        ),
-                        itemCount: displaySessions.length + 1,
-                        itemBuilder: (context, index) {
-                          if (index == displaySessions.length) {
-                            return AddTerminalCard(onTap: _sendCreateSession);
+            child: DropTarget(
+              onDragDone: _handleFileDrop,
+              onDragEntered: (details) {
+                setState(() {
+                  _dragging = true;
+                  if (_multiWindow) {
+                    _dragTargetSessionId = _findTerminalAtPosition(
+                      details.globalPosition,
+                    );
+                  }
+                });
+              },
+              onDragExited:
+                  (_) => setState(() {
+                    _dragging = false;
+                    _dragTargetSessionId = null;
+                  }),
+              onDragUpdated: (details) {
+                if (_multiWindow) {
+                  final targetId = _findTerminalAtPosition(
+                    details.globalPosition,
+                  );
+                  if (targetId != _dragTargetSessionId) {
+                    setState(() {
+                      _dragTargetSessionId = targetId;
+                    });
+                  }
+                }
+              },
+              child: Stack(
+                children: [
+                  _multiWindow
+                      ? LayoutBuilder(
+                        builder: (context, constraints) {
+                          final width = constraints.maxWidth;
+                          var columns = 1;
+                          if (width >= 2500) {
+                            columns = 5;
+                          } else if (width >= 2000) {
+                            columns = 4;
+                          } else if (width >= 1500) {
+                            columns = 3;
+                          } else if (width >= 1000) {
+                            columns = 2;
                           }
-                          final sessionId = displaySessions[index];
-                          return TerminalWindowCard(
-                            sessionId: sessionId,
-                            terminal: _terminalFor(sessionId),
-                            controller: _controllerFor(sessionId),
-                            scrollController: _scrollControllerFor(sessionId),
-                            viewKey: _viewKeyFor(sessionId),
-                            label: 'TERM ${index + 1}',
-                            isActive: sessionId == _activeSessionId,
-                            showHHKB: _showHHKB,
-                            onTap: () => _setActiveSession(sessionId, requestKeyboard: true),
-                            onClose: () => _sendCloseSession(sessionId),
+                          final sessions =
+                              _visibleSessions.isNotEmpty
+                                  ? _visibleSessions
+                                  : (_activeSessionId != null
+                                      ? [_activeSessionId!]
+                                      : <String>[]);
+                          final displaySessions =
+                              sessions.isEmpty ? <String>[] : sessions;
+                          final aspectRatio =
+                              columns == 1
+                                  ? 1.4
+                                  : (columns == 2
+                                      ? 1.5
+                                      : (columns == 3
+                                          ? 1.6
+                                          : (columns == 4 ? 1.7 : 1.8)));
+                          final padding = EdgeInsets.fromLTRB(
+                            16,
+                            12,
+                            16,
+                            _bottomBarHeight + 20,
+                          );
+
+                          if (displaySessions.isEmpty) {
+                            return Padding(
+                              padding: padding,
+                              child: TerminalView(
+                                _idleTerminal,
+                                key: _idleTerminalViewKey,
+                                controller: _idleController,
+                                scrollController: _idleScrollController,
+                                autoResize: true,
+                                autofocus: true,
+                                deleteDetection: true,
+                                readOnly: _showHHKB,
+                                keyboardType:
+                                    _showHHKB
+                                        ? TextInputType.none
+                                        : TextInputType.text,
+                                backgroundOpacity: 1.0,
+                                padding: const EdgeInsets.all(8),
+                                textStyle: TerminalStyle(
+                                  fontFamily:
+                                      kIsWeb
+                                          ? GoogleFonts.jetBrainsMono()
+                                              .fontFamily!
+                                          : 'JetBrainsMono',
+                                  fontSize: 14,
+                                ),
+                              ),
+                            );
+                          }
+
+                          return GridView.builder(
+                            padding: padding,
+                            physics: const BouncingScrollPhysics(),
+                            gridDelegate:
+                                SliverGridDelegateWithFixedCrossAxisCount(
+                                  crossAxisCount: columns,
+                                  crossAxisSpacing: 12,
+                                  mainAxisSpacing: 12,
+                                  childAspectRatio: aspectRatio,
+                                ),
+                            itemCount: displaySessions.length + 1,
+                            itemBuilder: (context, index) {
+                              if (index == displaySessions.length) {
+                                return AddTerminalCard(
+                                  onTap: _sendCreateSession,
+                                );
+                              }
+                              final sessionId = displaySessions[index];
+                              return TerminalWindowCard(
+                                key: _terminalCardKeyFor(sessionId),
+                                sessionId: sessionId,
+                                terminal: _terminalFor(sessionId),
+                                controller: _controllerFor(sessionId),
+                                scrollController: _scrollControllerFor(
+                                  sessionId,
+                                ),
+                                viewKey: _viewKeyFor(sessionId),
+                                label: 'TERM ${index + 1}',
+                                isActive: sessionId == _activeSessionId,
+                                showHHKB: _showHHKB,
+                                isDragTarget:
+                                    _dragging &&
+                                    _dragTargetSessionId == sessionId,
+                                onTap:
+                                    () => _setActiveSession(
+                                      sessionId,
+                                      requestKeyboard: true,
+                                    ),
+                                onClose: () => _sendCloseSession(sessionId),
+                              );
+                            },
                           );
                         },
-                      );
-                    },
-                  )
-                : TerminalView(
-                    terminal,
-                    key: _activeViewKey ?? _idleTerminalViewKey,
-                    controller: controller,
-                    scrollController: scrollController,
-                    autoResize: false,
-                    autofocus: true,
-                    deleteDetection: true,
-                    readOnly: _showHHKB,
-                    keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
-                    backgroundOpacity: 1.0,
-                    padding: EdgeInsets.fromLTRB(8, 4, 8, _bottomBarHeight + 8),
-                    textStyle: TerminalStyle(
-                      fontFamily: kIsWeb ? GoogleFonts.jetBrainsMono().fontFamily! : 'JetBrainsMono',
-                      fontSize: 14,
+                      )
+                      : TerminalView(
+                        terminal,
+                        key: _activeViewKey ?? _idleTerminalViewKey,
+                        controller: controller,
+                        scrollController: scrollController,
+                        autoResize: false,
+                        autofocus: true,
+                        deleteDetection: true,
+                        readOnly: _showHHKB,
+                        keyboardType:
+                            _showHHKB ? TextInputType.none : TextInputType.text,
+                        backgroundOpacity: 1.0,
+                        padding: EdgeInsets.fromLTRB(
+                          8,
+                          4,
+                          8,
+                          _bottomBarHeight + 8,
+                        ),
+                        textStyle: TerminalStyle(
+                          fontFamily:
+                              kIsWeb
+                                  ? GoogleFonts.jetBrainsMono().fontFamily!
+                                  : 'JetBrainsMono',
+                          fontSize: 14,
+                        ),
+                      ),
+                  if (_dragging && !_multiWindow)
+                    Positioned.fill(
+                      child: Container(
+                        color: Colors.blue.withValues(alpha: 0.15),
+                      ),
                     ),
-                  ),
+                ],
+              ),
+            ),
           ),
           if (!_chromeHidden)
             Positioned(
@@ -852,7 +1045,10 @@ class _VoyagerHomeState extends State<VoyagerHome>
                     gradient: LinearGradient(
                       begin: Alignment.topCenter,
                       end: Alignment.bottomCenter,
-                      colors: [Colors.black.withValues(alpha: 0.4), Colors.transparent],
+                      colors: [
+                        Colors.black.withValues(alpha: 0.4),
+                        Colors.transparent,
+                      ],
                     ),
                   ),
                 ),
@@ -878,7 +1074,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
               onAddSession: _sendCreateSession,
               sessions: _visibleSessions,
               activeSessionId: _activeSessionId,
-              onSelectSession: (id) => _setActiveSession(id, requestKeyboard: true),
+              onSelectSession:
+                  (id) => _setActiveSession(id, requestKeyboard: true),
               onCloseSession: _sendCloseSession,
               onReorderSessions: _reorderSessions,
               connectionContent: _buildConnectionContent(context),
@@ -895,22 +1092,25 @@ class _VoyagerHomeState extends State<VoyagerHome>
                 children: [
                   KeyedSubtree(
                     key: _quickBarKey,
-                    child: _showKeyboardTools
-                        ? QuickActionsBar(
-                            connected: _connected,
-                            ctrl: _ctrl,
-                            alt: _alt,
-                            meta: _meta,
-                            onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
-                            onToggleAlt: () => setState(() => _alt = !_alt),
-                            onToggleMeta: () => setState(() => _meta = !_meta),
-                            onKey: _sendKey,
-                            onPaste: _pasteClipboard,
-                            onCopy: _copySelection,
-                            onSend: _sendRaw,
-                            onScrollToBottom: _scrollToBottom,
-                          )
-                        : const SizedBox.shrink(),
+                    child:
+                        _showKeyboardTools
+                            ? QuickActionsBar(
+                              connected: _connected,
+                              ctrl: _ctrl,
+                              alt: _alt,
+                              meta: _meta,
+                              onToggleCtrl:
+                                  () => setState(() => _ctrl = !_ctrl),
+                              onToggleAlt: () => setState(() => _alt = !_alt),
+                              onToggleMeta:
+                                  () => setState(() => _meta = !_meta),
+                              onKey: _sendKey,
+                              onPaste: _pasteClipboard,
+                              onCopy: _copySelection,
+                              onSend: _sendRaw,
+                              onScrollToBottom: _scrollToBottom,
+                            )
+                            : const SizedBox.shrink(),
                   ),
                   if (_showHHKB)
                     HHKBKeyboard(
@@ -939,7 +1139,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
                       onToggleFn: () => setState(() => _hhkbFn = !_hhkbFn),
                       onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
                       onToggleAlt: () => setState(() => _alt = !_alt),
-                      onToggleShift: () => setState(() => _hhkbShift = !_hhkbShift),
+                      onToggleShift:
+                          () => setState(() => _hhkbShift = !_hhkbShift),
                     ),
                 ],
               ),
@@ -951,9 +1152,10 @@ class _VoyagerHomeState extends State<VoyagerHome>
   }
 
   Widget _buildConnectionContent(BuildContext context) {
-    final urlText = _useWormhole
-        ? _wormholeController.text.trim()
-        : _urlController.text.trim();
+    final urlText =
+        _useWormhole
+            ? _wormholeController.text.trim()
+            : _urlController.text.trim();
     return Padding(
       padding: const EdgeInsets.only(top: 8, bottom: 8),
       child: SizedBox(
@@ -974,7 +1176,9 @@ class _VoyagerHomeState extends State<VoyagerHome>
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    _multiWindow ? 'GRID OVERVIEW' : (_useWormhole ? 'WORMHOLE REMOTE' : 'LAN CONNECTION'),
+                    _multiWindow
+                        ? 'GRID OVERVIEW'
+                        : (_useWormhole ? 'WORMHOLE REMOTE' : 'LAN CONNECTION'),
                     style: const TextStyle(
                       color: Color(0xFF4B7AA6),
                       fontSize: 10,
@@ -998,23 +1202,27 @@ class _VoyagerHomeState extends State<VoyagerHome>
                 ],
               ),
             ),
-          const SizedBox(width: 16),
-          Switch(
-            value: _connected,
-            onChanged: (value) {
-              if (value) {
-                _connect();
-              } else {
-                _connectionManager.disconnect(shouldReconnect: false);
-              }
-            },
-          ),
-          const SizedBox(width: 8),
-          IconButton(
-            icon: const Icon(Icons.settings_outlined, color: Colors.white70, size: 20),
-            onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
-            tooltip: 'Settings',
-          ),
+            const SizedBox(width: 16),
+            Switch(
+              value: _connected,
+              onChanged: (value) {
+                if (value) {
+                  _connect();
+                } else {
+                  _connectionManager.disconnect(shouldReconnect: false);
+                }
+              },
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              icon: const Icon(
+                Icons.settings_outlined,
+                color: Colors.white70,
+                size: 20,
+              ),
+              onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
+              tooltip: 'Settings',
+            ),
           ],
         ),
       ),
@@ -1025,7 +1233,8 @@ class _VoyagerHomeState extends State<VoyagerHome>
     return GroupDrawer(
       manager: _groupStore,
       activeSessionId: _activeSessionId,
-      onSelectSession: (sessionId) => _setActiveSession(sessionId, requestKeyboard: true),
+      onSelectSession:
+          (sessionId) => _setActiveSession(sessionId, requestKeyboard: true),
       onCloseSession: _sendCloseSession,
     );
   }

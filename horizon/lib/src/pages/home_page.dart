@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -36,8 +37,7 @@ class HorizonHome extends StatefulWidget {
   State<HorizonHome> createState() => _HorizonHomeState();
 }
 
-class _HorizonHomeState extends State<HorizonHome>
-    with WidgetsBindingObserver {
+class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final GlobalKey _quickBarKey = GlobalKey();
   final TextEditingController _urlController = TextEditingController(
@@ -86,6 +86,11 @@ class _HorizonHomeState extends State<HorizonHome>
   bool _ctrl = false;
   bool _alt = false;
   bool _meta = false;
+  bool _dragging = false;
+  String? _dragTargetSessionId;
+
+  // GlobalKeys for terminal cards in multi-window mode (for hit testing)
+  final Map<String, GlobalKey> _terminalCardKeys = {};
 
   String? _error;
 
@@ -199,12 +204,15 @@ class _HorizonHomeState extends State<HorizonHome>
       sendCommand: _sendGroupCommand,
     );
     unawaited(_groupStore.loadLocalOrder());
-    _hostWormholeUrlController =
-        TextEditingController(text: _hostController.wormholeBaseUrl);
-    _hostWormholeTokenController =
-        TextEditingController(text: _hostController.wormholeToken);
-    _hostCustomSessionController =
-        TextEditingController(text: _hostController.customSessionId);
+    _hostWormholeUrlController = TextEditingController(
+      text: _hostController.wormholeBaseUrl,
+    );
+    _hostWormholeTokenController = TextEditingController(
+      text: _hostController.wormholeToken,
+    );
+    _hostCustomSessionController = TextEditingController(
+      text: _hostController.customSessionId,
+    );
     _hostCustomSessionController.addListener(_syncHostCustomSession);
     _hostController.addListener(_handleHostChange);
     if (!_hostController.requiresDevModeConfirmation) {
@@ -222,13 +230,19 @@ class _HorizonHomeState extends State<HorizonHome>
     final savedDeviceName = prefs.getString('deviceName');
     // Re-fetch device name if saved value is a generic name
     final needsRefresh = _isGenericDeviceName(savedDeviceName);
-    final deviceName = needsRefresh ? await _getDefaultDeviceName() : savedDeviceName!;
+    final deviceName =
+        needsRefresh ? await _getDefaultDeviceName() : savedDeviceName!;
+    debugPrint(
+      '[Device] Horizon deviceName=$deviceName saved=${savedDeviceName ?? "null"} needsRefresh=$needsRefresh',
+    );
     if (needsRefresh && savedDeviceName != deviceName) {
       await prefs.setString('deviceName', deviceName);
     }
     setState(() {
-      _urlController.text = prefs.getString('lanAddress') ?? 'ws://127.0.0.1:9527';
-      _wormholeController.text = prefs.getString('wormholeAddress') ?? 'ws://127.0.0.1:8080/ws';
+      _urlController.text =
+          prefs.getString('lanAddress') ?? 'ws://127.0.0.1:9527';
+      _wormholeController.text =
+          prefs.getString('wormholeAddress') ?? 'ws://127.0.0.1:8080/ws';
       _sessionController.text = prefs.getString('sessionId') ?? '';
       _tokenController.text = prefs.getString('token') ?? '';
       _useWormhole = prefs.getBool('useWormhole') ?? false;
@@ -296,7 +310,9 @@ class _HorizonHomeState extends State<HorizonHome>
   }
 
   void _handleModeSwitch(bool isHorizon) {
-    debugPrint('[Mode] Switching to ${isHorizon ? "Horizon" : "Voyager"} mode, connected=$_connected');
+    debugPrint(
+      '[Mode] Switching to ${isHorizon ? "Horizon" : "Voyager"} mode, connected=$_connected',
+    );
     if (isHorizon) {
       if (_hostController.running) {
         _subscribeLocalOutput();
@@ -406,19 +422,20 @@ class _HorizonHomeState extends State<HorizonHome>
     showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (context) => PairingDialog(
-        pending: pending,
-        onApprove: (remember) {
-          Navigator.of(context).pop();
-          _hostPairingDialogShown = false;
-          _hostController.approvePairing(remember: remember);
-        },
-        onReject: () {
-          Navigator.of(context).pop();
-          _hostPairingDialogShown = false;
-          _hostController.rejectPairing();
-        },
-      ),
+      builder:
+          (context) => PairingDialog(
+            pending: pending,
+            onApprove: (remember) {
+              Navigator.of(context).pop();
+              _hostPairingDialogShown = false;
+              _hostController.approvePairing(remember: remember);
+            },
+            onReject: () {
+              Navigator.of(context).pop();
+              _hostPairingDialogShown = false;
+              _hostController.rejectPairing();
+            },
+          ),
     );
   }
 
@@ -471,7 +488,9 @@ class _HorizonHomeState extends State<HorizonHome>
         );
         // iOS 16+ may return a generic name; keep the name if available.
         final name = _normalizeDeviceName(iosInfo.name);
-        if (name.isNotEmpty && name != 'Unknown Device' && name != 'Unknown device') {
+        if (name.isNotEmpty &&
+            name != 'Unknown Device' &&
+            name != 'Unknown device') {
           return name;
         }
         final modelName = iosInfo.modelName.trim();
@@ -542,7 +561,9 @@ class _HorizonHomeState extends State<HorizonHome>
     if (genericNames.contains(trimmed)) {
       return true;
     }
-    final duplicatedIosName = RegExp(r'^(iPhone|iPad|iPod touch)\\s*\\(\\1\\)$');
+    final duplicatedIosName = RegExp(
+      r'^(iPhone|iPad|iPod touch)\\s*\\(\\1\\)$',
+    );
     return duplicatedIosName.hasMatch(trimmed);
   }
 
@@ -599,7 +620,8 @@ class _HorizonHomeState extends State<HorizonHome>
       final bottom = media.viewInsets.bottom;
       final size = media.size;
       final sameInsets = (bottom - _lastMetricsInsetsBottom).abs() < 0.5;
-      final sameSize = (size.width - _lastMetricsSize.width).abs() < 0.5 &&
+      final sameSize =
+          (size.width - _lastMetricsSize.width).abs() < 0.5 &&
           (size.height - _lastMetricsSize.height).abs() < 0.5;
       if (sameInsets && sameSize) {
         return;
@@ -635,7 +657,9 @@ class _HorizonHomeState extends State<HorizonHome>
   }
 
   void _handleSessionList(List<String> sessions) {
-    debugPrint('[Mode] Received session list: ${sessions.length} sessions, isHorizonMode=$_isHorizonMode');
+    debugPrint(
+      '[Mode] Received session list: ${sessions.length} sessions, isHorizonMode=$_isHorizonMode',
+    );
     // Only update UI if in Voyager mode
     if (_isHorizonMode) {
       debugPrint('[Mode] Ignoring session list (in Horizon mode)');
@@ -734,6 +758,7 @@ class _HorizonHomeState extends State<HorizonHome>
     }
     _sessions.remove(sessionId);
     _terminalManager.removeSession(sessionId);
+    _terminalCardKeys.remove(sessionId);
     if (_activeSessionId == sessionId) {
       final sessions = _visibleSessions;
       _activeSessionId = sessions.isNotEmpty ? sessions.first : null;
@@ -765,9 +790,13 @@ class _HorizonHomeState extends State<HorizonHome>
         _clientPairingPending = false;
       });
     }
-    final uri = _useWormhole
-        ? _buildWormholeUri()
-        : Uri.parse(_urlController.text.trim());
+    if (_useWormhole) {
+      await _ensureDeviceNameReady();
+    }
+    final uri =
+        _useWormhole
+            ? _buildWormholeUri()
+            : Uri.parse(_urlController.text.trim());
     await _connectionManager.connect(
       uri: uri,
       waitForPairing: _useWormhole,
@@ -788,6 +817,26 @@ class _HorizonHomeState extends State<HorizonHome>
     }
   }
 
+  Future<void> _ensureDeviceNameReady() async {
+    if (!_isGenericDeviceName(_deviceName)) {
+      return;
+    }
+    final refreshed = await _getDefaultDeviceName();
+    final trimmed = refreshed.trim();
+    if (trimmed.isEmpty || trimmed == _deviceName) {
+      return;
+    }
+    if (mounted) {
+      setState(() {
+        _deviceName = trimmed;
+      });
+    } else {
+      _deviceName = trimmed;
+    }
+    _hostController.setHostDeviceName(trimmed);
+    await _saveSettings();
+  }
+
   Uri _buildWormholeUri() {
     final base = Uri.parse(_wormholeController.text.trim());
     final query = Map<String, String>.from(base.queryParameters);
@@ -804,8 +853,16 @@ class _HorizonHomeState extends State<HorizonHome>
     if (_deviceKey != null && _deviceKey!.isNotEmpty) {
       query['device_key'] = _deviceKey!;
     }
-    query['device_name'] = _deviceName;
-    return base.replace(queryParameters: query);
+    // Ensure device_name is never empty (empty string causes URL param without value)
+    final deviceName = _deviceName.isNotEmpty ? _deviceName : 'Unknown Device';
+    query['device_name'] = deviceName;
+    query['device_type'] = _getDeviceType();
+    final uri = base.replace(queryParameters: query);
+    debugPrint('[Horizon Voyager] Wormhole URI: $uri');
+    debugPrint(
+      '[Horizon Voyager] device_name=$deviceName, device_type=${_getDeviceType()}, device_key=$_deviceKey',
+    );
+    return uri;
   }
 
   Terminal _terminalFor(String sessionId) {
@@ -849,6 +906,16 @@ class _HorizonHomeState extends State<HorizonHome>
       _quickBarHeight = height;
     });
     _scheduleActiveResize();
+  }
+
+  String _getDeviceType() {
+    if (kIsWeb) {
+      return 'web';
+    }
+    if (Platform.isIOS || Platform.isAndroid) {
+      return 'mobile';
+    }
+    return 'desktop';
   }
 
   void _forceResizeActiveTerminal() {
@@ -950,14 +1017,15 @@ class _HorizonHomeState extends State<HorizonHome>
   }
 
   String _applyCtrl(String data) {
-    final codes = data.runes.map((rune) {
-      final ch = String.fromCharCode(rune);
-      final upper = ch.toUpperCase();
-      if (upper.codeUnitAt(0) >= 65 && upper.codeUnitAt(0) <= 90) {
-        return String.fromCharCode(upper.codeUnitAt(0) - 64);
-      }
-      return ch;
-    }).join();
+    final codes =
+        data.runes.map((rune) {
+          final ch = String.fromCharCode(rune);
+          final upper = ch.toUpperCase();
+          if (upper.codeUnitAt(0) >= 65 && upper.codeUnitAt(0) <= 90) {
+            return String.fromCharCode(upper.codeUnitAt(0) - 64);
+          }
+          return ch;
+        }).join();
     return codes;
   }
 
@@ -1079,8 +1147,76 @@ class _HorizonHomeState extends State<HorizonHome>
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     final text = data?.text;
     if (text != null && text.isNotEmpty) {
-      _sendRaw(text);
+      _activeTerminal?.paste(text);
     }
+  }
+
+  GlobalKey _terminalCardKeyFor(String sessionId) {
+    return _terminalCardKeys.putIfAbsent(sessionId, () => GlobalKey());
+  }
+
+  String? _findTerminalAtPosition(Offset globalPosition) {
+    // In multi-window mode, find which terminal card contains the drop position
+    if (!_multiWindow) {
+      return _activeSessionId;
+    }
+
+    final sessions =
+        _visibleSessions.isNotEmpty
+            ? _visibleSessions
+            : (_activeSessionId != null ? [_activeSessionId!] : <String>[]);
+
+    for (final sessionId in sessions) {
+      final key = _terminalCardKeys[sessionId];
+      if (key == null) continue;
+
+      final renderBox = key.currentContext?.findRenderObject() as RenderBox?;
+      if (renderBox == null || !renderBox.hasSize) continue;
+
+      final cardPosition = renderBox.localToGlobal(Offset.zero);
+      final cardRect = cardPosition & renderBox.size;
+
+      if (cardRect.contains(globalPosition)) {
+        return sessionId;
+      }
+    }
+
+    // Fallback to active session if no card found
+    return _activeSessionId;
+  }
+
+  void _handleFileDrop(DropDoneDetails details) {
+    // Save the target session before resetting (calculated during drag)
+    final savedTargetId = _dragTargetSessionId;
+
+    // Reset drag state
+    setState(() {
+      _dragging = false;
+      _dragTargetSessionId = null;
+    });
+
+    if (details.files.isEmpty) {
+      return;
+    }
+
+    // Use saved target from drag, or find from drop position, or fall back to active
+    String? targetSessionId;
+    if (_multiWindow) {
+      targetSessionId =
+          savedTargetId ?? _findTerminalAtPosition(details.globalPosition);
+    }
+    targetSessionId ??= _activeSessionId;
+
+    if (targetSessionId == null) {
+      return;
+    }
+
+    // Build paths without quotes
+    final paths = details.files.map((file) => file.path).join(' ');
+
+    // Always select the target terminal first, then send the paths
+    _setActiveSession(targetSessionId);
+    _sendRawFor(targetSessionId, paths);
   }
 
   Future<void> _copySelection() async {
@@ -1103,25 +1239,23 @@ class _HorizonHomeState extends State<HorizonHome>
     if (!controller.hasClients) {
       return;
     }
-    controller.jumpTo(
-      controller.position.maxScrollExtent,
-    );
+    controller.jumpTo(controller.position.maxScrollExtent);
   }
 
   @override
   Widget build(BuildContext context) {
     const barColor = Color(0xFF111620);
     const activeColor = Color(0xFF1E2D3D); // Slightly lighter for contrast
-    const overlayColor = Colors.transparent; // No longer need overlay with solid background
-    final isInputActive =
-        _isHorizonMode ? _hostController.running : _connected;
+    const overlayColor =
+        Colors.transparent; // No longer need overlay with solid background
+    final isInputActive = _isHorizonMode ? _hostController.running : _connected;
     final terminal = _activeTerminal ?? _idleTerminal;
     final controller = _activeController ?? _idleController;
     final scrollController = _activeScrollController ?? _idleScrollController;
     // connectionContent: 32 + 16(padding) = 48, tab栏: 36, 合计 82
     final terminalTopInset =
         _chromeHidden ? (_visibleSessions.length <= 1 ? 0 : 36) : 48 + 36;
-    
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         _updateQuickBarHeight();
@@ -1148,218 +1282,299 @@ class _HorizonHomeState extends State<HorizonHome>
           },
           body: Stack(
             children: [
-          Positioned.fill(
-            child: Container(color: Colors.black),
-          ),
-          Positioned.fill(
-            top: terminalTopInset.toDouble(),
-            child: _multiWindow
-                ? LayoutBuilder(
-                    builder: (context, constraints) {
-                      final width = constraints.maxWidth;
-                      var columns = 1;
-                      if (width >= 2500) {
-                        columns = 5;
-                      } else if (width >= 2000) {
-                        columns = 4;
-                      } else if (width >= 1500) {
-                        columns = 3;
-                      } else if (width >= 1000) {
-                        columns = 2;
+              Positioned.fill(child: Container(color: Colors.black)),
+              Positioned.fill(
+                top: terminalTopInset.toDouble(),
+                child: DropTarget(
+                  onDragDone: _handleFileDrop,
+                  onDragEntered: (details) {
+                    setState(() {
+                      _dragging = true;
+                      if (_multiWindow) {
+                        _dragTargetSessionId = _findTerminalAtPosition(
+                          details.globalPosition,
+                        );
                       }
-                      final sessions = _visibleSessions.isNotEmpty
-                          ? _visibleSessions
-                          : (_activeSessionId != null
-                              ? [_activeSessionId!]
-                              : <String>[]);
-                      final displaySessions = sessions.isEmpty
-                          ? <String>[]
-                          : sessions;
-                      final aspectRatio = columns == 1 
-                          ? 1.4 
-                          : (columns == 2 ? 1.5 : (columns == 3 ? 1.6 : (columns == 4 ? 1.7 : 1.8)));
-                      final padding = EdgeInsets.fromLTRB(16, 12, 16, _bottomBarHeight + 20);
+                    });
+                  },
+                  onDragExited:
+                      (_) => setState(() {
+                        _dragging = false;
+                        _dragTargetSessionId = null;
+                      }),
+                  onDragUpdated: (details) {
+                    if (_multiWindow) {
+                      final targetId = _findTerminalAtPosition(
+                        details.globalPosition,
+                      );
+                      if (targetId != _dragTargetSessionId) {
+                        setState(() {
+                          _dragTargetSessionId = targetId;
+                        });
+                      }
+                    }
+                  },
+                  child: Stack(
+                    children: [
+                      _multiWindow
+                          ? LayoutBuilder(
+                            builder: (context, constraints) {
+                              final width = constraints.maxWidth;
+                              var columns = 1;
+                              if (width >= 2500) {
+                                columns = 5;
+                              } else if (width >= 2000) {
+                                columns = 4;
+                              } else if (width >= 1500) {
+                                columns = 3;
+                              } else if (width >= 1000) {
+                                columns = 2;
+                              }
+                              final sessions =
+                                  _visibleSessions.isNotEmpty
+                                      ? _visibleSessions
+                                      : (_activeSessionId != null
+                                          ? [_activeSessionId!]
+                                          : <String>[]);
+                              final displaySessions =
+                                  sessions.isEmpty ? <String>[] : sessions;
+                              final aspectRatio =
+                                  columns == 1
+                                      ? 1.4
+                                      : (columns == 2
+                                          ? 1.5
+                                          : (columns == 3
+                                              ? 1.6
+                                              : (columns == 4 ? 1.7 : 1.8)));
+                              final padding = EdgeInsets.fromLTRB(
+                                16,
+                                12,
+                                16,
+                                _bottomBarHeight + 20,
+                              );
 
-                      if (displaySessions.isEmpty) {
-                        return Padding(
-                          padding: padding,
-                          child: TerminalView(
-                            _idleTerminal,
-                            key: _idleTerminalViewKey,
-                            controller: _idleController,
-                            scrollController: _idleScrollController,
-                            autoResize: true,
+                              if (displaySessions.isEmpty) {
+                                return Padding(
+                                  padding: padding,
+                                  child: TerminalView(
+                                    _idleTerminal,
+                                    key: _idleTerminalViewKey,
+                                    controller: _idleController,
+                                    scrollController: _idleScrollController,
+                                    autoResize: true,
+                                    autofocus: true,
+                                    deleteDetection: true,
+                                    readOnly: _showHHKB,
+                                    keyboardType:
+                                        _showHHKB
+                                            ? TextInputType.none
+                                            : TextInputType.text,
+                                    backgroundOpacity: 1.0,
+                                    padding: const EdgeInsets.all(8),
+                                    textStyle: const TerminalStyle(
+                                      fontFamily: 'JetBrainsMono',
+                                      fontSize: 14,
+                                    ),
+                                  ),
+                                );
+                              }
+
+                              return GridView.builder(
+                                padding: padding,
+                                physics: const BouncingScrollPhysics(),
+                                gridDelegate:
+                                    SliverGridDelegateWithFixedCrossAxisCount(
+                                      crossAxisCount: columns,
+                                      crossAxisSpacing: 12,
+                                      mainAxisSpacing: 12,
+                                      childAspectRatio: aspectRatio,
+                                    ),
+                                itemCount: displaySessions.length + 1,
+                                itemBuilder: (context, index) {
+                                  if (index == displaySessions.length) {
+                                    return AddTerminalCard(
+                                      onTap: _sendCreateSession,
+                                    );
+                                  }
+                                  final sessionId = displaySessions[index];
+                                  return TerminalWindowCard(
+                                    key: _terminalCardKeyFor(sessionId),
+                                    sessionId: sessionId,
+                                    terminal: _terminalFor(sessionId),
+                                    controller: _controllerFor(sessionId),
+                                    scrollController: _scrollControllerFor(
+                                      sessionId,
+                                    ),
+                                    viewKey: _viewKeyFor(sessionId),
+                                    label: 'TERM ${index + 1}',
+                                    isActive: sessionId == _activeSessionId,
+                                    showHHKB: _showHHKB,
+                                    isDragTarget:
+                                        _dragging &&
+                                        _dragTargetSessionId == sessionId,
+                                    onTap:
+                                        () => _setActiveSession(
+                                          sessionId,
+                                          requestKeyboard: true,
+                                        ),
+                                    onClose: () => _sendCloseSession(sessionId),
+                                  );
+                                },
+                              );
+                            },
+                          )
+                          : TerminalView(
+                            terminal,
+                            key: _activeViewKey ?? _idleTerminalViewKey,
+                            controller: controller,
+                            scrollController: scrollController,
+                            autoResize: false,
                             autofocus: true,
                             deleteDetection: true,
                             readOnly: _showHHKB,
-                            keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
+                            keyboardType:
+                                _showHHKB
+                                    ? TextInputType.none
+                                    : TextInputType.text,
                             backgroundOpacity: 1.0,
-                            padding: const EdgeInsets.all(8),
+                            padding: EdgeInsets.fromLTRB(
+                              8,
+                              4,
+                              8,
+                              _bottomBarHeight + 8,
+                            ),
                             textStyle: const TerminalStyle(
                               fontFamily: 'JetBrainsMono',
                               fontSize: 14,
                             ),
                           ),
-                        );
-                      }
-
-                      return GridView.builder(
-                        padding: padding,
-                        physics: const BouncingScrollPhysics(),
-                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: columns,
-                          crossAxisSpacing: 12,
-                          mainAxisSpacing: 12,
-                          childAspectRatio: aspectRatio,
+                      if (_dragging && !_multiWindow)
+                        Positioned.fill(
+                          child: Container(
+                            color: Colors.blue.withValues(alpha: 0.15),
+                          ),
                         ),
-                        itemCount: displaySessions.length + 1,
-                        itemBuilder: (context, index) {
-                          if (index == displaySessions.length) {
-                            return AddTerminalCard(onTap: _sendCreateSession);
-                          }
-                          final sessionId = displaySessions[index];
-                          return TerminalWindowCard(
-                            sessionId: sessionId,
-                            terminal: _terminalFor(sessionId),
-                            controller: _controllerFor(sessionId),
-                            scrollController: _scrollControllerFor(sessionId),
-                            viewKey: _viewKeyFor(sessionId),
-                            label: 'TERM ${index + 1}',
-                            isActive: sessionId == _activeSessionId,
-                            showHHKB: _showHHKB,
-                            onTap: () => _setActiveSession(sessionId, requestKeyboard: true),
-                            onClose: () => _sendCloseSession(sessionId),
-                          );
-                        },
-                      );
-                    },
-                  )
-                : TerminalView(
-                    terminal,
-                    key: _activeViewKey ?? _idleTerminalViewKey,
-                    controller: controller,
-                    scrollController: scrollController,
-                    autoResize: false,
-                    autofocus: true,
-                    deleteDetection: true,
-                    readOnly: _showHHKB,
-                    keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
-                    backgroundOpacity: 1.0,
-                    padding: EdgeInsets.fromLTRB(8, 4, 8, _bottomBarHeight + 8),
-                    textStyle: const TerminalStyle(
-                      fontFamily: 'JetBrainsMono',
-                      fontSize: 14,
-                    ),
-                  ),
-          ),
-          if (!_chromeHidden)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 82,
-              left: 0,
-              right: 0,
-              height: 24,
-              child: IgnorePointer(
-                child: Container(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [Colors.black.withValues(alpha: 0.4), Colors.transparent],
-                    ),
+                    ],
                   ),
                 ),
               ),
-            ),
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: HeaderChrome(
-              hidden: _chromeHidden,
-              color: barColor,
-              activeColor: activeColor,
-              overlayColor: overlayColor,
-              error: _error,
-              pairingPending: _clientPairingPending,
-              onToggle: () {
-                setState(() {
-                  _chromeHidden = !_chromeHidden;
-                });
-                _scheduleActiveResize();
-              },
-              onAddSession: _sendCreateSession,
-              sessions: _visibleSessions,
-              activeSessionId: _activeSessionId,
-              sessionLabelBuilder: (sessionId, index) {
-                return _groupStore.getSessionName(sessionId, index);
-              },
-              onSelectSession: (id) => _setActiveSession(id, requestKeyboard: true),
-              onCloseSession: _sendCloseSession,
-              onReorderSessions: _reorderSessions,
-              connectionContent: _buildConnectionContent(context),
-            ),
-          ),
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: SafeArea(
-              top: false,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  KeyedSubtree(
-                    key: _quickBarKey,
-                    child: _showKeyboardTools
-                        ? QuickActionsBar(
-                            connected: isInputActive,
-                            ctrl: _ctrl,
-                            alt: _alt,
-                            meta: _meta,
-                            onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
-                            onToggleAlt: () => setState(() => _alt = !_alt),
-                            onToggleMeta: () => setState(() => _meta = !_meta),
-                            onKey: _sendKey,
-                            onPaste: _pasteClipboard,
-                            onCopy: _copySelection,
-                            onSend: _sendRaw,
-                            onScrollToBottom: _scrollToBottom,
-                          )
-                        : const SizedBox.shrink(),
-                  ),
-                  if (_showHHKB)
-                    HHKBKeyboard(
-                      connected: isInputActive,
-                      fn: _hhkbFn,
-                      ctrl: _ctrl,
-                      alt: _alt,
-                      shift: _hhkbShift,
-                      onKey: (key, {bool isSpecial = false}) {
-                        if (_ctrl && !isSpecial) {
-                          _sendCtrl(key);
-                        } else if (_alt && !isSpecial) {
-                          _sendRaw('\x1b$key');
-                        } else {
-                          _sendRaw(key);
-                        }
-                        // Reset modifiers after key press (except Fn)
-                        if (_ctrl || _alt || _hhkbShift) {
-                          setState(() {
-                            _ctrl = false;
-                            _alt = false;
-                            _hhkbShift = false;
-                          });
-                        }
-                      },
-                      onToggleFn: () => setState(() => _hhkbFn = !_hhkbFn),
-                      onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
-                      onToggleAlt: () => setState(() => _alt = !_alt),
-                      onToggleShift: () => setState(() => _hhkbShift = !_hhkbShift),
+              if (!_chromeHidden)
+                Positioned(
+                  top: MediaQuery.of(context).padding.top + 82,
+                  left: 0,
+                  right: 0,
+                  height: 24,
+                  child: IgnorePointer(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [
+                            Colors.black.withValues(alpha: 0.4),
+                            Colors.transparent,
+                          ],
+                        ),
+                      ),
                     ),
-                ],
+                  ),
+                ),
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                child: HeaderChrome(
+                  hidden: _chromeHidden,
+                  color: barColor,
+                  activeColor: activeColor,
+                  overlayColor: overlayColor,
+                  error: _error,
+                  pairingPending: _clientPairingPending,
+                  onToggle: () {
+                    setState(() {
+                      _chromeHidden = !_chromeHidden;
+                    });
+                    _scheduleActiveResize();
+                  },
+                  onAddSession: _sendCreateSession,
+                  sessions: _visibleSessions,
+                  activeSessionId: _activeSessionId,
+                  sessionLabelBuilder: (sessionId, index) {
+                    return _groupStore.getSessionName(sessionId, index);
+                  },
+                  onSelectSession:
+                      (id) => _setActiveSession(id, requestKeyboard: true),
+                  onCloseSession: _sendCloseSession,
+                  onReorderSessions: _reorderSessions,
+                  connectionContent: _buildConnectionContent(context),
+                ),
               ),
-            ),
-          ),
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: SafeArea(
+                  top: false,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      KeyedSubtree(
+                        key: _quickBarKey,
+                        child:
+                            _showKeyboardTools
+                                ? QuickActionsBar(
+                                  connected: isInputActive,
+                                  ctrl: _ctrl,
+                                  alt: _alt,
+                                  meta: _meta,
+                                  onToggleCtrl:
+                                      () => setState(() => _ctrl = !_ctrl),
+                                  onToggleAlt:
+                                      () => setState(() => _alt = !_alt),
+                                  onToggleMeta:
+                                      () => setState(() => _meta = !_meta),
+                                  onKey: _sendKey,
+                                  onPaste: _pasteClipboard,
+                                  onCopy: _copySelection,
+                                  onSend: _sendRaw,
+                                  onScrollToBottom: _scrollToBottom,
+                                )
+                                : const SizedBox.shrink(),
+                      ),
+                      if (_showHHKB)
+                        HHKBKeyboard(
+                          connected: isInputActive,
+                          fn: _hhkbFn,
+                          ctrl: _ctrl,
+                          alt: _alt,
+                          shift: _hhkbShift,
+                          onKey: (key, {bool isSpecial = false}) {
+                            if (_ctrl && !isSpecial) {
+                              _sendCtrl(key);
+                            } else if (_alt && !isSpecial) {
+                              _sendRaw('\x1b$key');
+                            } else {
+                              _sendRaw(key);
+                            }
+                            // Reset modifiers after key press (except Fn)
+                            if (_ctrl || _alt || _hhkbShift) {
+                              setState(() {
+                                _ctrl = false;
+                                _alt = false;
+                                _hhkbShift = false;
+                              });
+                            }
+                          },
+                          onToggleFn: () => setState(() => _hhkbFn = !_hhkbFn),
+                          onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
+                          onToggleAlt: () => setState(() => _alt = !_alt),
+                          onToggleShift:
+                              () => setState(() => _hhkbShift = !_hhkbShift),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
             ],
           ),
         );
@@ -1394,7 +1609,8 @@ class _HorizonHomeState extends State<HorizonHome>
           modes.add(wormholeConnected ? 'Wormhole' : 'Wormhole (connecting)');
         }
         final modeStr = modes.isEmpty ? 'No sharing' : modes.join(' + ');
-        subtitle = '$modeStr · $clientCount client${clientCount == 1 ? '' : 's'}';
+        subtitle =
+            '$modeStr · $clientCount client${clientCount == 1 ? '' : 's'}';
       }
 
       switchValue = isRunning;
@@ -1407,20 +1623,23 @@ class _HorizonHomeState extends State<HorizonHome>
       };
     } else {
       // Voyager mode (client)
-      final connectionLabel = _useWormhole
-          ? _wormholeController.text.trim()
-          : _urlController.text.trim();
+      final connectionLabel =
+          _useWormhole
+              ? _wormholeController.text.trim()
+              : _urlController.text.trim();
       final isRemote = _isRemoteTarget();
       final localName = _deviceName.trim();
       final remoteName =
           _remoteDeviceName ?? _fallbackRemoteName(connectionLabel);
 
-      title = isRemote
-          ? 'Voyager · $remoteName'
-          : (localName.isEmpty ? 'Voyager' : 'Voyager · $localName');
-      subtitle = _connected
-          ? 'Connected to ${connectionLabel.isEmpty ? 'unknown' : connectionLabel}'
-          : 'Disconnected';
+      title =
+          isRemote
+              ? 'Voyager · $remoteName'
+              : (localName.isEmpty ? 'Voyager' : 'Voyager · $localName');
+      subtitle =
+          _connected
+              ? 'Connected to ${connectionLabel.isEmpty ? 'unknown' : connectionLabel}'
+              : 'Disconnected';
 
       switchValue = _connected;
       onSwitchChanged = (value) {
@@ -1478,14 +1697,14 @@ class _HorizonHomeState extends State<HorizonHome>
               ),
             ),
             const SizedBox(width: 16),
-            Switch(
-              value: switchValue,
-              onChanged: onSwitchChanged,
-            ),
+            Switch(value: switchValue, onChanged: onSwitchChanged),
             const SizedBox(width: 8),
             IconButton(
               icon: const Icon(
-                  Icons.settings_outlined, color: Colors.white70, size: 20),
+                Icons.settings_outlined,
+                color: Colors.white70,
+                size: 20,
+              ),
               onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
               tooltip: 'Settings',
             ),
@@ -1543,7 +1762,8 @@ class _HorizonHomeState extends State<HorizonHome>
     return GroupDrawer(
       manager: _groupStore,
       activeSessionId: _activeSessionId,
-      onSelectSession: (sessionId) => _setActiveSession(sessionId, requestKeyboard: true),
+      onSelectSession:
+          (sessionId) => _setActiveSession(sessionId, requestKeyboard: true),
       onCloseSession: _sendCloseSession,
       onAddSession: _sendCreateSessionInGroup,
     );

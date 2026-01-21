@@ -14,6 +14,7 @@ class TerminalWindowCard extends StatefulWidget {
     required this.label,
     required this.isActive,
     required this.showHHKB,
+    this.isDragTarget = false,
     this.onTap,
     this.onClose,
   });
@@ -26,6 +27,7 @@ class TerminalWindowCard extends StatefulWidget {
   final String label;
   final bool isActive;
   final bool showHHKB;
+  final bool isDragTarget;
   final VoidCallback? onTap;
   final VoidCallback? onClose;
 
@@ -74,77 +76,91 @@ class _TerminalWindowCardState extends State<TerminalWindowCard>
             width: widget.isActive ? 1.5 : 1.0,
           ),
         ),
-        child: Column(
+        child: Stack(
           children: [
-            Container(
-              height: 28,
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              decoration: BoxDecoration(
-                color: widget.isActive
-                    ? const Color(0xFF1A2A3A).withValues(alpha: 0.4)
-                    : const Color(0xFF111620).withValues(alpha: 0.2),
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(9),
-                  topRight: Radius.circular(9),
+            Column(
+              children: [
+                Container(
+                  height: 28,
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  decoration: BoxDecoration(
+                    color: widget.isActive
+                        ? const Color(0xFF1A2A3A).withValues(alpha: 0.4)
+                        : const Color(0xFF111620).withValues(alpha: 0.2),
+                    borderRadius: const BorderRadius.only(
+                      topLeft: Radius.circular(9),
+                      topRight: Radius.circular(9),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      StatusDot(connected: widget.isActive, size: 6),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          widget.label,
+                          style: TextStyle(
+                            color: widget.isActive
+                                ? Colors.white
+                                : Colors.white38,
+                            fontSize: 9,
+                            fontWeight: widget.isActive
+                                ? FontWeight.bold
+                                : FontWeight.normal,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                      ),
+                      if (widget.isActive)
+                        GestureDetector(
+                          onTap: widget.onClose,
+                          child: Icon(
+                            Icons.close_rounded,
+                            size: 14,
+                            color: Colors.white.withValues(alpha: 0.3),
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
-              ),
-              child: Row(
-                children: [
-                  StatusDot(connected: widget.isActive, size: 6),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      widget.label,
-                      style: TextStyle(
-                        color: widget.isActive
-                            ? Colors.white
-                            : Colors.white38,
-                        fontSize: 9,
-                        fontWeight: widget.isActive
-                            ? FontWeight.bold
-                            : FontWeight.normal,
-                        letterSpacing: 0.5,
+                Expanded(
+                  child: ClipRRect(
+                    borderRadius: const BorderRadius.only(
+                      bottomLeft: Radius.circular(9),
+                      bottomRight: Radius.circular(9),
+                    ),
+                    child: TerminalView(
+                      widget.terminal,
+                      key: widget.viewKey,
+                      controller: widget.controller,
+                      scrollController: widget.scrollController,
+                      autoResize: true,
+                      autofocus: false,
+                      deleteDetection: true,
+                      readOnly: widget.showHHKB,
+                      keyboardType: widget.showHHKB
+                          ? TextInputType.none
+                          : TextInputType.text,
+                      backgroundOpacity: 1.0,
+                      padding: const EdgeInsets.all(8),
+                      textStyle: const TerminalStyle(
+                        fontFamily: 'JetBrainsMono',
+                        fontSize: 12,
                       ),
                     ),
                   ),
-                  if (widget.isActive)
-                    GestureDetector(
-                      onTap: widget.onClose,
-                      child: Icon(
-                        Icons.close_rounded,
-                        size: 14,
-                        color: Colors.white.withValues(alpha: 0.3),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            Expanded(
-              child: ClipRRect(
-                borderRadius: const BorderRadius.only(
-                  bottomLeft: Radius.circular(9),
-                  bottomRight: Radius.circular(9),
                 ),
-                child: TerminalView(
-                  widget.terminal,
-                  key: widget.viewKey,
-                  controller: widget.controller,
-                  scrollController: widget.scrollController,
-                  autoResize: true,
-                  autofocus: false,
-                  deleteDetection: true,
-                  readOnly: widget.showHHKB,
-                  keyboardType:
-                      widget.showHHKB ? TextInputType.none : TextInputType.text,
-                  backgroundOpacity: 1.0,
-                  padding: const EdgeInsets.all(8),
-                  textStyle: const TerminalStyle(
-                    fontFamily: 'JetBrainsMono',
-                    fontSize: 12,
+              ],
+            ),
+            if (widget.isDragTarget)
+              Positioned.fill(
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: Colors.blue.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(10),
                   ),
                 ),
               ),
-            ),
           ],
         ),
       ),
