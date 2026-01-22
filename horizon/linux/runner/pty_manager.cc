@@ -13,7 +13,7 @@
 static PtyManager* g_pty_manager = nullptr;
 static FlMethodChannel* g_method_channel = nullptr;
 static FlEventChannel* g_event_channel = nullptr;
-static FlEventSink* g_event_sink = nullptr;
+static gboolean g_event_channel_listening = FALSE;
 
 PtyManager::PtyManager() {}
 
@@ -202,8 +202,8 @@ static void method_call_handler(FlMethodChannel* channel,
 
       if (session_val && data_val) {
         const char* session_id = fl_value_get_string(session_val);
-        size_t len;
-        const uint8_t* data = fl_value_get_uint8_list(data_val, &len);
+        const uint8_t* data = fl_value_get_uint8_list(data_val);
+        size_t len = fl_value_get_length(data_val);
         g_pty_manager->write_stdin(session_id, data, len);
       }
     }
@@ -242,21 +242,21 @@ static void method_call_handler(FlMethodChannel* channel,
 static FlMethodErrorResponse* event_listen_cb(FlEventChannel* channel,
                                                FlValue* args,
                                                gpointer user_data) {
-  g_event_sink = fl_event_channel_get_event_sink(channel);
+  g_event_channel_listening = TRUE;
   return nullptr;
 }
 
 static FlMethodErrorResponse* event_cancel_cb(FlEventChannel* channel,
                                                FlValue* args,
                                                gpointer user_data) {
-  g_event_sink = nullptr;
+  g_event_channel_listening = FALSE;
   return nullptr;
 }
 
 static void send_output_to_flutter(const std::string& session_id,
                                    const uint8_t* data,
                                    size_t len) {
-  if (!g_event_sink) {
+  if (!g_event_channel_listening || !g_event_channel) {
     return;
   }
 
@@ -264,14 +264,14 @@ static void send_output_to_flutter(const std::string& session_id,
   g_idle_add_full(G_PRIORITY_DEFAULT, [](gpointer user_data) -> gboolean {
     auto* params = static_cast<std::tuple<std::string, std::vector<uint8_t>>*>(user_data);
 
-    if (g_event_sink) {
+    if (g_event_channel_listening && g_event_channel) {
       g_autoptr(FlValue) event = fl_value_new_map();
       fl_value_set_string_take(event, "sessionId",
                                fl_value_new_string(std::get<0>(*params).c_str()));
       fl_value_set_string_take(event, "data",
                                fl_value_new_uint8_list(std::get<1>(*params).data(),
                                                        std::get<1>(*params).size()));
-      fl_event_sink_send(g_event_sink, event, nullptr);
+      fl_event_channel_send(g_event_channel, event, nullptr, nullptr);
     }
 
     delete params;
