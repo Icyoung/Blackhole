@@ -2,6 +2,7 @@
 #define PTY_MANAGER_H_
 
 #include <windows.h>
+#include <flutter_windows.h>
 #include <flutter/method_channel.h>
 #include <flutter/event_channel.h>
 #include <flutter/plugin_registrar_windows.h>
