@@ -2,7 +2,6 @@
 
 #include <optional>
 
-#include <flutter/plugin_registrar_windows.h>
 #include "flutter/generated_plugin_registrant.h"
 #include "pty_manager.h"
 
@@ -30,9 +29,7 @@ bool FlutterWindow::OnCreate() {
 
   // Register PTY manager plugin
   PtyManagerRegisterWithRegistrar(
-      flutter::PluginRegistrarManager::GetInstance()
-          ->GetRegistrar<flutter::PluginRegistrarWindows>(
-              flutter_controller_->engine()->GetRegistrarForPlugin("PtyManagerPlugin")));
+      flutter_controller_->engine()->GetRegistrarForPlugin("PtyManagerPlugin"));
 
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 

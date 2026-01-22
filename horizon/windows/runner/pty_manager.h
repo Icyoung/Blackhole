@@ -48,6 +48,6 @@ class PtyManager {
 };
 
 // Flutter plugin registration
-void PtyManagerRegisterWithRegistrar(flutter::PluginRegistrarWindows* registrar);
+void PtyManagerRegisterWithRegistrar(FlutterDesktopPluginRegistrarRef registrar);
 
 #endif  // PTY_MANAGER_H_

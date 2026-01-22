@@ -9,6 +9,7 @@
 #pragma comment(lib, "rpcrt4.lib")
 
 static std::unique_ptr<PtyManager> g_pty_manager;
+static std::unique_ptr<flutter::PluginRegistrarWindows> g_registrar;
 static std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> g_method_channel;
 static std::unique_ptr<flutter::EventChannel<flutter::EncodableValue>> g_event_channel;
 static std::unique_ptr<flutter::EventSink<flutter::EncodableValue>> g_event_sink;
@@ -354,7 +355,10 @@ static void SendOutputToFlutter(const std::string& session_id,
   }
 }
 
-void PtyManagerRegisterWithRegistrar(flutter::PluginRegistrarWindows* registrar) {
+void PtyManagerRegisterWithRegistrar(FlutterDesktopPluginRegistrarRef registrar_ref) {
+  // Create the C++ wrapper for the registrar
+  g_registrar = std::make_unique<flutter::PluginRegistrarWindows>(registrar_ref);
+
   // Create message-only window for thread synchronization
   WNDCLASSEXW wc = {};
   wc.cbSize = sizeof(WNDCLASSEXW);
@@ -372,13 +376,13 @@ void PtyManagerRegisterWithRegistrar(flutter::PluginRegistrarWindows* registrar)
   g_pty_manager->set_output_callback(SendOutputToFlutter);
 
   auto method_channel = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
-      registrar->messenger(), "com.blackhole/pty",
+      g_registrar->messenger(), "com.blackhole/pty",
       &flutter::StandardMethodCodec::GetInstance());
   method_channel->SetMethodCallHandler(HandleMethodCall);
   g_method_channel = std::move(method_channel);
 
   auto event_channel = std::make_unique<flutter::EventChannel<flutter::EncodableValue>>(
-      registrar->messenger(), "com.blackhole/pty/output",
+      g_registrar->messenger(), "com.blackhole/pty/output",
       &flutter::StandardMethodCodec::GetInstance());
   event_channel->SetStreamHandler(std::make_unique<PtyEventStreamHandler>());
   g_event_channel = std::move(event_channel);
