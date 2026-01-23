@@ -39,6 +39,7 @@ class PtyManager {
   void write_stdin(const std::string& session_id, const uint8_t* data, size_t len);
   void resize(const std::string& session_id, int rows, int cols);
   void kill_session(const std::string& session_id);
+  std::string get_cwd(const std::string& session_id);
 
  private:
   std::map<std::string, std::unique_ptr<PtySession>> sessions_;

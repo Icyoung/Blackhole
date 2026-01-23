@@ -158,6 +158,31 @@ void PtyManager::kill_session(const std::string& session_id) {
   sessions_.erase(it);
 }
 
+std::string PtyManager::get_cwd(const std::string& session_id) {
+  auto it = sessions_.find(session_id);
+  if (it == sessions_.end()) {
+    return "";
+  }
+
+  // Get the foreground process group of the terminal
+  pid_t fg_pid = tcgetpgrp(it->second->master_fd);
+  if (fg_pid < 0) {
+    fg_pid = it->second->child_pid;
+  }
+
+  // Read /proc/[pid]/cwd symlink
+  char proc_path[64];
+  snprintf(proc_path, sizeof(proc_path), "/proc/%d/cwd", fg_pid);
+
+  char cwd_buf[PATH_MAX];
+  ssize_t len = readlink(proc_path, cwd_buf, sizeof(cwd_buf) - 1);
+  if (len > 0) {
+    cwd_buf[len] = '\0';
+    return std::string(cwd_buf);
+  }
+  return "";
+}
+
 // Flutter method channel handler
 static void method_call_handler(FlMethodChannel* channel,
                                 FlMethodCall* method_call,
@@ -231,6 +256,24 @@ static void method_call_handler(FlMethodChannel* channel,
       }
     }
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+  } else if (strcmp(method, "getCwd") == 0) {
+    if (fl_value_get_type(args) == FL_VALUE_TYPE_MAP) {
+      FlValue* session_val = fl_value_lookup_string(args, "sessionId");
+      if (session_val) {
+        const char* session_id = fl_value_get_string(session_val);
+        std::string cwd = g_pty_manager->get_cwd(session_id);
+        if (!cwd.empty()) {
+          g_autoptr(FlValue) result = fl_value_new_string(cwd.c_str());
+          response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
+        } else {
+          response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+        }
+      } else {
+        response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+      }
+    } else {
+      response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+    }
   } else {
     response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
   }

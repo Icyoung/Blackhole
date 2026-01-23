@@ -69,6 +69,11 @@ class AppDelegate: FlutterAppDelegate {
         let sessionId = args?["sessionId"] as? String ?? ""
         self.ptyManager.kill(sessionId: sessionId)
         result(nil)
+      case "getCwd":
+        let args = call.arguments as? [String: Any]
+        let sessionId = args?["sessionId"] as? String ?? ""
+        let cwd = self.ptyManager.getCwd(sessionId: sessionId)
+        result(cwd)
       default:
         result(FlutterMethodNotImplemented)
       }

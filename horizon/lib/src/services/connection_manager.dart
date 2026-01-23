@@ -42,6 +42,7 @@ class ConnectionManager {
     required this.onSessionCreated,
     required this.onSessionClosed,
     required this.onStdout,
+    this.onSessionSync,
   });
 
   final void Function({required bool waitForPairing}) onConnected;
@@ -58,6 +59,7 @@ class ConnectionManager {
   final void Function(String sessionId) onSessionCreated;
   final void Function(String sessionId) onSessionClosed;
   final void Function(String sessionId, String text) onStdout;
+  final void Function(String sessionId, String content)? onSessionSync;
 
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
@@ -142,6 +144,10 @@ class ConnectionManager {
       return;
     }
     channel.sink.add(_encodeMessage(payload));
+  }
+
+  void sendSyncRequest(String sessionId) {
+    sendCommand({'type': 'sync', 'sessionId': sessionId});
   }
 
   void sendRaw(String sessionId, String data) {
@@ -308,6 +314,14 @@ class ConnectionManager {
       final sessions = decoded['sessions'];
       if (sessions is List) {
         onSessionList(sessions.whereType<String>().toList());
+      }
+      return;
+    }
+    if (type == 'session_sync') {
+      final sessionId = decoded['sessionId'];
+      final content = decoded['content'];
+      if (sessionId is String && content is String) {
+        onSessionSync?.call(sessionId, content);
       }
       return;
     }

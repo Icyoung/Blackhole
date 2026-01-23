@@ -92,9 +92,9 @@ BEGIN
             VALUE "CompanyName", "Blackhole" "\0"
             VALUE "FileDescription", "Voyager - Remote Terminal Client" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "voyager" "\0"
+            VALUE "InternalName", "Voyager" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2025 Blackhole. All rights reserved." "\0"
-            VALUE "OriginalFilename", "voyager.exe" "\0"
+            VALUE "OriginalFilename", "Voyager.exe" "\0"
             VALUE "ProductName", "Voyager" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END

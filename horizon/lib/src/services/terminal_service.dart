@@ -57,4 +57,10 @@ class TerminalPlugin {
       'sessionId': sessionId,
     });
   }
+
+  Future<String?> getCwd(String sessionId) async {
+    return await _channel.invokeMethod<String?>('getCwd', {
+      'sessionId': sessionId,
+    });
+  }
 }

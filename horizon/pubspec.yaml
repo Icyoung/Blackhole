@@ -31,6 +31,10 @@ dependencies:
   flutter:
     sdk: flutter
 
+  # Shared module from Voyager
+  voyager_share:
+    path: ../voyager/voyager_share
+
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
@@ -41,6 +45,8 @@ dependencies:
   xterm: ^4.0.0
   uuid: ^4.0.0
   desktop_drop: ^0.6.0
+  cryptography: ^2.7.0
+  google_fonts: ^6.2.1
 
 dev_dependencies:
   flutter_test:

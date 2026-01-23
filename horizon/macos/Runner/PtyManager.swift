@@ -114,4 +114,29 @@ final class PtyManager {
     session.readSource.cancel()
     _ = Darwin.kill(session.childPid, SIGTERM)
   }
+
+  func getCwd(sessionId: String) -> String? {
+    guard let session = sessions[sessionId] else {
+      return nil
+    }
+    // Get the foreground process group of the terminal
+    var fgPid = tcgetpgrp(session.masterFd)
+    if fgPid < 0 {
+      fgPid = session.childPid
+    }
+
+    // Use proc_pidinfo to get the current working directory
+    var pathInfo = proc_vnodepathinfo()
+    let pathInfoSize = MemoryLayout<proc_vnodepathinfo>.size
+    let result = proc_pidinfo(fgPid, PROC_PIDVNODEPATHINFO, 0, &pathInfo, Int32(pathInfoSize))
+
+    if result == pathInfoSize {
+      return withUnsafePointer(to: pathInfo.pvi_cdir.vip_path) { ptr in
+        ptr.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { charPtr in
+          String(cString: charPtr)
+        }
+      }
+    }
+    return nil
+  }
 }

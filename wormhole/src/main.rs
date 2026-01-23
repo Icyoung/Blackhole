@@ -52,6 +52,7 @@ struct WsParams {
     device_key: Option<String>,
     device_name: Option<String>,
     device_type: Option<String>,
+    public_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +68,7 @@ struct VoyagerInfo {
     device_key: Option<String>,
     device_name: Option<String>,
     device_type: Option<String>,
+    public_key: Option<String>,
     pairing_state: PairingState,
 }
 
@@ -175,6 +177,7 @@ async fn ws_handler(
     let device_key = params.device_key.clone();
     let device_name = params.device_name.clone();
     let device_type = params.device_type.clone();
+    let public_key = params.public_key.clone();
     ws.on_upgrade(move |socket| {
         handle_socket(
             state,
@@ -183,6 +186,7 @@ async fn ws_handler(
             device_key,
             device_name,
             device_type,
+            public_key,
             socket,
         )
     })
@@ -263,6 +267,7 @@ async fn handle_socket(
     device_key: Option<String>,
     device_name: Option<String>,
     device_type: Option<String>,
+    public_key: Option<String>,
     socket: WebSocket,
 ) {
     let (mut sender, mut receiver) = socket.split();
@@ -320,6 +325,7 @@ async fn handle_socket(
                         device_key: device_key.clone(),
                         device_name: device_name.clone(),
                         device_type: device_type.clone(),
+                        public_key: public_key.clone(),
                         pairing_state: PairingState::Pending,
                     };
                     session.voyagers.push(voyager_info);
@@ -347,6 +353,7 @@ async fn handle_socket(
         device_key = ?device_key,
         device_name = ?device_name,
         device_type = ?device_type,
+        has_public_key = public_key.is_some(),
         "client connected"
     );
 
@@ -373,6 +380,7 @@ async fn handle_socket(
             "deviceKey": device_key,
             "deviceName": device_name.clone().unwrap_or_else(|| "Unknown Device".to_string()),
             "deviceType": device_type,
+            "publicKey": public_key,
         });
         let mut sessions = state.sessions.lock().await;
         if let Some(session) = sessions.get_mut(&session_id) {
@@ -491,6 +499,7 @@ async fn handle_pairing_response(state: AppState, session_id: &str, value: &Valu
     let device_key = value.get("deviceKey").and_then(|v| v.as_str());
     let approved = value.get("approved").and_then(|v| v.as_bool()).unwrap_or(false);
     let assigned_key = value.get("assignedKey").and_then(|v| v.as_str());
+    let horizon_public_key = value.get("publicKey").and_then(|v| v.as_str());
 
     let mut sessions = state.sessions.lock().await;
     let Some(session) = sessions.get_mut(session_id) else {
@@ -520,10 +529,11 @@ async fn handle_pairing_response(state: AppState, session_id: &str, value: &Valu
             "v": 1,
             "type": "pairing_result",
             "approved": true,
-            "assignedKey": assigned_key
+            "assignedKey": assigned_key,
+            "publicKey": horizon_public_key
         });
         let _ = voyager.tx.send(Message::Text(result_msg.to_string()));
-        info!(session_id = %session_id, device_key = ?voyager.device_key, "voyager pairing approved");
+        info!(session_id = %session_id, device_key = ?voyager.device_key, has_horizon_public_key = horizon_public_key.is_some(), "voyager pairing approved");
     } else {
         voyager.pairing_state = PairingState::Rejected;
         let result_msg = serde_json::json!({

@@ -33,6 +33,7 @@ class ConnectionManager {
     required this.onConnectedChanged,
     required this.onDisconnected,
     required this.onPairingPendingChanged,
+    required this.onHostInfo,
     required this.onError,
     required this.onGroupSync,
     required this.onGroupError,
@@ -41,21 +42,28 @@ class ConnectionManager {
     required this.onSessionCreated,
     required this.onSessionClosed,
     required this.onStdout,
+    this.onSessionSync,
   });
 
   final void Function({required bool waitForPairing}) onConnected;
   final void Function(bool connected) onConnectedChanged;
   final VoidCallback onDisconnected;
   final void Function(bool pending) onPairingPendingChanged;
+  final void Function(String? hostName) onHostInfo;
   final void Function(String message) onError;
   final void Function(Map<String, dynamic> payload) onGroupSync;
   final void Function(String message) onGroupError;
-  final void Function({required bool approved, String? assignedKey})
-      onPairingResult;
+  final void Function({
+    required bool approved,
+    String? assignedKey,
+    String? horizonPublicKey,
+  })
+  onPairingResult;
   final void Function(List<String> sessions) onSessionList;
   final void Function(String sessionId) onSessionCreated;
   final void Function(String sessionId) onSessionClosed;
-  final void Function(String sessionId, String text) onStdout;
+  final void Function(String sessionId, Uint8List data) onStdout;
+  final void Function(String sessionId, String content)? onSessionSync;
 
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
@@ -133,6 +141,10 @@ class ConnectionManager {
     channel.sink.add(_encodeMessage(payload));
   }
 
+  void sendSyncRequest(String sessionId) {
+    sendCommand({'type': 'sync', 'sessionId': sessionId});
+  }
+
   void sendRaw(String sessionId, String data) {
     final channel = _channel;
     if (channel == null) {
@@ -162,9 +174,7 @@ class ConnectionManager {
         cols & 0xFF,
       ]),
     );
-    debugPrint(
-      '[Voyager] resize session=$sessionId rows=$rows cols=$cols',
-    );
+    debugPrint('[Voyager] resize session=$sessionId rows=$rows cols=$cols');
     channel.sink.add(payload);
   }
 
@@ -266,19 +276,34 @@ class ConnectionManager {
     if (type == 'group_error') {
       final message = decoded['message'];
       final code = decoded['code'];
-      final text = message is String
-          ? message
-          : code is String
+      final text =
+          message is String
+              ? message
+              : code is String
               ? code
               : 'Unknown group error';
       onGroupError(text);
       return;
     }
+    if (type == 'host_info') {
+      final hostName = decoded['hostName'];
+      if (hostName is String && hostName.isNotEmpty) {
+        onHostInfo(hostName);
+      } else {
+        onHostInfo(null);
+      }
+      return;
+    }
     if (type == 'pairing_result') {
       final approved = decoded['approved'] as bool? ?? false;
       final assignedKey = decoded['assignedKey'] as String?;
+      final horizonPublicKey = decoded['publicKey'] as String?;
       _setPairingPending(false);
-      onPairingResult(approved: approved, assignedKey: assignedKey);
+      onPairingResult(
+        approved: approved,
+        assignedKey: assignedKey,
+        horizonPublicKey: horizonPublicKey,
+      );
       if (!approved) {
         disconnect(shouldReconnect: false);
       }
@@ -288,6 +313,14 @@ class ConnectionManager {
       final sessions = decoded['sessions'];
       if (sessions is List) {
         onSessionList(sessions.whereType<String>().toList());
+      }
+      return;
+    }
+    if (type == 'session_sync') {
+      final sessionId = decoded['sessionId'];
+      final content = decoded['content'];
+      if (sessionId is String && content is String) {
+        onSessionSync?.call(sessionId, content);
       }
       return;
     }
@@ -310,15 +343,16 @@ class ConnectionManager {
       final raw = decoded['raw'];
       final sessionId = decoded['sessionId'];
       if (sessionId is String) {
+        Uint8List? bytes;
         if (data is String) {
-          _logDeleteProbe(data);
-          _logStdoutProbe(utf8.encode(data));
-          onStdout(sessionId, data);
+          bytes = Uint8List.fromList(utf8.encode(data));
         } else if (raw is Uint8List) {
-          _logDeleteProbe(utf8.decode(raw, allowMalformed: true));
-          _logStdoutProbe(raw);
-          final text = utf8.decode(raw, allowMalformed: true);
-          onStdout(sessionId, text);
+          bytes = raw;
+        }
+        if (bytes != null) {
+          _logDeleteProbe(utf8.decode(bytes, allowMalformed: true));
+          _logStdoutProbe(bytes);
+          onStdout(sessionId, bytes);
         }
       }
     }
@@ -371,7 +405,9 @@ class ConnectionManager {
       return;
     }
     final sample = bytes.length > 64 ? bytes.sublist(0, 64) : bytes;
-    final hex = sample.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+    final hex = sample
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join(' ');
     debugPrint('[Voyager] stdout after delete bytes: $hex');
     _stdoutProbeArmed = false;
   }
@@ -415,14 +451,12 @@ class ConnectionManager {
     required Uint8List data,
   }) {
     final sessionBytes = utf8.encode(sessionId);
-    final buffer = BytesBuilder(copy: false)
-      ..add([1, type.code])
-      ..add([
-        (sessionBytes.length >> 8) & 0xFF,
-        sessionBytes.length & 0xFF,
-      ])
-      ..add(sessionBytes)
-      ..add(data);
+    final buffer =
+        BytesBuilder(copy: false)
+          ..add([1, type.code])
+          ..add([(sessionBytes.length >> 8) & 0xFF, sessionBytes.length & 0xFF])
+          ..add(sessionBytes)
+          ..add(data);
     return buffer.toBytes();
   }
 

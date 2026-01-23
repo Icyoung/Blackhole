@@ -12,6 +12,7 @@ import 'package:xterm/xterm.dart';
 
 import '../models/terminal_group.dart';
 import '../services/connection_manager.dart';
+import '../services/crypto_service.dart';
 import '../services/group_store.dart';
 import '../services/terminal_manager.dart';
 import '../widgets/add_terminal_card.dart';
@@ -65,6 +66,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   Size _lastMetricsSize = Size.zero;
 
   final List<String> _sessions = [];
+  final Set<String> _syncedSessions = {};
   String? _activeSessionId;
   late final GroupStore _groupStore;
 
@@ -82,7 +84,13 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   // Device pairing related state
   String? _deviceKey;
   String _deviceName = '';
+  String? _remoteDeviceName;
   bool _pairingPending = false;
+
+  // E2E encryption
+  final CryptoService _crypto = CryptoService();
+  String? _publicKey;
+  String? _horizonPublicKey;
 
   List<String> get _visibleSessions => _groupStore.activeGroupSessionIds;
 
@@ -93,6 +101,10 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     _terminalManager = TerminalManager(
       onInput: _handleTerminalInput,
       onResize: _handleResize,
+      onTitleChange: (sessionId, title) {
+        if (mounted) setState(() {});
+      },
+      logPrefix: 'Voyager',
     );
     _connectionManager = ConnectionManager(
       onConnected: ({required waitForPairing}) {
@@ -118,6 +130,14 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
           _pairingPending = pending;
         });
       },
+      onHostInfo: (hostName) {
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _remoteDeviceName = hostName;
+        });
+      },
       onError: (message) {
         if (!mounted) {
           return;
@@ -138,11 +158,20 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
           _error = 'Group error: $message';
         });
       },
-      onPairingResult: ({required approved, String? assignedKey}) {
+      onPairingResult: ({
+        required approved,
+        String? assignedKey,
+        String? horizonPublicKey,
+      }) {
         if (approved) {
           if (assignedKey != null && assignedKey.isNotEmpty) {
             _deviceKey = assignedKey;
             _saveSettings();
+          }
+          // Setup encryption if Horizon provided public key
+          if (horizonPublicKey != null && horizonPublicKey.isNotEmpty) {
+            _horizonPublicKey = horizonPublicKey;
+            _setupEncryption(horizonPublicKey);
           }
           if (mounted) {
             setState(() {
@@ -150,7 +179,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
               _error = null;
             });
           }
-          debugPrint('[Voyager] Pairing approved, deviceKey: $_deviceKey');
+          debugPrint(
+            '[Voyager] Pairing approved, deviceKey: $_deviceKey, hasHorizonPublicKey: ${horizonPublicKey != null}',
+          );
           _sendListSessions();
         } else {
           if (mounted) {
@@ -167,6 +198,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       onSessionCreated: _handleSessionCreated,
       onSessionClosed: _handleSessionClosed,
       onStdout: _handleStdout,
+      onSessionSync: _handleSessionSync,
     );
     _groupStore = GroupStore(
       onChanged: _handleGroupChange,
@@ -190,6 +222,10 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     if (needsRefresh && savedDeviceName != deviceName) {
       await prefs.setString('deviceName', deviceName);
     }
+
+    // Load or generate crypto keys
+    await _loadOrGenerateKeys(prefs);
+
     setState(() {
       _urlController.text =
           prefs.getString('lanAddress') ?? 'ws://127.0.0.1:9527';
@@ -204,13 +240,58 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       _showHHKB = prefs.getBool('showHHKB') ?? false;
       _deviceKey = prefs.getString('deviceKey');
       _deviceName = deviceName;
+      _horizonPublicKey = prefs.getString('horizonPublicKey');
     });
     _connectionManager.updateAutoReconnect(_autoReconnect);
+  }
+
+  Future<void> _loadOrGenerateKeys(SharedPreferences prefs) async {
+    final savedPublicKey = prefs.getString('e2e_public_key');
+    final savedPrivateKey = prefs.getString('e2e_private_key');
+
+    if (savedPublicKey != null && savedPrivateKey != null) {
+      try {
+        await _crypto.loadKeyPair(
+          publicKeyBase64: savedPublicKey,
+          privateKeyBase64: savedPrivateKey,
+        );
+        _publicKey = savedPublicKey;
+        debugPrint('[Voyager] Loaded existing device keys');
+        return;
+      } catch (e) {
+        debugPrint('[Voyager] Failed to load keys: $e');
+      }
+    }
+
+    // Generate new keys
+    await _crypto.generateKeyPair();
+    _publicKey = await _crypto.getPublicKeyBase64();
+    final privateKey = await _crypto.getPrivateKeyBase64();
+    await prefs.setString('e2e_public_key', _publicKey!);
+    await prefs.setString('e2e_private_key', privateKey);
+    debugPrint('[Voyager] Generated new device keys');
+  }
+
+  Future<void> _setupEncryption(String horizonPublicKey) async {
+    try {
+      await _crypto.computeSharedSecret(horizonPublicKey);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('horizonPublicKey', horizonPublicKey);
+      final sharedSecret = await _crypto.getSharedSecretBase64();
+      await prefs.setString('e2e_shared_secret', sharedSecret);
+      debugPrint('[Voyager] E2E encryption setup complete');
+    } catch (e) {
+      debugPrint('[Voyager] Failed to setup encryption: $e');
+    }
   }
 
   void _handleGroupChange() {
     if (!mounted) {
       return;
+    }
+    // Request sync for all sessions in the new group
+    for (final sessionId in _visibleSessions) {
+      _requestSyncIfNeeded(sessionId);
     }
     setState(() {
       _syncActiveSessionWithGroup();
@@ -388,7 +469,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
 
   void _handleDisconnected() {
     _groupStore.onDisconnected();
+    _remoteDeviceName = null;
     _sessions.clear();
+    _syncedSessions.clear();
     _activeSessionId = null;
     _terminalManager.activeSessionId = null;
     _terminalManager.clear();
@@ -405,6 +488,10 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       _sendCreateSession();
       return;
     }
+    // Request sync for all sessions to get terminal history
+    for (final sessionId in sessions) {
+      _requestSyncIfNeeded(sessionId);
+    }
     _syncActiveSessionWithGroup();
     _terminalManager.activeSessionId = _activeSessionId;
     if (mounted) {
@@ -414,6 +501,14 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     if (_activeSessionId != null) {
       _restoreScrollOffset(_activeSessionId!);
     }
+  }
+
+  void _requestSyncIfNeeded(String sessionId) {
+    if (_syncedSessions.contains(sessionId)) {
+      return;
+    }
+    _syncedSessions.add(sessionId);
+    _connectionManager.sendSyncRequest(sessionId);
   }
 
   void _handleSessionCreated(String sessionId) {
@@ -447,11 +542,18 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     }
   }
 
-  void _handleStdout(String sessionId, String text) {
-    _terminalManager.writeToTerminal(sessionId, text);
-    if (sessionId == _activeSessionId && mounted) {
-      setState(() {});
+  void _handleSessionSync(String sessionId, String content) {
+    if (content.isEmpty) {
+      return;
     }
+    // Write synced content to terminal
+    _terminalManager.writeToTerminal(sessionId, content);
+    // Note: No setState needed - TerminalView auto-updates via Terminal's notifyListeners
+  }
+
+  void _handleStdout(String sessionId, Uint8List data) {
+    _terminalManager.writeToTerminalBytes(sessionId, data);
+    // Note: No setState needed - TerminalView auto-updates via Terminal's notifyListeners
   }
 
   Future<void> _connect() async {
@@ -514,10 +616,14 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     final deviceName = _deviceName.isNotEmpty ? _deviceName : 'Unknown Device';
     query['device_name'] = deviceName;
     query['device_type'] = _getDeviceType();
+    // Add public key for E2E encryption
+    if (_publicKey != null && _publicKey!.isNotEmpty) {
+      query['public_key'] = _publicKey!;
+    }
     final uri = base.replace(queryParameters: query);
     debugPrint('[Voyager] Wormhole URI: $uri');
     debugPrint(
-      '[Voyager] device_name=$deviceName, device_type=${_getDeviceType()}, device_key=$_deviceKey',
+      '[Voyager] device_name=$deviceName, device_type=${_getDeviceType()}, device_key=$_deviceKey, has_public_key=${_publicKey != null}',
     );
     return uri;
   }
@@ -613,6 +719,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       }
       return;
     }
+    // Request sync for this session if not already synced
+    _requestSyncIfNeeded(sessionId);
     setState(() {
       _activeSessionId = sessionId;
       _terminalManager.activeSessionId = sessionId;
@@ -832,9 +940,11 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     final terminal = _activeTerminal ?? _idleTerminal;
     final controller = _activeController ?? _idleController;
     final scrollController = _activeScrollController ?? _idleScrollController;
-    // connectionContent: 32 + 16(padding) = 48, tab栏: 36, 合计 82
+    final deleteDetection =
+        !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+    // connectionContent: 32 + 16(padding) = 48, tab栏: 36 + 2(padding) = 38
     final terminalTopInset =
-        _chromeHidden ? (_visibleSessions.length <= 1 ? 0 : 36) : 48 + 36;
+        _chromeHidden ? (_visibleSessions.length <= 1 ? 0 : 38) : 48 + 38;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -933,7 +1043,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                                 scrollController: _idleScrollController,
                                 autoResize: true,
                                 autofocus: true,
-                                deleteDetection: true,
+                                deleteDetection: deleteDetection,
                                 readOnly: _showHHKB,
                                 keyboardType:
                                     _showHHKB
@@ -1004,7 +1114,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                         scrollController: scrollController,
                         autoResize: false,
                         autofocus: true,
-                        deleteDetection: true,
+                        deleteDetection: deleteDetection,
                         readOnly: _showHHKB,
                         keyboardType:
                             _showHHKB ? TextInputType.none : TextInputType.text,
@@ -1035,7 +1145,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
           ),
           if (!_chromeHidden)
             Positioned(
-              top: MediaQuery.of(context).padding.top + 82,
+              top: MediaQuery.of(context).padding.top + 86,
               left: 0,
               right: 0,
               height: 24,
@@ -1074,6 +1184,10 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
               onAddSession: _sendCreateSession,
               sessions: _visibleSessions,
               activeSessionId: _activeSessionId,
+              sessionLabelBuilder: (sessionId, index) {
+                return _terminalManager.getTitle(sessionId) ??
+                    _groupStore.getSessionName(sessionId, index);
+              },
               onSelectSession:
                   (id) => _setActiveSession(id, requestKeyboard: true),
               onCloseSession: _sendCloseSession,
@@ -1152,10 +1266,20 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   }
 
   Widget _buildConnectionContent(BuildContext context) {
-    final urlText =
-        _useWormhole
-            ? _wormholeController.text.trim()
-            : _urlController.text.trim();
+    // Title: "Voyager · deviceName" or just "Voyager"
+    final title =
+        _remoteDeviceName != null && _remoteDeviceName!.isNotEmpty
+            ? 'Voyager · $_remoteDeviceName'
+            : 'Voyager';
+
+    // Subtitle: "Connected to LAN/Wormhole" or "Disconnected"
+    String subtitle;
+    if (_connected) {
+      subtitle = _useWormhole ? 'Connected to Wormhole' : 'Connected to LAN';
+    } else {
+      subtitle = 'Disconnected';
+    }
+
     return Padding(
       padding: const EdgeInsets.only(top: 8, bottom: 8),
       child: SizedBox(
@@ -1176,27 +1300,27 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    _multiWindow
-                        ? 'GRID OVERVIEW'
-                        : (_useWormhole ? 'WORMHOLE REMOTE' : 'LAN CONNECTION'),
-                    style: const TextStyle(
-                      color: Color(0xFF4B7AA6),
-                      fontSize: 10,
-                      height: 1.2,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 0.8,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    urlText.isEmpty ? 'Not Configured' : urlText,
+                    title,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                       color: Colors.white,
                       fontSize: 14,
-                      height: 1.2,
+                      height: 1.1,
                       fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 1),
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Color(0xFF4B7AA6),
+                      fontSize: 10,
+                      height: 1.1,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.8,
                     ),
                   ),
                 ],
@@ -1236,6 +1360,10 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       onSelectSession:
           (sessionId) => _setActiveSession(sessionId, requestKeyboard: true),
       onCloseSession: _sendCloseSession,
+      sessionLabelBuilder: (sessionId, index) {
+        return _terminalManager.getTitle(sessionId) ??
+            _groupStore.getSessionName(sessionId, index);
+      },
     );
   }
 

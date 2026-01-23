@@ -80,6 +80,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   Size _lastMetricsSize = Size.zero;
 
   final List<String> _sessions = [];
+  final Set<String> _syncedSessions = {};
   String? _activeSessionId;
   late final GroupStore _groupStore;
 
@@ -103,6 +104,11 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   // Local mode (Horizon) output subscription
   StreamSubscription<TerminalOutput>? _localOutputSub;
 
+  // CWD polling for local sessions (Horizon mode)
+  Timer? _cwdPollTimer;
+  final Map<String, String> _sessionCwds = {};
+  static const Duration _cwdPollInterval = Duration(seconds: 2);
+
   List<String> get _visibleSessions => _groupStore.activeGroupSessionIds;
 
   @override
@@ -116,6 +122,10 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _terminalManager = TerminalManager(
       onInput: _handleTerminalInput,
       onResize: _handleResize,
+      onTitleChange: (sessionId, title) {
+        if (mounted) setState(() {});
+      },
+      logPrefix: 'Horizon',
     );
     _connectionManager = ConnectionManager(
       onConnected: ({required waitForPairing}) {
@@ -198,6 +208,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       onSessionCreated: _handleRemoteSessionCreated,
       onSessionClosed: _handleRemoteSessionClosed,
       onStdout: _handleStdout,
+      onSessionSync: _handleSessionSync,
     );
     _groupStore = GroupStore(
       onChanged: _handleGroupChange,
@@ -272,6 +283,10 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     if (!mounted) {
       return;
     }
+    // Request sync for all sessions in the new group (Voyager mode only)
+    for (final sessionId in _visibleSessions) {
+      _requestSyncIfNeeded(sessionId);
+    }
     setState(() {
       _syncActiveSessionWithGroup();
     });
@@ -283,9 +298,9 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     }
     if (_hostController.running) {
       if (!_hostConfigSynced) {
-        _hostWormholeUrlController.text = _hostController.wormholeBaseUrl;
-        _hostWormholeTokenController.text = _hostController.wormholeToken;
-        _hostCustomSessionController.text = _hostController.customSessionId;
+        _safeSetText(_hostWormholeUrlController, _hostController.wormholeBaseUrl);
+        _safeSetText(_hostWormholeTokenController, _hostController.wormholeToken);
+        _safeSetText(_hostCustomSessionController, _hostController.customSessionId);
         _hostConfigSynced = true;
       }
       // Always subscribe to local output (for Horizon mode data)
@@ -305,6 +320,8 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       _activeSessionId = null;
       _terminalManager.activeSessionId = null;
       _terminalManager.clear();
+      _stopCwdPolling();
+      _sessionCwds.clear();
       setState(() {});
     }
   }
@@ -317,17 +334,23 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       if (_hostController.running) {
         _subscribeLocalOutput();
         _loadLocalSessions();
+        // _startCwdPolling() is called inside _loadLocalSessions
       } else {
         _sessions.clear();
         _activeSessionId = null;
         _terminalManager.activeSessionId = null;
         _terminalManager.clear();
+        _stopCwdPolling();
       }
       if (mounted) {
         setState(() {});
       }
       return;
     }
+
+    // Switching to Voyager mode - stop cwd polling
+    _stopCwdPolling();
+    _sessionCwds.clear();
 
     final keepSessions = _isLocalVoyagerTarget();
     if (!keepSessions) {
@@ -367,11 +390,8 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     if (!_isHorizonMode) {
       return;
     }
-    final text = utf8.decode(output.data, allowMalformed: true);
-    _terminalManager.writeToTerminal(output.sessionId, text);
-    if (output.sessionId == _activeSessionId && mounted) {
-      setState(() {});
-    }
+    _terminalManager.writeToTerminalBytes(output.sessionId, output.data);
+    // Note: No setState needed - TerminalView auto-updates via Terminal's notifyListeners
   }
 
   void _loadLocalSessions() {
@@ -411,6 +431,61 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     if (_activeSessionId != null) {
       _restoreScrollOffset(_activeSessionId!);
     }
+    // Start cwd polling after loading sessions
+    _startCwdPolling();
+  }
+
+  void _startCwdPolling() {
+    _stopCwdPolling();
+    if (!_isHorizonMode || !_hostController.running) {
+      return;
+    }
+    // Poll immediately once
+    _pollSessionCwds();
+    // Then poll periodically
+    _cwdPollTimer = Timer.periodic(_cwdPollInterval, (_) {
+      _pollSessionCwds();
+    });
+  }
+
+  void _stopCwdPolling() {
+    _cwdPollTimer?.cancel();
+    _cwdPollTimer = null;
+  }
+
+  Future<void> _pollSessionCwds() async {
+    if (!_isHorizonMode || !_hostController.running) {
+      return;
+    }
+    var changed = false;
+    for (final sessionId in _sessions) {
+      final cwd = await _hostController.getLocalCwd(sessionId);
+      if (cwd != null && cwd.isNotEmpty) {
+        final oldCwd = _sessionCwds[sessionId];
+        if (oldCwd != cwd) {
+          _sessionCwds[sessionId] = cwd;
+          changed = true;
+        }
+      }
+    }
+    if (changed && mounted) {
+      setState(() {});
+    }
+  }
+
+  String? _getCwdDisplayName(String sessionId) {
+    final cwd = _sessionCwds[sessionId];
+    if (cwd == null || cwd.isEmpty) {
+      return null;
+    }
+    // Extract the last component of the path
+    final parts = cwd.split('/');
+    final name = parts.isNotEmpty ? parts.last : cwd;
+    // Handle home directory case (empty name means root of path)
+    if (name.isEmpty && parts.length > 1) {
+      return parts[parts.length - 2];
+    }
+    return name.isEmpty ? cwd : name;
   }
 
   void _showPairingDialog(PendingPairing pending) {
@@ -567,6 +642,16 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     return duplicatedIosName.hasMatch(trimmed);
   }
 
+  void _safeSetText(TextEditingController controller, String text) {
+    if (controller.text == text) {
+      return;
+    }
+    controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+  }
+
   Future<void> _saveSettings() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('lanAddress', _urlController.text);
@@ -589,6 +674,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   void dispose() {
     _connectionManager.disconnect(shouldReconnect: false);
     _unsubscribeLocalOutput();
+    _stopCwdPolling();
     WidgetsBinding.instance.removeObserver(this);
     _hostController.removeListener(_handleHostChange);
     _hostCustomSessionController.removeListener(_syncHostCustomSession);
@@ -647,6 +733,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     // Only update UI if in Voyager mode
     if (!_isHorizonMode) {
       _sessions.clear();
+      _syncedSessions.clear();
       _activeSessionId = null;
       _terminalManager.activeSessionId = null;
       _terminalManager.clear();
@@ -672,6 +759,10 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     if (_sessions.isEmpty) {
       _sendCreateSession();
       return;
+    }
+    // Request sync for all sessions to get terminal history
+    for (final sessionId in sessions) {
+      _requestSyncIfNeeded(sessionId);
     }
     // Try to sync with group, but fall back to first session if group not ready
     _syncActiveSessionWithGroup();
@@ -772,15 +863,36 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     }
   }
 
+  void _handleSessionSync(String sessionId, String content) {
+    // Only update terminal if in Voyager mode
+    if (_isHorizonMode) {
+      return;
+    }
+    if (content.isEmpty) {
+      return;
+    }
+    _terminalManager.writeToTerminal(sessionId, content);
+    // Note: No setState needed - TerminalView auto-updates via Terminal's notifyListeners
+  }
+
+  void _requestSyncIfNeeded(String sessionId) {
+    if (_isHorizonMode) {
+      return;
+    }
+    if (_syncedSessions.contains(sessionId)) {
+      return;
+    }
+    _syncedSessions.add(sessionId);
+    _connectionManager.sendSyncRequest(sessionId);
+  }
+
   void _handleStdout(String sessionId, String text) {
     // Only update terminal if in Voyager mode
     if (_isHorizonMode) {
       return;
     }
     _terminalManager.writeToTerminal(sessionId, text);
-    if (sessionId == _activeSessionId && mounted) {
-      setState(() {});
-    }
+    // Note: No setState needed - TerminalView auto-updates via Terminal's notifyListeners
   }
 
   Future<void> _connect() async {
@@ -977,6 +1089,8 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       }
       return;
     }
+    // Request sync for this session if not already synced (Voyager mode only)
+    _requestSyncIfNeeded(sessionId);
     setState(() {
       _activeSessionId = sessionId;
       _terminalManager.activeSessionId = sessionId;
@@ -1252,9 +1366,11 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     final terminal = _activeTerminal ?? _idleTerminal;
     final controller = _activeController ?? _idleController;
     final scrollController = _activeScrollController ?? _idleScrollController;
-    // connectionContent: 32 + 16(padding) = 48, tab栏: 36, 合计 82
+    final deleteDetection =
+        !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+    // connectionContent: 32 + 16(padding) = 48, tab栏: 36 + 2(padding) = 38
     final terminalTopInset =
-        _chromeHidden ? (_visibleSessions.length <= 1 ? 0 : 36) : 48 + 36;
+        _chromeHidden ? (_visibleSessions.length <= 1 ? 0 : 38) : 48 + 38;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -1363,7 +1479,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                                     scrollController: _idleScrollController,
                                     autoResize: true,
                                     autofocus: true,
-                                    deleteDetection: true,
+                                    deleteDetection: deleteDetection,
                                     readOnly: _showHHKB,
                                     keyboardType:
                                         _showHHKB
@@ -1397,6 +1513,22 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                                     );
                                   }
                                   final sessionId = displaySessions[index];
+                                  // Generate label with same priority as tab labels
+                                  // Priority: custom name > xterm title > cwd name > default
+                                  String cardLabel;
+                                  if (_groupStore.hasCustomSessionName(sessionId)) {
+                                    cardLabel = _groupStore.getSessionName(sessionId, index);
+                                  } else {
+                                    final xtermTitle = _terminalManager.getTitle(sessionId);
+                                    if (xtermTitle != null && xtermTitle.isNotEmpty) {
+                                      cardLabel = xtermTitle;
+                                    } else if (_isHorizonMode) {
+                                      final cwdName = _getCwdDisplayName(sessionId);
+                                      cardLabel = cwdName ?? _groupStore.getSessionName(sessionId, index);
+                                    } else {
+                                      cardLabel = _groupStore.getSessionName(sessionId, index);
+                                    }
+                                  }
                                   return TerminalWindowCard(
                                     key: _terminalCardKeyFor(sessionId),
                                     sessionId: sessionId,
@@ -1406,12 +1538,18 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                                       sessionId,
                                     ),
                                     viewKey: _viewKeyFor(sessionId),
-                                    label: 'TERM ${index + 1}',
+                                    label: cardLabel,
                                     isActive: sessionId == _activeSessionId,
                                     showHHKB: _showHHKB,
                                     isDragTarget:
                                         _dragging &&
                                         _dragTargetSessionId == sessionId,
+                                    showActiveChevron: false,
+                                    showActiveShadow: false,
+                                    terminalStyle: const TerminalStyle(
+                                      fontFamily: 'JetBrainsMono',
+                                      fontSize: 12,
+                                    ),
                                     onTap:
                                         () => _setActiveSession(
                                           sessionId,
@@ -1430,7 +1568,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                             scrollController: scrollController,
                             autoResize: false,
                             autofocus: true,
-                            deleteDetection: true,
+                            deleteDetection: deleteDetection,
                             readOnly: _showHHKB,
                             keyboardType:
                                 _showHHKB
@@ -1460,7 +1598,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
               ),
               if (!_chromeHidden)
                 Positioned(
-                  top: MediaQuery.of(context).padding.top + 82,
+                  top: MediaQuery.of(context).padding.top + 86,
                   left: 0,
                   right: 0,
                   height: 24,
@@ -1490,6 +1628,8 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                   overlayColor: overlayColor,
                   error: _error,
                   pairingPending: _clientPairingPending,
+                  pairingTitle: 'Waiting for approval...',
+                  pairingSubtitle: 'Approve this device on the workstation',
                   onToggle: () {
                     setState(() {
                       _chromeHidden = !_chromeHidden;
@@ -1500,6 +1640,22 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                   sessions: _visibleSessions,
                   activeSessionId: _activeSessionId,
                   sessionLabelBuilder: (sessionId, index) {
+                    // Priority: custom name > xterm title > cwd name > default
+                    // User custom name has highest priority
+                    if (_groupStore.hasCustomSessionName(sessionId)) {
+                      return _groupStore.getSessionName(sessionId, index);
+                    }
+                    final xtermTitle = _terminalManager.getTitle(sessionId);
+                    if (xtermTitle != null && xtermTitle.isNotEmpty) {
+                      return xtermTitle;
+                    }
+                    // In Horizon mode, show cwd name
+                    if (_isHorizonMode) {
+                      final cwdName = _getCwdDisplayName(sessionId);
+                      if (cwdName != null && cwdName.isNotEmpty) {
+                        return cwdName;
+                      }
+                    }
                     return _groupStore.getSessionName(sessionId, index);
                   },
                   onSelectSession:
@@ -1623,23 +1779,18 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       };
     } else {
       // Voyager mode (client)
-      final connectionLabel =
-          _useWormhole
-              ? _wormholeController.text.trim()
-              : _urlController.text.trim();
-      final isRemote = _isRemoteTarget();
-      final localName = _deviceName.trim();
-      final remoteName =
-          _remoteDeviceName ?? _fallbackRemoteName(connectionLabel);
-
+      // Title: "Voyager · deviceName" or just "Voyager"
       title =
-          isRemote
-              ? 'Voyager · $remoteName'
-              : (localName.isEmpty ? 'Voyager' : 'Voyager · $localName');
-      subtitle =
-          _connected
-              ? 'Connected to ${connectionLabel.isEmpty ? 'unknown' : connectionLabel}'
-              : 'Disconnected';
+          _remoteDeviceName != null && _remoteDeviceName!.isNotEmpty
+              ? 'Voyager · $_remoteDeviceName'
+              : 'Voyager';
+
+      // Subtitle: "Connected to LAN/Wormhole" or "Disconnected"
+      if (_connected) {
+        subtitle = _useWormhole ? 'Connected to Wormhole' : 'Connected to LAN';
+      } else {
+        subtitle = 'Disconnected';
+      }
 
       switchValue = _connected;
       onSwitchChanged = (value) {
@@ -1674,23 +1825,26 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                 children: [
                   Text(
                     title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                      color: Color(0xFF4B7AA6),
-                      fontSize: 11,
-                      height: 1.2,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 0.5,
+                      color: Colors.white,
+                      fontSize: 14,
+                      height: 1.1,
+                      fontWeight: FontWeight.w500,
                     ),
                   ),
-                  const SizedBox(height: 2),
+                  const SizedBox(height: 1),
                   Text(
                     subtitle,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                      color: Color(0xFF9AA6B2),
-                      fontSize: 12,
-                      height: 1.2,
+                      color: Color(0xFF4B7AA6),
+                      fontSize: 10,
+                      height: 1.1,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.8,
                     ),
                   ),
                 ],
@@ -1712,20 +1866,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
         ),
       ),
     );
-  }
-
-  bool _isRemoteTarget() {
-    if (!_connected) {
-      return false;
-    }
-    if (_useWormhole) {
-      return true;
-    }
-    final uri = Uri.tryParse(_urlController.text.trim());
-    if (uri == null) {
-      return false;
-    }
-    return !_isLocalHost(uri.host);
   }
 
   bool _isLocalVoyagerTarget() {
@@ -1752,12 +1892,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     return _hostController.addresses.contains(host);
   }
 
-  String _fallbackRemoteName(String connectionLabel) {
-    final uri = Uri.tryParse(connectionLabel);
-    final host = uri?.host ?? connectionLabel;
-    return host.isEmpty ? 'Remote Device' : host;
-  }
-
   Widget _buildGroupDrawer(BuildContext context) {
     return GroupDrawer(
       manager: _groupStore,
@@ -1766,6 +1900,12 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
           (sessionId) => _setActiveSession(sessionId, requestKeyboard: true),
       onCloseSession: _sendCloseSession,
       onAddSession: _sendCreateSessionInGroup,
+      title: 'Sessions',
+      showGroupCount: false,
+      sessionLabelBuilder: (sessionId, index) {
+        return _terminalManager.getTitle(sessionId) ??
+            _groupStore.getSessionName(sessionId, index);
+      },
     );
   }
 

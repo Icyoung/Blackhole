@@ -250,6 +250,17 @@ void PtyManager::kill_session(const std::string& session_id) {
   sessions_.erase(it);
 }
 
+std::string PtyManager::get_cwd(const std::string& session_id) {
+  // Windows implementation requires NtQueryInformationProcess
+  // For now, return empty string (shell title will be used if available)
+  auto it = sessions_.find(session_id);
+  if (it == sessions_.end()) {
+    return "";
+  }
+  // TODO: Implement using NtQueryInformationProcess to read PEB
+  return "";
+}
+
 // Flutter method handler
 static void HandleMethodCall(
     const flutter::MethodCall<flutter::EncodableValue>& method_call,
@@ -321,6 +332,23 @@ static void HandleMethodCall(
       }
     }
     result->Success();
+  } else if (method == "getCwd") {
+    if (args) {
+      auto session_it = args->find(flutter::EncodableValue("sessionId"));
+      if (session_it != args->end()) {
+        std::string session_id = std::get<std::string>(session_it->second);
+        std::string cwd = g_pty_manager->get_cwd(session_id);
+        if (!cwd.empty()) {
+          result->Success(flutter::EncodableValue(cwd));
+        } else {
+          result->Success();
+        }
+      } else {
+        result->Success();
+      }
+    } else {
+      result->Success();
+    }
   } else {
     result->NotImplemented();
   }

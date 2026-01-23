@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:uuid/uuid.dart';
 
+import '../services/crypto_service.dart';
 import '../services/group_manager.dart';
 import '../services/terminal_service.dart';
 import '../services/ws_server.dart';
@@ -21,6 +22,8 @@ class PairedDevice {
     required this.firstPairedAt,
     required this.lastSeenAt,
     this.deviceType = DeviceType.unknown,
+    this.publicKey,
+    this.sharedSecret,
   });
 
   final String deviceKey;
@@ -28,6 +31,8 @@ class PairedDevice {
   final DateTime firstPairedAt;
   DateTime lastSeenAt;
   DeviceType deviceType;
+  String? publicKey;
+  String? sharedSecret;
 
   Map<String, dynamic> toJson() => {
         'deviceKey': deviceKey,
@@ -35,6 +40,8 @@ class PairedDevice {
         'firstPairedAt': firstPairedAt.toIso8601String(),
         'lastSeenAt': lastSeenAt.toIso8601String(),
         'deviceType': deviceType.name,
+        if (publicKey != null) 'publicKey': publicKey,
+        if (sharedSecret != null) 'sharedSecret': sharedSecret,
       };
 
   factory PairedDevice.fromJson(Map<String, dynamic> json) => PairedDevice(
@@ -43,6 +50,8 @@ class PairedDevice {
         firstPairedAt: DateTime.parse(json['firstPairedAt'] as String),
         lastSeenAt: DateTime.parse(json['lastSeenAt'] as String),
         deviceType: _parseDeviceType(json['deviceType'] as String?),
+        publicKey: json['publicKey'] as String?,
+        sharedSecret: json['sharedSecret'] as String?,
       );
 
   static DeviceType _parseDeviceType(String? type) {
@@ -66,12 +75,14 @@ class PendingPairing {
     required this.deviceName,
     required this.requestedAt,
     this.deviceType = DeviceType.unknown,
+    this.publicKey,
   });
 
   final String? deviceKey;
   final String deviceName;
   final DateTime requestedAt;
   final DeviceType deviceType;
+  final String? publicKey;
 }
 
 enum _BinaryType {
@@ -125,6 +136,9 @@ class HorizonController extends ChangeNotifier {
   String? _hostDeviceName;
 
   final Set<String> _sessions = {};
+  final Map<String, BytesBuilder> _sessionHistoryBytes = {};
+  final Map<String, List<int>> _sessionHistoryUtf8Buffer = {};
+  static const int _maxHistoryBytes = 1024 * 1024; // 1MB per session
   final bool _devModeRequested;
   final bool _requireDevModeConfirmation;
   bool _running = false;
@@ -147,6 +161,11 @@ class HorizonController extends ChangeNotifier {
   bool _customSessionEnabled = false;
   String _customSessionId = '';
   static const _uuid = Uuid();
+
+  // E2E encryption
+  final CryptoService _crypto = CryptoService();
+  String? _publicKey;
+  final Map<String, CryptoService> _deviceCrypto = {};
 
   // Wormhole client tracking
   int _wormholeClientCount = 0;
@@ -180,6 +199,9 @@ class HorizonController extends ChangeNotifier {
   PendingPairing? get pendingPairing => _pendingPairing;
   bool get customSessionEnabled => _customSessionEnabled;
   String get customSessionId => _customSessionId;
+  String? get publicKey => _publicKey;
+  String? get publicKeyFingerprint =>
+      _publicKey != null ? _crypto.getPublicKeyFingerprint(_publicKey!) : null;
 
   // ============ Local Mode API (for Horizon mode direct access) ============
 
@@ -281,6 +303,8 @@ class HorizonController extends ChangeNotifier {
     }
     await _terminal.kill(sessionId);
     _sessions.remove(sessionId);
+    _sessionHistoryBytes.remove(sessionId);
+    _sessionHistoryUtf8Buffer.remove(sessionId);
     final changed = _groupManager.onSessionClosed(sessionId);
     unawaited(_groupManager.save());
     _notifySessionClosed(sessionId);
@@ -304,6 +328,14 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     await _terminal.resize(sessionId, rows, cols);
+  }
+
+  /// Get current working directory for a local session
+  Future<String?> getLocalCwd(String sessionId) async {
+    if (!_sessions.contains(sessionId)) {
+      return null;
+    }
+    return await _terminal.getCwd(sessionId);
   }
 
   /// Get group sync payload for local mode
@@ -360,8 +392,9 @@ class HorizonController extends ChangeNotifier {
     _error = null;
     notifyListeners();
 
-    // Load paired devices
+    // Load paired devices and device keys
     await _loadPairedDevices();
+    await _loadOrGenerateKeys();
     await _groupManager.load();
     if (_groupManager.reconcileSessions(_sessions)) {
       unawaited(_groupManager.save());
@@ -577,6 +610,13 @@ class HorizonController extends ChangeNotifier {
       _sendSessionList(socket);
       return;
     }
+    if (type == 'sync') {
+      final sessionId = decoded?['sessionId'];
+      if (sessionId is String) {
+        _sendSessionSync(socket, sessionId);
+      }
+      return;
+    }
     if (type == 'create') {
       final groupId = decoded?['groupId'];
       if (groupId is String && groupId.isNotEmpty) {
@@ -632,12 +672,86 @@ class HorizonController extends ChangeNotifier {
     if (!_sessions.contains(output.sessionId)) {
       return;
     }
+    // Cache output history
+    _appendToHistory(output.sessionId, output.data);
     _localOutputController.add(output);
     _logDeleteProbe('Horizon/stdout', output.data);
     _logStdoutProbe(output.data);
     final message = _buildStdoutMessage(output.sessionId, output.data);
     _wsServer.broadcast(message);
     _sendToWormhole(message);
+  }
+
+  void _appendToHistory(String sessionId, Uint8List data) {
+    final bytesBuilder =
+        _sessionHistoryBytes.putIfAbsent(sessionId, () => BytesBuilder());
+    final utf8Buffer =
+        _sessionHistoryUtf8Buffer.putIfAbsent(sessionId, () => <int>[]);
+
+    // Add incoming data to UTF-8 buffer
+    utf8Buffer.addAll(data);
+
+    // Find the last complete UTF-8 sequence
+    int completeEnd = utf8Buffer.length;
+    for (int i = utf8Buffer.length - 1;
+        i >= 0 && i >= utf8Buffer.length - 4;
+        i--) {
+      final byte = utf8Buffer[i];
+      if ((byte & 0xC0) == 0xC0) {
+        // Start of multi-byte sequence
+        final seqLen = _utf8SeqLength(byte);
+        final remaining = utf8Buffer.length - i;
+        if (remaining < seqLen) {
+          // Incomplete sequence, don't include it
+          completeEnd = i;
+        }
+        break;
+      } else if ((byte & 0x80) == 0) {
+        // ASCII, complete
+        break;
+      }
+      // Continuation byte, keep looking
+    }
+
+    // Only add complete bytes to history
+    if (completeEnd > 0) {
+      final completeBytes = utf8Buffer.sublist(0, completeEnd);
+      bytesBuilder.add(completeBytes);
+      utf8Buffer.removeRange(0, completeEnd);
+    }
+
+    // Trim if exceeds max size (keep last portion)
+    if (bytesBuilder.length > _maxHistoryBytes) {
+      final allBytes = bytesBuilder.toBytes();
+      bytesBuilder.clear();
+      // Keep last half, find a safe cut point (after a newline 0x0A)
+      final cutPoint = allBytes.length - _maxHistoryBytes ~/ 2;
+      int safePoint = cutPoint;
+      for (int i = cutPoint; i < allBytes.length; i++) {
+        if (allBytes[i] == 0x0A) {
+          safePoint = i + 1;
+          break;
+        }
+      }
+      bytesBuilder.add(allBytes.sublist(safePoint));
+    }
+  }
+
+  int _utf8SeqLength(int firstByte) {
+    if ((firstByte & 0x80) == 0) return 1;
+    if ((firstByte & 0xE0) == 0xC0) return 2;
+    if ((firstByte & 0xF0) == 0xE0) return 3;
+    if ((firstByte & 0xF8) == 0xF0) return 4;
+    return 1;
+  }
+
+  String? getSessionHistory(String sessionId) {
+    final bytesBuilder = _sessionHistoryBytes[sessionId];
+    if (bytesBuilder == null) {
+      return null;
+    }
+    // Decode complete bytes, any remaining incomplete sequence is in utf8Buffer
+    return utf8.decode(bytesBuilder.toBytes(), allowMalformed: true);
   }
 
   void _sendSessionList(WebSocket socket) {
@@ -655,6 +769,18 @@ class HorizonController extends ChangeNotifier {
     } else {
       _sendGroupSync(socket: socket);
     }
+  }
+
+  void _sendSessionSync(WebSocket socket, String sessionId) {
+    final history = getSessionHistory(sessionId);
+    _wsServer.sendTo(
+      socket,
+      _encodeMessage({
+        'type': 'session_sync',
+        'sessionId': sessionId,
+        'content': history ?? '',
+      }),
+    );
   }
 
   Future<String?> _createSession() async {
@@ -686,6 +812,8 @@ class HorizonController extends ChangeNotifier {
     }
     await _terminal.kill(sessionId);
     _sessions.remove(sessionId);
+    _sessionHistoryBytes.remove(sessionId);
+    _sessionHistoryUtf8Buffer.remove(sessionId);
     if (_groupManager.onSessionClosed(sessionId)) {
       unawaited(_groupManager.save());
       _broadcastGroupSync();
@@ -698,6 +826,8 @@ class HorizonController extends ChangeNotifier {
       await _terminal.kill(sessionId);
     }
     _sessions.clear();
+    _sessionHistoryBytes.clear();
+    _sessionHistoryUtf8Buffer.clear();
     if (_groupManager.reconcileSessions(_sessions)) {
       unawaited(_groupManager.save());
     }
@@ -903,7 +1033,8 @@ class HorizonController extends ChangeNotifier {
       final deviceName = decoded?['deviceName'] as String? ?? 'Unknown Device';
       final deviceType =
           PairedDevice._parseDeviceType(decoded?['deviceType'] as String?);
-      await _handleVoyagerConnect(deviceKey, deviceName, deviceType);
+      final voyagerPublicKey = decoded?['publicKey'] as String?;
+      await _handleVoyagerConnect(deviceKey, deviceName, deviceType, voyagerPublicKey);
       _sendToWormhole(_buildHostInfoMessage());
       return;
     }
@@ -959,6 +1090,13 @@ class HorizonController extends ChangeNotifier {
     }
     if (type == 'list') {
       _sendSessionListToWormhole();
+      return;
+    }
+    if (type == 'sync') {
+      final sessionId = decoded?['sessionId'];
+      if (sessionId is String) {
+        _sendSessionSyncToWormhole(sessionId);
+      }
       return;
     }
     if (type == 'create') {
@@ -1054,6 +1192,17 @@ class HorizonController extends ChangeNotifier {
     } else {
       _sendGroupSync(toWormhole: true);
     }
+  }
+
+  void _sendSessionSyncToWormhole(String sessionId) {
+    final history = getSessionHistory(sessionId);
+    _sendToWormhole(
+      _encodeMessage({
+        'type': 'session_sync',
+        'sessionId': sessionId,
+        'content': history ?? '',
+      }),
+    );
   }
 
   void _notifySessionCreated(String sessionId, {WebSocket? socket}) {
@@ -1464,6 +1613,7 @@ class HorizonController extends ChangeNotifier {
     String? deviceKey,
     String deviceName,
     DeviceType deviceType,
+    String? voyagerPublicKey,
   ) async {
     // Check if this is a paired device
     final paired =
@@ -1474,6 +1624,14 @@ class HorizonController extends ChangeNotifier {
       paired.lastSeenAt = DateTime.now();
       paired.deviceName = deviceName;
       paired.deviceType = deviceType;
+
+      // Update public key if provided and setup encryption
+      if (voyagerPublicKey != null) {
+        paired.publicKey = voyagerPublicKey;
+        await _setupDeviceEncryption(deviceKey!, voyagerPublicKey, paired.sharedSecret);
+        paired.sharedSecret = await _deviceCrypto[deviceKey]?.getSharedSecretBase64();
+      }
+
       await _savePairedDevices();
       _sendPairingResponse(deviceKey!, approved: true);
       _wormholeClientCount++;
@@ -1488,18 +1646,27 @@ class HorizonController extends ChangeNotifier {
       deviceName: deviceName,
       requestedAt: DateTime.now(),
       deviceType: deviceType,
+      publicKey: voyagerPublicKey,
     );
-    debugPrint('[Horizon] New device requesting pairing: $deviceName');
+    debugPrint('[Horizon] New device requesting pairing: $deviceName (has public key: ${voyagerPublicKey != null})');
     notifyListeners();
   }
 
-  void approvePairing({required bool remember}) {
+  Future<void> approvePairing({required bool remember}) async {
     if (_pendingPairing == null) {
       return;
     }
 
     // Generate a new device key if the client didn't provide one
     final assignedKey = _pendingPairing!.deviceKey ?? _uuid.v4();
+    final voyagerPublicKey = _pendingPairing!.publicKey;
+
+    // Setup encryption if voyager provided public key
+    String? sharedSecret;
+    if (voyagerPublicKey != null) {
+      await _setupDeviceEncryption(assignedKey, voyagerPublicKey, null);
+      sharedSecret = await _deviceCrypto[assignedKey]?.getSharedSecretBase64();
+    }
 
     if (remember) {
       final device = PairedDevice(
@@ -1508,6 +1675,8 @@ class HorizonController extends ChangeNotifier {
         firstPairedAt: DateTime.now(),
         lastSeenAt: DateTime.now(),
         deviceType: _pendingPairing!.deviceType,
+        publicKey: voyagerPublicKey,
+        sharedSecret: sharedSecret,
       );
       _pairedDevices.add(device);
       _savePairedDevices();
@@ -1541,6 +1710,7 @@ class HorizonController extends ChangeNotifier {
       'deviceKey': deviceKey,
       'approved': approved,
       if (assignedKey != null) 'assignedKey': assignedKey,
+      if (approved && _publicKey != null) 'publicKey': _publicKey,
     };
     _sendToWormhole(_encodeMessage(response));
   }
@@ -1628,6 +1798,96 @@ class HorizonController extends ChangeNotifier {
       debugPrint('[Horizon] Saved ${_pairedDevices.length} paired devices');
     } catch (e) {
       debugPrint('[Horizon] Failed to save paired devices: $e');
+    }
+  }
+
+  // ============ E2E Encryption Methods ============
+
+  Future<void> _loadOrGenerateKeys() async {
+    try {
+      final home = Platform.environment['HOME'] ?? '/tmp';
+      final dir = Directory('$home/.blackhole/horizon');
+      final file = File('${dir.path}/device_keys.json');
+
+      if (await file.exists()) {
+        final content = await file.readAsString();
+        final json = jsonDecode(content) as Map<String, dynamic>;
+        final publicKeyBase64 = json['publicKey'] as String?;
+        final privateKeyBase64 = json['privateKey'] as String?;
+
+        if (publicKeyBase64 != null && privateKeyBase64 != null) {
+          await _crypto.loadKeyPair(
+            publicKeyBase64: publicKeyBase64,
+            privateKeyBase64: privateKeyBase64,
+          );
+          _publicKey = publicKeyBase64;
+          debugPrint('[Horizon] Loaded existing device keys');
+          return;
+        }
+      }
+
+      // Generate new keys
+      await _crypto.generateKeyPair();
+      _publicKey = await _crypto.getPublicKeyBase64();
+      await _saveDeviceKeys();
+      debugPrint('[Horizon] Generated new device keys');
+    } catch (e) {
+      debugPrint('[Horizon] Failed to load/generate keys: $e');
+    }
+  }
+
+  Future<void> _saveDeviceKeys() async {
+    try {
+      final home = Platform.environment['HOME'] ?? '/tmp';
+      final dir = Directory('$home/.blackhole/horizon');
+      if (!await dir.exists()) {
+        await dir.create(recursive: true);
+      }
+
+      final file = File('${dir.path}/device_keys.json');
+      final json = {
+        'version': 1,
+        'publicKey': await _crypto.getPublicKeyBase64(),
+        'privateKey': await _crypto.getPrivateKeyBase64(),
+        'createdAt': DateTime.now().toIso8601String(),
+      };
+
+      await file.writeAsString(const JsonEncoder.withIndent('  ').convert(json));
+      debugPrint('[Horizon] Saved device keys');
+    } catch (e) {
+      debugPrint('[Horizon] Failed to save device keys: $e');
+    }
+  }
+
+  Future<void> _setupDeviceEncryption(
+    String deviceKey,
+    String voyagerPublicKey,
+    String? cachedSharedSecret,
+  ) async {
+    try {
+      final crypto = CryptoService();
+
+      // Load our key pair
+      if (_crypto.hasKeyPair) {
+        final publicKey = await _crypto.getPublicKeyBase64();
+        final privateKey = await _crypto.getPrivateKeyBase64();
+        await crypto.loadKeyPair(
+          publicKeyBase64: publicKey,
+          privateKeyBase64: privateKey,
+        );
+      }
+
+      // Use cached shared secret or compute new one
+      if (cachedSharedSecret != null) {
+        crypto.loadSharedSecret(cachedSharedSecret);
+      } else {
+        await crypto.computeSharedSecret(voyagerPublicKey);
+      }
+
+      _deviceCrypto[deviceKey] = crypto;
+      debugPrint('[Horizon] Setup encryption for device: $deviceKey');
+    } catch (e) {
+      debugPrint('[Horizon] Failed to setup encryption for $deviceKey: $e');
     }
   }
 
