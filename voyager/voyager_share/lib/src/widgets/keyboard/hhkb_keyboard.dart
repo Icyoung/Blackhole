@@ -98,19 +98,16 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
     );
   }
 
-  // Row 2: QWERTY + ⌫ (Fn: brackets + ⌦)
+  // Row 2: QWERTY (Fn: brackets)
   Widget _buildRow2() {
     List<String> keys;
     if (widget.fn) {
-      keys = ['`', '~', '[', ']', '{', '}', '-', '=', '+', '\\', '⌦'];
+      keys = ['`', '~', '[', ']', '{', '}', '-', '=', '+', '\\'];
     } else {
-      keys = ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '⌫'];
+      keys = ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'];
     }
     return Row(
-      children: [
-        ...keys.sublist(0, 10).map((k) => _key(k, flex: 10)),
-        _key(keys[10], flex: 12),
-      ],
+      children: keys.map((k) => _key(k, flex: 1)).toList(),
     );
   }
 
@@ -128,25 +125,25 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
     );
   }
 
-  // Row 4: ⇧ ZXCVBNM/ (Fn: ⇧ + actions)
+  // Row 4: ⇧ ZXCVBNM / ⌫ (Fn: ⇧ + actions + ⌦)
   Widget _buildRow4() {
     if (widget.fn) {
-      // Fn layer: Shift(inactive) + terminal actions
+      // Fn layer: Shift(inactive) + terminal actions + ⌦
       return Row(
         children: [
-          _shiftKey(flex: 15, enabled: false),
-          ...['Stop', 'Susp', 'EOF', 'Clr', 'Kill', 'W⌫', 'Yank', '?']
-              .map((k) => _key(k, flex: 11)),
+          _shiftKey(flex: 14, enabled: false),
+          ...['Stop', 'Susp', 'EOF', 'Clr', 'Kill', 'W⌫', 'Yank', '?', '⌦']
+              .map((k) => _key(k, flex: 10)),
         ],
       );
     } else {
-      // Default layer: Shift + letters + /
-      final punct = _shift ? '?' : '/';
+      // Default layer: Shift + letters + / + ⌫
+      final slash = _shift ? '?' : '/';
       return Row(
         children: [
-          _shiftKey(flex: 15),
-          ...['Z', 'X', 'C', 'V', 'B', 'N', 'M', punct]
-              .map((k) => _key(k, flex: 11)),
+          _shiftKey(flex: 14),
+          ...['Z', 'X', 'C', 'V', 'B', 'N', 'M', slash, '⌫']
+              .map((k) => _key(k, flex: 10)),
         ],
       );
     }
