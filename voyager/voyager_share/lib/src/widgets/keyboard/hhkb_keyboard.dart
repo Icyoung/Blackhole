@@ -104,7 +104,8 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
     if (widget.fn) {
       keys = ['`', '~', '[', ']', '{', '}', '-', '=', '+', '\\'];
     } else {
-      keys = ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'];
+      final letters = ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'];
+      keys = _shift ? letters : letters.map((l) => l.toLowerCase()).toList();
     }
     return Row(
       children: keys.map((k) => _key(k, flex: 1)).toList(),
@@ -117,8 +118,13 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
     if (widget.fn) {
       keys = ['Hom', '◀W', 'PgU', 'PgD', 'W▶', 'End', '|', ';', ':', ',', '"'];
     } else {
+      final letters = ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'];
       final dot = _shift ? '>' : '.';
-      keys = ['Tab', 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', dot];
+      keys = [
+        'Tab',
+        ...(_shift ? letters : letters.map((l) => l.toLowerCase())),
+        dot,
+      ];
     }
     return Row(
       children: keys.map((k) => _key(k, flex: 1)).toList(),
@@ -139,12 +145,14 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
       );
     } else {
       // Default layer: Shift + letters + / + ⌫
+      final letters = ['Z', 'X', 'C', 'V', 'B', 'N', 'M'];
       final slash = _shift ? '?' : '/';
       return Row(
         children: [
           _shiftKey(flex: 12),
-          ...['Z', 'X', 'C', 'V', 'B', 'N', 'M', slash]
+          ...(_shift ? letters : letters.map((l) => l.toLowerCase()))
               .map((k) => _key(k, flex: 10)),
+          _key(slash, flex: 10),
           _key('⌫', flex: 12),
         ],
       );
