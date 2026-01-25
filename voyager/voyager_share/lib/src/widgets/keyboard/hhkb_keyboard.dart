@@ -371,6 +371,7 @@ class _SpaceKeyState extends State<_SpaceKey> {
   double _accumulatedX = 0;
   double _accumulatedY = 0;
   bool _hasMoved = false;
+  bool _verticalTriggered = false; // Vertical swipe triggers only once
   static const _stepThreshold = 20.0; // Distance per arrow key trigger
 
   static const _keyColor = Color(0xFF2D2D2D);
@@ -386,6 +387,7 @@ class _SpaceKeyState extends State<_SpaceKey> {
               _accumulatedX = 0;
               _accumulatedY = 0;
               _hasMoved = false;
+              _verticalTriggered = false;
               HapticFeedback.lightImpact();
             }
           : null,
@@ -409,16 +411,15 @@ class _SpaceKeyState extends State<_SpaceKey> {
                   HapticFeedback.selectionClick();
                 }
               } else {
-                // Vertical movement
-                while (_accumulatedY.abs() >= _stepThreshold) {
+                // Vertical movement (trigger only once per swipe)
+                if (!_verticalTriggered && _accumulatedY.abs() >= _stepThreshold) {
                   if (_accumulatedY > 0) {
                     widget.onArrow('down');
-                    _accumulatedY -= _stepThreshold;
                   } else {
                     widget.onArrow('up');
-                    _accumulatedY += _stepThreshold;
                   }
                   _hasMoved = true;
+                  _verticalTriggered = true;
                   HapticFeedback.selectionClick();
                 }
               }
