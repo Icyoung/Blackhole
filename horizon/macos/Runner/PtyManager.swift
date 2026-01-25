@@ -32,6 +32,12 @@ final class PtyManager {
       let shell = shellPath ?? "/bin/zsh"
       let home = NSHomeDirectory()
       _ = home.withCString { chdir($0) }
+
+      // Set essential environment variables for interactive programs
+      setenv("TERM", "xterm-256color", 1)
+      setenv("COLORTERM", "truecolor", 1)
+      setenv("LANG", "en_US.UTF-8", 1)
+
       guard let shellCString = strdup(shell) else {
         _exit(1)
       }
@@ -57,7 +63,7 @@ final class PtyManager {
     let sessionId = UUID().uuidString
     let source = DispatchSource.makeReadSource(fileDescriptor: masterFd, queue: DispatchQueue.global())
     source.setEventHandler { [weak self] in
-      var buffer = [UInt8](repeating: 0, count: 4096)
+      var buffer = [UInt8](repeating: 0, count: 16384)
       let n = buffer.withUnsafeMutableBytes { rawBuffer -> Int in
         guard let baseAddress = rawBuffer.baseAddress else {
           return -1

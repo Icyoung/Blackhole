@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:voyager_share/voyager_share.dart' show buildTerminalStyle;
 import 'package:xterm/xterm.dart';
 
 import '../controllers/horizon_controller.dart';
@@ -103,6 +104,10 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
 
   // Local mode (Horizon) output subscription
   StreamSubscription<TerminalOutput>? _localOutputSub;
+  static const bool _logTerminalOutput =
+      bool.fromEnvironment('BH_LOG_TERMINAL_OUTPUT');
+  IOSink? _terminalOutputSink;
+  String? _terminalOutputLogPath;
 
   // CWD polling for local sessions (Horizon mode)
   Timer? _cwdPollTimer;
@@ -390,8 +395,75 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     if (!_isHorizonMode) {
       return;
     }
+    _logTerminalOutputBytes(output.sessionId, output.data);
     _terminalManager.writeToTerminalBytes(output.sessionId, output.data);
     // Note: No setState needed - TerminalView auto-updates via Terminal's notifyListeners
+  }
+
+  void _logTerminalOutputBytes(String sessionId, Uint8List data) {
+    if (!_logTerminalOutput || data.isEmpty) {
+      return;
+    }
+    _terminalOutputSink ??= _openTerminalOutputLog();
+    final sink = _terminalOutputSink;
+    if (sink == null) {
+      return;
+    }
+    final timestamp = DateTime.now().toIso8601String();
+    sink.writeln('[$timestamp] session=$sessionId bytes=${data.length}');
+    _writeHexLines(sink, data);
+    final decoded = utf8.decode(data, allowMalformed: true);
+    sink.writeln('text: ${_escapeControlCharacters(decoded)}');
+    sink.writeln('---');
+  }
+
+  IOSink? _openTerminalOutputLog() {
+    final path =
+        Directory.systemTemp.uri
+            .resolve('blackhole_terminal_output.log')
+            .toFilePath();
+    _terminalOutputLogPath ??= path;
+    debugPrint('[Horizon] Logging terminal output to $path');
+    try {
+      return File(path).openWrite(mode: FileMode.writeOnlyAppend);
+    } catch (error) {
+      debugPrint('[Horizon] Failed to open terminal log: $error');
+      return null;
+    }
+  }
+
+  void _writeHexLines(IOSink sink, Uint8List data) {
+    const bytesPerLine = 32;
+    for (int i = 0; i < data.length; i += bytesPerLine) {
+      final end = (i + bytesPerLine).clamp(0, data.length);
+      final buffer = StringBuffer();
+      for (int j = i; j < end; j++) {
+        buffer.write(data[j].toRadixString(16).padLeft(2, '0'));
+        if (j + 1 < end) {
+          buffer.write(' ');
+        }
+      }
+      sink.writeln(buffer.toString());
+    }
+  }
+
+  String _escapeControlCharacters(String text) {
+    final buffer = StringBuffer();
+    for (final codeUnit in text.codeUnits) {
+      if (codeUnit == 0x0A) {
+        buffer.write(r'\n');
+      } else if (codeUnit == 0x0D) {
+        buffer.write(r'\r');
+      } else if (codeUnit == 0x09) {
+        buffer.write(r'\t');
+      } else if (codeUnit < 0x20 || codeUnit == 0x7F) {
+        buffer.write(r'\x');
+        buffer.write(codeUnit.toRadixString(16).padLeft(2, '0'));
+      } else {
+        buffer.writeCharCode(codeUnit);
+      }
+    }
+    return buffer.toString();
   }
 
   void _loadLocalSessions() {
@@ -692,6 +764,8 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _metricsDebounce?.cancel();
     _terminalManager.dispose();
     _hostController.dispose();
+    _terminalOutputSink?.close();
+    _terminalOutputSink = null;
     super.dispose();
   }
 
@@ -1487,8 +1561,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                                             : TextInputType.text,
                                     backgroundOpacity: 1.0,
                                     padding: const EdgeInsets.all(8),
-                                    textStyle: const TerminalStyle(
-                                      fontFamily: 'JetBrainsMono',
+                                    textStyle: buildTerminalStyle(
                                       fontSize: 14,
                                     ),
                                   ),
@@ -1546,8 +1619,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                                         _dragTargetSessionId == sessionId,
                                     showActiveChevron: false,
                                     showActiveShadow: false,
-                                    terminalStyle: const TerminalStyle(
-                                      fontFamily: 'JetBrainsMono',
+                                    terminalStyle: buildTerminalStyle(
                                       fontSize: 12,
                                     ),
                                     onTap:
@@ -1581,8 +1653,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                               8,
                               _bottomBarHeight + 8,
                             ),
-                            textStyle: const TerminalStyle(
-                              fontFamily: 'JetBrainsMono',
+                            textStyle: buildTerminalStyle(
                               fontSize: 14,
                             ),
                           ),

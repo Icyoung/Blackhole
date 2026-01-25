@@ -42,7 +42,10 @@ dependencies:
   qr_flutter: ^4.1.0
   shared_preferences: ^2.3.3
   web_socket_channel: ^2.4.0
-  xterm: ^4.0.0
+  xterm:
+    git:
+      url: https://github.com/Icyoung/xterm.dart.git
+      ref: master
   uuid: ^4.0.0
   desktop_drop: ^0.6.0
   cryptography: ^2.7.0

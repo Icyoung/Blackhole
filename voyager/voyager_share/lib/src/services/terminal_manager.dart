@@ -31,7 +31,7 @@ class TerminalManager {
   final Map<String, GlobalKey<TerminalViewState>> _terminalViewKeys = {};
   final Map<String, ScrollController> _scrollControllers = {};
   final Map<String, (double, double)> _scrollBottomGapCache = {};
-  final Map<String, List<int>> _utf8Buffers = {};
+  final Map<String, List<int>> _utf8Buffers = {};  // Stores trailing incomplete UTF-8 bytes (max 3)
   final Map<String, List<String>> _pendingWrites = {};
   final Set<String> _pendingFlushScheduled = {};
   final Map<String, String> _titles = {};
@@ -147,9 +147,9 @@ class TerminalManager {
       final pending = _pendingWrites.putIfAbsent(sessionId, () => <String>[]);
       pending.add(text);
       _scheduleFlushPendingWrites(sessionId);
-    } catch (error, stack) {
-      debugPrint('[$logPrefix] terminal write error: $error');
-      debugPrint('$stack');
+    } catch (error) {
+      // Other errors (like TypeError from xterm bugs) - just skip this write
+      // to avoid UI freezing. Some output may be lost.
     }
   }
 
@@ -186,42 +186,70 @@ class TerminalManager {
       // Still not attached, re-buffer and retry next frame
       _pendingWrites[sessionId] = [combined];
       _scheduleFlushPendingWrites(sessionId);
+    } on TypeError {
+      // Buffer not ready, re-buffer and retry next frame
+      _pendingWrites[sessionId] = [combined];
+      _scheduleFlushPendingWrites(sessionId);
     } catch (error) {
       debugPrint('[$logPrefix] flush pending writes failed: $error');
     }
   }
 
   /// Write raw bytes to terminal with proper UTF-8 streaming decode.
-  /// This buffers incomplete UTF-8 sequences to avoid garbled output.
+  /// Only buffers trailing incomplete UTF-8 bytes (max 3 bytes) for efficiency.
   void writeToTerminalBytes(String sessionId, Uint8List data) {
-    final buffer = _utf8Buffers.putIfAbsent(sessionId, () => <int>[]);
-    buffer.addAll(data);
+    if (data.isEmpty) return;
 
-    // Find the last complete UTF-8 sequence
-    int completeEnd = buffer.length;
-    for (int i = buffer.length - 1; i >= 0 && i >= buffer.length - 4; i--) {
-      final byte = buffer[i];
+    // Get any leftover bytes from previous call
+    final leftover = _utf8Buffers.remove(sessionId);
+
+    Uint8List toProcess;
+    if (leftover != null && leftover.isNotEmpty) {
+      // Prepend leftover bytes to new data
+      toProcess = Uint8List(leftover.length + data.length);
+      toProcess.setRange(0, leftover.length, leftover);
+      toProcess.setRange(leftover.length, toProcess.length, data);
+    } else {
+      toProcess = data;
+    }
+
+    // Find where to split: look for incomplete UTF-8 at the end
+    int completeEnd = toProcess.length;
+
+    // Check last 1-3 bytes for incomplete multi-byte sequence
+    for (int i = toProcess.length - 1;
+         i >= 0 && i >= toProcess.length - 3;
+         i--) {
+      final byte = toProcess[i];
+      if ((byte & 0x80) == 0) {
+        // ASCII byte - everything is complete
+        break;
+      }
       if ((byte & 0xC0) == 0xC0) {
         // Start of multi-byte sequence
         final seqLen = _utf8SeqLength(byte);
-        final remaining = buffer.length - i;
+        final remaining = toProcess.length - i;
         if (remaining < seqLen) {
-          // Incomplete sequence, don't include it
+          // Incomplete - split here
           completeEnd = i;
         }
         break;
-      } else if ((byte & 0x80) == 0) {
-        // ASCII, complete
-        break;
       }
-      // Continuation byte, keep looking
+      // Continuation byte (10xxxxxx) - keep looking for start byte
     }
 
+    // Decode complete portion
     if (completeEnd > 0) {
-      final completeBytes = Uint8List.fromList(buffer.sublist(0, completeEnd));
+      final completeBytes = completeEnd == toProcess.length
+          ? toProcess
+          : Uint8List.sublistView(toProcess, 0, completeEnd);
       final text = utf8.decode(completeBytes, allowMalformed: true);
-      buffer.removeRange(0, completeEnd);
       writeToTerminal(sessionId, text);
+    }
+
+    // Save incomplete trailing bytes for next call
+    if (completeEnd < toProcess.length) {
+      _utf8Buffers[sessionId] = toProcess.sublist(completeEnd).toList();
     }
   }
 
@@ -240,51 +268,24 @@ class TerminalManager {
     final maxScroll = controller.position.maxScrollExtent;
     final offset = controller.offset;
     final gap = (maxScroll - offset).clamp(0.0, maxScroll);
-
-    // If user is near the bottom, always cache gap as 0 to stay at bottom
-    // This prevents content additions from creating false "scrolled up" states
-    if (gap < 50.0) {
-      _scrollBottomGapCache[sessionId] = (offset, 0.0);
-      return;
-    }
-
-    // Only cache non-zero gap if user has clearly scrolled up
-    final existing = _scrollBottomGapCache[sessionId];
-    if (existing != null) {
-      final (_, existingGap) = existing;
-      // If previously at bottom (gap ~= 0) and now suddenly far from bottom,
-      // this is likely content change, not user scroll - ignore it
-      if (existingGap < 10.0 && gap > 200.0) {
-        return;
-      }
-    }
-
     _scrollBottomGapCache[sessionId] = (offset, gap);
   }
 
   void restoreScrollOffset(String sessionId) {
     final controller = _scrollControllers[sessionId];
-    if (controller == null) {
+    final cached = _scrollBottomGapCache[sessionId];
+    if (controller == null || cached == null) {
       return;
     }
-    final cached = _scrollBottomGapCache[sessionId];
-    // Default to gap=0 (bottom) when no cache exists
-    final (cachedOffset, gap) = cached ?? (0.0, 0.0);
+    final (cachedOffset, gap) = cached;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_disposed || !controller.hasClients) {
         return;
       }
       final maxScroll = controller.position.maxScrollExtent;
       final currentOffset = controller.offset;
-      double target;
-      if (gap < 10.0) {
-        // User was at the bottom, stay at bottom
-        target = maxScroll;
-      } else if (gap <= maxScroll) {
-        // Maintain the same gap from bottom
-        target = maxScroll - gap;
-      } else {
-        // Gap is larger than maxScroll (content shrunk), use cached offset
+      var target = (maxScroll - gap).clamp(0.0, maxScroll);
+      if (target < 10.0 && cachedOffset > 10.0) {
         target = cachedOffset.clamp(0.0, maxScroll);
       }
       if ((currentOffset - target).abs() < 0.5) {

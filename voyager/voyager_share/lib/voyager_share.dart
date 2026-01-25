@@ -31,4 +31,5 @@ export 'src/widgets/add_terminal_card.dart';
 export 'src/widgets/group_drawer.dart';
 export 'src/widgets/quick_actions_bar.dart';
 export 'src/widgets/settings_drawer.dart';
+export 'src/widgets/terminal_style.dart';
 export 'src/widgets/terminal_window_card.dart';

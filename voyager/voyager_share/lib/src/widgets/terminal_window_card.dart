@@ -1,9 +1,8 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 import 'package:xterm/xterm.dart';
 
 import 'common/status_dot.dart';
+import 'terminal_style.dart';
 
 class TerminalWindowCard extends StatefulWidget {
   const TerminalWindowCard({
@@ -176,13 +175,9 @@ class _TerminalWindowCardState extends State<TerminalWindowCard>
                           : TextInputType.text,
                       backgroundOpacity: 1.0,
                       padding: const EdgeInsets.all(8),
-                      textStyle: widget.terminalStyle ??
-                          TerminalStyle(
-                            fontFamily: kIsWeb
-                                ? GoogleFonts.jetBrainsMono().fontFamily!
-                                : 'JetBrainsMono',
-                            fontSize: 12,
-                          ),
+                      textStyle:
+                          widget.terminalStyle ??
+                          buildTerminalStyle(fontSize: 12),
                     ),
                   ),
                 ),

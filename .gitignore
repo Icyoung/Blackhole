@@ -1,6 +1,7 @@
 docs/
 landing/
 internal/
+xterm/
 
 # Rust build artifacts
 wormhole/target/

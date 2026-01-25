@@ -6,8 +6,8 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:voyager_share/voyager_share.dart' show buildTerminalStyle;
 import 'package:xterm/xterm.dart';
 
 import '../models/terminal_group.dart';
@@ -1051,12 +1051,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                                         : TextInputType.text,
                                 backgroundOpacity: 1.0,
                                 padding: const EdgeInsets.all(8),
-                                textStyle: TerminalStyle(
-                                  fontFamily:
-                                      kIsWeb
-                                          ? GoogleFonts.jetBrainsMono()
-                                              .fontFamily!
-                                          : 'JetBrainsMono',
+                                textStyle: buildTerminalStyle(
                                   fontSize: 14,
                                 ),
                               ),
@@ -1125,11 +1120,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                           8,
                           _bottomBarHeight + 8,
                         ),
-                        textStyle: TerminalStyle(
-                          fontFamily:
-                              kIsWeb
-                                  ? GoogleFonts.jetBrainsMono().fontFamily!
-                                  : 'JetBrainsMono',
+                        textStyle: buildTerminalStyle(
                           fontSize: 14,
                         ),
                       ),
