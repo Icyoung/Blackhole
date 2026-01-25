@@ -69,7 +69,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   bool _showKeyboardTools = true;
   bool _showHHKB = false;
   bool _hhkbFn = false;
-  bool _hhkbShift = false;
   bool _multiWindow = false;
   double _quickBarHeight = 0;
   static const double _hhkbKeyboardHeight = 242; // 5*42 + 4*4 + 16 padding
@@ -1774,7 +1773,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                           fn: _hhkbFn,
                           ctrl: _ctrl,
                           alt: _alt,
-                          shift: _hhkbShift,
                           onKey: (key, {bool isSpecial = false}) {
                             if (_ctrl && !isSpecial) {
                               _sendCtrl(key);
@@ -1783,20 +1781,17 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                             } else {
                               _sendRaw(key);
                             }
-                            // Reset modifiers after key press (except Fn)
-                            if (_ctrl || _alt || _hhkbShift) {
+                            // Reset modifiers after key press
+                            if (_ctrl || _alt) {
                               setState(() {
                                 _ctrl = false;
                                 _alt = false;
-                                _hhkbShift = false;
                               });
                             }
                           },
                           onFnChanged: (fn) => setState(() => _hhkbFn = fn),
                           onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
                           onToggleAlt: () => setState(() => _alt = !_alt),
-                          onToggleShift:
-                              () => setState(() => _hhkbShift = !_hhkbShift),
                         ),
                     ],
                   ),

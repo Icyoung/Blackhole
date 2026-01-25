@@ -1,34 +1,70 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'hhkb_key.dart';
 
-class HHKBKeyboard extends StatelessWidget {
+class HHKBKeyboard extends StatefulWidget {
   const HHKBKeyboard({
     super.key,
     required this.connected,
     required this.fn,
     required this.ctrl,
     required this.alt,
-    required this.shift,
     required this.onKey,
     required this.onFnChanged,
     required this.onToggleCtrl,
     required this.onToggleAlt,
-    required this.onToggleShift,
   });
 
   final bool connected;
   final bool fn;
   final bool ctrl;
   final bool alt;
-  final bool shift;
   final void Function(String key, {bool isSpecial}) onKey;
   final void Function(bool fn) onFnChanged;
   final VoidCallback onToggleCtrl;
   final VoidCallback onToggleAlt;
-  final VoidCallback onToggleShift;
+
+  @override
+  State<HHKBKeyboard> createState() => _HHKBKeyboardState();
+}
+
+class _HHKBKeyboardState extends State<HHKBKeyboard> {
+  // Shift states: 0=off, 1=once (next char), 2=locked (caps)
+  int _shiftState = 0;
+  DateTime? _lastShiftTap;
 
   static const _bgColor = Color(0xFF1A1A1A);
+
+  void _onShiftTap() {
+    final now = DateTime.now();
+    if (_lastShiftTap != null &&
+        now.difference(_lastShiftTap!).inMilliseconds < 300) {
+      // Double tap -> Caps Lock
+      setState(() => _shiftState = _shiftState == 2 ? 0 : 2);
+      _lastShiftTap = null;
+    } else {
+      // Single tap -> One-time shift
+      setState(() => _shiftState = _shiftState == 0 ? 1 : 0);
+      _lastShiftTap = now;
+    }
+  }
+
+  void _onKeyTap(String output, {bool isSpecial = false}) {
+    widget.onKey(output, isSpecial: isSpecial);
+
+    // Auto-release one-time shift after letter
+    if (_shiftState == 1 && !isSpecial) {
+      setState(() => _shiftState = 0);
+    }
+
+    // Auto-return from Fn layer
+    if (widget.fn) {
+      widget.onFnChanged(false);
+    }
+  }
+
+  bool get _shift => _shiftState > 0;
 
   @override
   Widget build(BuildContext context) {
@@ -38,13 +74,13 @@ class HHKBKeyboard extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _buildNumberRow(),
+          _buildRow1(),
           const SizedBox(height: 4),
-          _buildQRow(),
+          _buildRow2(),
           const SizedBox(height: 4),
-          _buildARow(),
+          _buildRow3(),
           const SizedBox(height: 4),
-          _buildZRow(),
+          _buildRow4(),
           const SizedBox(height: 4),
           _buildBottomRow(),
         ],
@@ -52,41 +88,37 @@ class HHKBKeyboard extends StatelessWidget {
     );
   }
 
-  // Row 1: Numbers (Fn: F1-F10)
-  Widget _buildNumberRow() {
-    final keys = fn
-        ? ['F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10']
-        : (shift
-            ? ['!', '@', '#', '\$', '%', '^', '&', '*', '(', ')']
-            : ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0']);
+  // Row 1: Numbers (Fn: symbols)
+  Widget _buildRow1() {
+    final keys = widget.fn
+        ? ['!', '@', '#', '\$', '%', '^', '&', '*', '(', ')']
+        : ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
     return Row(
       children: keys.map((k) => _key(k, flex: 1)).toList(),
     );
   }
 
-  // Row 2: Q W E R T Y U I O P BS
-  // Fn: Q=_, W=C-W, E=End, R=_, T=C-T, Y=_, U=PgUp, I=_, O=_, P=C-P, BS=Del
-  Widget _buildQRow() {
+  // Row 2: QWERTY + ⌫ (Fn: brackets + ⌦)
+  Widget _buildRow2() {
     List<String> keys;
-    if (fn) {
-      keys = ['Q', 'C-W', 'End', 'R', 'C-T', 'Y', 'PgUp', 'I', 'O', 'C-P', 'Del'];
+    if (widget.fn) {
+      keys = ['`', '~', '[', ']', '{', '}', '-', '=', '+', '\\', '⌦'];
     } else {
-      keys = ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', 'BS'];
+      keys = ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '⌫'];
     }
     return Row(
       children: [
         ...keys.sublist(0, 10).map((k) => _key(k, flex: 10)),
-        _key(keys[10], flex: 12, special: true),
+        _key(keys[10], flex: 12),
       ],
     );
   }
 
-  // Row 3: A S D F G H J K L
-  // Fn: A=Home, S=C-S, D=PgDn, F=_, G=_, H=←, J=↓, K=↑, L=→ (Vim nav)
-  Widget _buildARow() {
+  // Row 3: ASDFGHJKL (Fn: navigation)
+  Widget _buildRow3() {
     List<String> keys;
-    if (fn) {
-      keys = ['Home', 'C-S', 'PgDn', 'F', 'G', '←', '↓', '↑', '→'];
+    if (widget.fn) {
+      keys = ['Hom', '◀W', 'PgU', 'PgD', 'W▶', 'End', '|', "'", '"'];
     } else {
       keys = ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'];
     }
@@ -95,41 +127,79 @@ class HHKBKeyboard extends StatelessWidget {
     );
   }
 
-  // Row 4: Z X C V B N M , . /
-  // Fn: Z=C-Z, X=_, C=C-C, V=_, B=_, N=C-N, M=_, ,=_, .=_, /=_
-  Widget _buildZRow() {
-    List<String> keys;
-    if (fn) {
-      keys = ['C-Z', 'X', 'C-C', 'V', 'B', 'C-N', 'C-L', ',', '.', '/'];
-    } else if (shift) {
-      keys = ['Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?'];
+  // Row 4: ⇧ ZXCVBNM,. (Fn: ⇧ + actions)
+  Widget _buildRow4() {
+    if (widget.fn) {
+      // Fn layer: Shift(inactive) + terminal actions
+      return Row(
+        children: [
+          _shiftKey(flex: 12, enabled: false),
+          ...['Stop', 'Susp', 'EOF', 'Clr', 'Kill', 'W⌫', 'Yank', '/', '?']
+              .map((k) => _key(k, flex: 10)),
+        ],
+      );
     } else {
-      keys = ['Z', 'X', 'C', 'V', 'B', 'N', 'M', ',', '.', '/'];
+      // Default layer: Shift + letters + punctuation
+      final letters = ['Z', 'X', 'C', 'V', 'B', 'N', 'M'];
+      final punct = _shift ? ['<', '>'] : [',', '.'];
+      return Row(
+        children: [
+          _shiftKey(flex: 12),
+          ...letters.map((k) => _key(k, flex: 10)),
+          ...punct.map((k) => _key(k, flex: 10)),
+        ],
+      );
     }
-    return Row(
-      children: keys.map((k) => _key(k, flex: 1)).toList(),
-    );
   }
 
-  // Row 5: Ctrl Alt [Fn] [Space] ← ↓ ↑ → Esc Enter
+  // Row 5: Fn Ctrl Alt [Space] Tab Esc ⏎
   Widget _buildBottomRow() {
     return Row(
       children: [
-        _modKey('Ctrl', ctrl, onToggleCtrl, flex: 7),
-        _modKey('Alt', alt, onToggleAlt, flex: 7),
         _fnKey(flex: 7),
-        _key('', flex: 20, special: true, isSpace: true), // Space
-        _key('←', flex: 7, special: true),
-        _key('↓', flex: 7, special: true),
-        _key('↑', flex: 7, special: true),
-        _key('→', flex: 7, special: true),
-        _key('Esc', flex: 8, special: true),
-        _key('Enter', flex: 10, special: true),
+        _modKey('Ctrl', widget.ctrl, widget.onToggleCtrl, flex: 7),
+        _modKey('Alt', widget.alt, widget.onToggleAlt, flex: 6),
+        _spaceKey(flex: 24),
+        _key('Tab', flex: 6),
+        _key('Esc', flex: 6),
+        _key('⏎', flex: 9),
       ],
     );
   }
 
-  // Fn key: tap to toggle mode, NOT hold
+  // Shift key with iOS-style behavior
+  Widget _shiftKey({required int flex, bool enabled = true}) {
+    String label;
+    bool active;
+
+    if (_shiftState == 2) {
+      label = '⇪'; // Caps lock indicator
+      active = true;
+    } else if (_shiftState == 1) {
+      label = '⇧';
+      active = true;
+    } else {
+      label = '⇧';
+      active = false;
+    }
+
+    return Expanded(
+      flex: flex,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 1.5),
+        child: HHKBKey(
+          label: label,
+          enabled: enabled,
+          active: active,
+          isModifier: true,
+          onTap: enabled ? _onShiftTap : () {},
+          fontSize: 14,
+        ),
+      ),
+    );
+  }
+
+  // Fn key: tap to toggle mode
   Widget _fnKey({required int flex}) {
     return Expanded(
       flex: flex,
@@ -138,99 +208,108 @@ class HHKBKeyboard extends StatelessWidget {
         child: HHKBKey(
           label: 'Fn',
           enabled: true,
-          active: fn,
+          active: widget.fn,
           isModifier: true,
-          onTap: () => onFnChanged(!fn),
-          fontSize: 10,
+          onTap: () => widget.onFnChanged(!widget.fn),
+          fontSize: 11,
         ),
       ),
     );
   }
 
-  Widget _key(String label,
-      {int flex = 1, bool special = false, bool isSpace = false}) {
-    String output = label;
-    bool isSpecialKey = special;
+  // Space key with swipe gestures for arrows
+  Widget _spaceKey({required int flex}) {
+    return Expanded(
+      flex: flex,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 1.5),
+        child: _SpaceKey(
+          enabled: widget.connected,
+          onSpace: () => _onKeyTap(' '),
+          onArrow: (direction) {
+            final codes = {
+              'left': '\x1b[D',
+              'right': '\x1b[C',
+              'up': '\x1b[A',
+              'down': '\x1b[B',
+            };
+            _onKeyTap(codes[direction]!, isSpecial: true);
+          },
+        ),
+      ),
+    );
+  }
 
-    // Handle special labels
+  Widget _key(String label, {int flex = 1}) {
+    String output = label;
+    bool isSpecialKey = false;
+
+    // Special key mappings
     if (label == 'Esc') {
       output = '\x1b';
       isSpecialKey = true;
     } else if (label == 'Tab') {
       output = '\t';
       isSpecialKey = true;
-    } else if (label == 'Enter') {
+    } else if (label == '⏎') {
       output = '\r';
       isSpecialKey = true;
-    } else if (label == 'BS') {
+    } else if (label == '⌫') {
       output = '\x7f';
       isSpecialKey = true;
-    } else if (label == 'Del') {
+    } else if (label == '⌦') {
       output = '\x1b[3~';
       isSpecialKey = true;
-    } else if (isSpace) {
-      output = ' ';
-    } else if (label == '←') {
-      output = '\x1b[D';
-      isSpecialKey = true;
-    } else if (label == '→') {
-      output = '\x1b[C';
-      isSpecialKey = true;
-    } else if (label == '↑') {
-      output = '\x1b[A';
-      isSpecialKey = true;
-    } else if (label == '↓') {
-      output = '\x1b[B';
-      isSpecialKey = true;
-    } else if (label == 'Home') {
+    }
+    // Fn layer navigation
+    else if (label == 'Hom') {
       output = '\x1b[H';
       isSpecialKey = true;
     } else if (label == 'End') {
       output = '\x1b[F';
       isSpecialKey = true;
-    } else if (label == 'PgUp') {
+    } else if (label == '◀W') {
+      output = '\x1bb'; // Alt+B
+      isSpecialKey = true;
+    } else if (label == 'W▶') {
+      output = '\x1bf'; // Alt+F
+      isSpecialKey = true;
+    } else if (label == 'PgU') {
       output = '\x1b[5~';
       isSpecialKey = true;
-    } else if (label == 'PgDn') {
+    } else if (label == 'PgD') {
       output = '\x1b[6~';
       isSpecialKey = true;
-    } else if (label.startsWith('F') && label.length > 1) {
-      final fNum = int.tryParse(label.substring(1));
-      if (fNum != null && fNum >= 1 && fNum <= 12) {
-        output = _getFnKeyCode(fNum);
-        isSpecialKey = true;
-      }
-    } else if (label == 'C-C') {
+    }
+    // Fn layer terminal actions (semantic labels)
+    else if (label == 'Stop') {
       output = '\x03'; // Ctrl+C
       isSpecialKey = true;
-    } else if (label == 'C-Z') {
+    } else if (label == 'Susp') {
       output = '\x1a'; // Ctrl+Z
       isSpecialKey = true;
-    } else if (label == 'C-S') {
-      output = '\x13'; // Ctrl+S
+    } else if (label == 'EOF') {
+      output = '\x04'; // Ctrl+D
       isSpecialKey = true;
-    } else if (label == 'C-W') {
-      output = '\x17'; // Ctrl+W (close tab)
+    } else if (label == 'Clr') {
+      output = '\x0c'; // Ctrl+L
       isSpecialKey = true;
-    } else if (label == 'C-T') {
-      output = '\x14'; // Ctrl+T (new tab)
+    } else if (label == 'Kill') {
+      output = '\x0b'; // Ctrl+K
       isSpecialKey = true;
-    } else if (label == 'C-P') {
-      output = '\x10'; // Ctrl+P (history prev)
+    } else if (label == 'W⌫') {
+      output = '\x17'; // Ctrl+W
       isSpecialKey = true;
-    } else if (label == 'C-N') {
-      output = '\x0e'; // Ctrl+N (history next)
+    } else if (label == 'Yank') {
+      output = '\x19'; // Ctrl+Y
       isSpecialKey = true;
-    } else if (label == 'C-L') {
-      output = '\x0c'; // Ctrl+L (clear screen)
-      isSpecialKey = true;
-    } else if (label.length == 1) {
+    }
+    // Letters with shift
+    else if (label.length == 1) {
       final code = label.codeUnitAt(0);
       if (code >= 65 && code <= 90) {
-        // Uppercase letter
-        output = shift ? label : label.toLowerCase();
-      } else if (shift) {
-        output = _applyShift(label);
+        // Uppercase letter -> apply shift
+        output = _shift ? label : label.toLowerCase();
       }
     }
 
@@ -239,15 +318,9 @@ class HHKBKeyboard extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 1.5),
         child: HHKBKey(
-          label: isSpace ? '' : label,
-          enabled: connected && output.isNotEmpty,
-          onTap: () {
-            onKey(output, isSpecial: isSpecialKey);
-            // Auto-return to default layer after Fn key press
-            if (fn) {
-              onFnChanged(false);
-            }
-          },
+          label: label,
+          enabled: widget.connected && output.isNotEmpty,
+          onTap: () => _onKeyTap(output, isSpecial: isSpecialKey),
           fontSize: label.length > 3 ? 9.0 : (label.length > 2 ? 10.0 : 13.0),
         ),
       ),
@@ -271,57 +344,112 @@ class HHKBKeyboard extends StatelessWidget {
       ),
     );
   }
+}
 
-  String _getFnKeyCode(int n) {
-    const codes = {
-      1: '\x1bOP',
-      2: '\x1bOQ',
-      3: '\x1bOR',
-      4: '\x1bOS',
-      5: '\x1b[15~',
-      6: '\x1b[17~',
-      7: '\x1b[18~',
-      8: '\x1b[19~',
-      9: '\x1b[20~',
-      10: '\x1b[21~',
-      11: '\x1b[23~',
-      12: '\x1b[24~',
-    };
-    return codes[n] ?? '';
+/// Space key with swipe gesture support for arrow keys
+class _SpaceKey extends StatefulWidget {
+  const _SpaceKey({
+    required this.enabled,
+    required this.onSpace,
+    required this.onArrow,
+  });
+
+  final bool enabled;
+  final VoidCallback onSpace;
+  final void Function(String direction) onArrow;
+
+  @override
+  State<_SpaceKey> createState() => _SpaceKeyState();
+}
+
+class _SpaceKeyState extends State<_SpaceKey> {
+  bool _pressed = false;
+  Offset _totalDelta = Offset.zero;
+  static const _swipeThreshold = 25.0;
+
+  static const _keyColor = Color(0xFF2D2D2D);
+  static const _keyPressedColor = Color(0xFF1A1A1A);
+  static const _keyBorder = Color(0xFF3D3D3D);
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onPanStart: widget.enabled
+          ? (details) {
+              setState(() => _pressed = true);
+              _totalDelta = Offset.zero;
+              HapticFeedback.lightImpact();
+            }
+          : null,
+      onPanUpdate: widget.enabled
+          ? (details) {
+              _totalDelta += details.delta;
+            }
+          : null,
+      onPanEnd: widget.enabled
+          ? (details) {
+              setState(() => _pressed = false);
+              _handleSwipe();
+            }
+          : null,
+      onPanCancel: widget.enabled
+          ? () {
+              setState(() => _pressed = false);
+              _totalDelta = Offset.zero;
+            }
+          : null,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 100),
+        height: 42,
+        decoration: BoxDecoration(
+          color: _pressed ? _keyPressedColor : _keyColor,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: _keyBorder, width: 0.5),
+          boxShadow: _pressed
+              ? [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.5),
+                    blurRadius: 1,
+                    offset: const Offset(0, 0),
+                  ),
+                ]
+              : [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.4),
+                    blurRadius: 2,
+                    offset: const Offset(0, 1.5),
+                  ),
+                ],
+        ),
+        child: Center(
+          child: Text(
+            '← ↑↓ →',
+            style: TextStyle(
+              color: widget.enabled ? Colors.white30 : Colors.white12,
+              fontSize: 10,
+              letterSpacing: 2,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
-  String _applyShift(String char) {
-    const shiftMap = {
-      '1': '!',
-      '2': '@',
-      '3': '#',
-      '4': '\$',
-      '5': '%',
-      '6': '^',
-      '7': '&',
-      '8': '*',
-      '9': '(',
-      '0': ')',
-      '-': '_',
-      '=': '+',
-      '[': '{',
-      ']': '}',
-      '\\': '|',
-      ';': ':',
-      "'": '"',
-      ',': '<',
-      '.': '>',
-      '/': '?',
-      '`': '~',
-    };
-    if (shiftMap.containsKey(char)) {
-      return shiftMap[char]!;
+  void _handleSwipe() {
+    final dx = _totalDelta.dx;
+    final dy = _totalDelta.dy;
+
+    if (dx.abs() < _swipeThreshold && dy.abs() < _swipeThreshold) {
+      // Tap (no significant movement)
+      widget.onSpace();
+    } else if (dx.abs() > dy.abs()) {
+      // Horizontal swipe
+      widget.onArrow(dx > 0 ? 'right' : 'left');
+    } else {
+      // Vertical swipe
+      widget.onArrow(dy > 0 ? 'down' : 'up');
     }
-    if (char.length == 1 &&
-        char.codeUnitAt(0) >= 97 &&
-        char.codeUnitAt(0) <= 122) {
-      return char.toUpperCase();
-    }
-    return char;
+
+    _totalDelta = Offset.zero;
   }
 }
