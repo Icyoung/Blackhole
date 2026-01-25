@@ -111,14 +111,14 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
     );
   }
 
-  // Row 3: ASDFGHJKL,. (Fn: navigation + punct)
+  // Row 3: Tab ASDFGHJKL. (Fn: navigation + punct)
   Widget _buildRow3() {
     List<String> keys;
     if (widget.fn) {
-      keys = ['Hom', '◀W', 'PgU', 'PgD', 'W▶', 'End', '|', ';', ':', "'", '"'];
+      keys = ['Hom', '◀W', 'PgU', 'PgD', 'W▶', 'End', '|', ';', ':', ',', '"'];
     } else {
-      final punct = _shift ? ['<', '>'] : [',', '.'];
-      keys = ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ...punct];
+      final dot = _shift ? '>' : '.';
+      keys = ['Tab', 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', dot];
     }
     return Row(
       children: keys.map((k) => _key(k, flex: 1)).toList(),
@@ -131,9 +131,10 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
       // Fn layer: Shift(inactive) + terminal actions + ⌦
       return Row(
         children: [
-          _shiftKey(flex: 14, enabled: false),
-          ...['Stop', 'Susp', 'EOF', 'Clr', 'Kill', 'W⌫', 'Yank', '?', '⌦']
+          _shiftKey(flex: 12, enabled: false),
+          ...['Stop', 'Susp', 'EOF', 'Clr', 'Kill', 'W⌫', 'Yank', '?']
               .map((k) => _key(k, flex: 10)),
+          _key('⌦', flex: 12),
         ],
       );
     } else {
@@ -141,25 +142,25 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
       final slash = _shift ? '?' : '/';
       return Row(
         children: [
-          _shiftKey(flex: 14),
-          ...['Z', 'X', 'C', 'V', 'B', 'N', 'M', slash, '⌫']
+          _shiftKey(flex: 12),
+          ...['Z', 'X', 'C', 'V', 'B', 'N', 'M', slash]
               .map((k) => _key(k, flex: 10)),
+          _key('⌫', flex: 12),
         ],
       );
     }
   }
 
-  // Row 5: Fn Ctrl Alt [Space] Tab Esc ⏎
+  // Row 5: Fn Ctrl Alt [Space] Esc ⏎
   Widget _buildBottomRow() {
     return Row(
       children: [
         _fnKey(flex: 7),
         _modKey('Ctrl', widget.ctrl, widget.onToggleCtrl, flex: 7),
         _modKey('Alt', widget.alt, widget.onToggleAlt, flex: 6),
-        _spaceKey(flex: 24),
-        _key('Tab', flex: 6),
-        _key('Esc', flex: 6),
-        _key('⏎', flex: 9),
+        _spaceKey(flex: 28),
+        _key('Esc', flex: 7),
+        _key('⏎', flex: 10),
       ],
     );
   }
