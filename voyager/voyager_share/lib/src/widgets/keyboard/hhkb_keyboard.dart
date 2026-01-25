@@ -344,7 +344,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
   }
 }
 
-/// Space key with swipe gesture support for arrow keys
+/// Space key with swipe gesture support for arrow keys (continuous)
 class _SpaceKey extends StatefulWidget {
   const _SpaceKey({
     required this.enabled,
@@ -362,8 +362,10 @@ class _SpaceKey extends StatefulWidget {
 
 class _SpaceKeyState extends State<_SpaceKey> {
   bool _pressed = false;
-  Offset _totalDelta = Offset.zero;
-  static const _swipeThreshold = 25.0;
+  double _accumulatedX = 0;
+  double _accumulatedY = 0;
+  bool _hasMoved = false;
+  static const _stepThreshold = 20.0; // Distance per arrow key trigger
 
   static const _keyColor = Color(0xFF2D2D2D);
   static const _keyPressedColor = Color(0xFF1A1A1A);
@@ -375,25 +377,63 @@ class _SpaceKeyState extends State<_SpaceKey> {
       onPanStart: widget.enabled
           ? (details) {
               setState(() => _pressed = true);
-              _totalDelta = Offset.zero;
+              _accumulatedX = 0;
+              _accumulatedY = 0;
+              _hasMoved = false;
               HapticFeedback.lightImpact();
             }
           : null,
       onPanUpdate: widget.enabled
           ? (details) {
-              _totalDelta += details.delta;
+              _accumulatedX += details.delta.dx;
+              _accumulatedY += details.delta.dy;
+
+              // Determine primary direction and emit arrow keys
+              if (_accumulatedX.abs() > _accumulatedY.abs()) {
+                // Horizontal movement
+                while (_accumulatedX.abs() >= _stepThreshold) {
+                  if (_accumulatedX > 0) {
+                    widget.onArrow('right');
+                    _accumulatedX -= _stepThreshold;
+                  } else {
+                    widget.onArrow('left');
+                    _accumulatedX += _stepThreshold;
+                  }
+                  _hasMoved = true;
+                  HapticFeedback.selectionClick();
+                }
+              } else {
+                // Vertical movement
+                while (_accumulatedY.abs() >= _stepThreshold) {
+                  if (_accumulatedY > 0) {
+                    widget.onArrow('down');
+                    _accumulatedY -= _stepThreshold;
+                  } else {
+                    widget.onArrow('up');
+                    _accumulatedY += _stepThreshold;
+                  }
+                  _hasMoved = true;
+                  HapticFeedback.selectionClick();
+                }
+              }
             }
           : null,
       onPanEnd: widget.enabled
           ? (details) {
               setState(() => _pressed = false);
-              _handleSwipe();
+              // If no movement occurred, treat as space tap
+              if (!_hasMoved) {
+                widget.onSpace();
+              }
+              _accumulatedX = 0;
+              _accumulatedY = 0;
             }
           : null,
       onPanCancel: widget.enabled
           ? () {
               setState(() => _pressed = false);
-              _totalDelta = Offset.zero;
+              _accumulatedX = 0;
+              _accumulatedY = 0;
             }
           : null,
       child: AnimatedContainer(
@@ -419,35 +459,8 @@ class _SpaceKeyState extends State<_SpaceKey> {
                   ),
                 ],
         ),
-        child: Center(
-          child: Text(
-            '← ↑↓ →',
-            style: TextStyle(
-              color: widget.enabled ? Colors.white30 : Colors.white12,
-              fontSize: 10,
-              letterSpacing: 2,
-            ),
-          ),
-        ),
+        child: const SizedBox.expand(), // Empty space bar, no hint text
       ),
     );
-  }
-
-  void _handleSwipe() {
-    final dx = _totalDelta.dx;
-    final dy = _totalDelta.dy;
-
-    if (dx.abs() < _swipeThreshold && dy.abs() < _swipeThreshold) {
-      // Tap (no significant movement)
-      widget.onSpace();
-    } else if (dx.abs() > dy.abs()) {
-      // Horizontal swipe
-      widget.onArrow(dx > 0 ? 'right' : 'left');
-    } else {
-      // Vertical swipe
-      widget.onArrow(dy > 0 ? 'down' : 'up');
-    }
-
-    _totalDelta = Offset.zero;
   }
 }
