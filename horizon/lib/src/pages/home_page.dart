@@ -71,7 +71,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   bool _hhkbFn = false;
   bool _multiWindow = false;
   double _quickBarHeight = 0;
-  static const double _hhkbKeyboardHeight = 242; // 5*42 + 4*4 + 16 padding
+  static const double _hhkbKeyboardHeight = 250; // 5*42 + 4*6 + 16 padding
 
   double get _bottomBarHeight =>
       (_showKeyboardTools ? _quickBarHeight : 0) +

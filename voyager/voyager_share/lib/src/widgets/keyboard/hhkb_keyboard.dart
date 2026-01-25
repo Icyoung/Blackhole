@@ -75,13 +75,13 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
         mainAxisSize: MainAxisSize.min,
         children: [
           _buildRow1(),
-          const SizedBox(height: 4),
+          const SizedBox(height: 6),
           _buildRow2(),
-          const SizedBox(height: 4),
+          const SizedBox(height: 6),
           _buildRow3(),
-          const SizedBox(height: 4),
+          const SizedBox(height: 6),
           _buildRow4(),
-          const SizedBox(height: 4),
+          const SizedBox(height: 6),
           _buildBottomRow(),
         ],
       ),
@@ -184,7 +184,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
     return Expanded(
       flex: flex,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 1.5),
+        padding: const EdgeInsets.symmetric(horizontal: 2.5),
         child: HHKBKey(
           label: label,
           enabled: enabled,
@@ -202,7 +202,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
     return Expanded(
       flex: flex,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 1.5),
+        padding: const EdgeInsets.symmetric(horizontal: 2.5),
         child: HHKBKey(
           label: 'Fn',
           enabled: true,
@@ -220,7 +220,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
     return Expanded(
       flex: flex,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 1.5),
+        padding: const EdgeInsets.symmetric(horizontal: 2.5),
         child: _SpaceKey(
           enabled: widget.connected,
           onSpace: () => _onKeyTap(' '),
@@ -314,7 +314,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
     return Expanded(
       flex: flex,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 1.5),
+        padding: const EdgeInsets.symmetric(horizontal: 2.5),
         child: HHKBKey(
           label: label,
           enabled: widget.connected && output.isNotEmpty,
@@ -330,7 +330,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
     return Expanded(
       flex: flex,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 1.5),
+        padding: const EdgeInsets.symmetric(horizontal: 2.5),
         child: HHKBKey(
           label: label,
           enabled: true,
