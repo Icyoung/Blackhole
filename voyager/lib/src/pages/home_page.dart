@@ -1241,7 +1241,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                           });
                         }
                       },
-                      onToggleFn: () => setState(() => _hhkbFn = !_hhkbFn),
+                      onFnChanged: (fn) => setState(() => _hhkbFn = fn),
                       onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
                       onToggleAlt: () => setState(() => _alt = !_alt),
                       onToggleShift:
