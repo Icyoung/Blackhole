@@ -145,18 +145,54 @@ class ConnectionManager {
     sendCommand({'type': 'sync', 'sessionId': sessionId});
   }
 
+  // Max chunk size to prevent PTY buffer overflow (1KB is safe for all platforms)
+  static const int _maxChunkSize = 1024;
+
   void sendRaw(String sessionId, String data) {
     final channel = _channel;
     if (channel == null) {
       return;
     }
     _logDeleteProbe(data);
-    final payload = _encodeBinaryMessage(
-      _BinaryType.stdin,
-      sessionId,
-      data: Uint8List.fromList(utf8.encode(data)),
-    );
-    channel.sink.add(payload);
+
+    final bytes = utf8.encode(data);
+
+    // For small data, send directly
+    if (bytes.length <= _maxChunkSize) {
+      final payload = _encodeBinaryMessage(
+        _BinaryType.stdin,
+        sessionId,
+        data: Uint8List.fromList(bytes),
+      );
+      channel.sink.add(payload);
+      return;
+    }
+
+    // For large data, chunk it to prevent PTY buffer overflow
+    _sendChunked(sessionId, bytes);
+  }
+
+  Future<void> _sendChunked(String sessionId, List<int> bytes) async {
+    final channel = _channel;
+    if (channel == null) return;
+
+    for (var offset = 0; offset < bytes.length; offset += _maxChunkSize) {
+      final end =
+          (offset + _maxChunkSize < bytes.length) ? offset + _maxChunkSize : bytes.length;
+      final chunk = bytes.sublist(offset, end);
+
+      final payload = _encodeBinaryMessage(
+        _BinaryType.stdin,
+        sessionId,
+        data: Uint8List.fromList(chunk),
+      );
+      channel.sink.add(payload);
+
+      // Small delay between chunks to allow PTY buffer to drain
+      if (end < bytes.length) {
+        await Future.delayed(const Duration(milliseconds: 5));
+      }
+    }
   }
 
   void sendResize(String sessionId, int cols, int rows) {
