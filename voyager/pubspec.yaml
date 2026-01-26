@@ -48,6 +48,7 @@ dependencies:
   google_fonts: ^6.2.1
   device_info_plus: ^11.2.0
   cryptography: ^2.7.0
+  window_manager: ^0.4.3
 
 dev_dependencies:
   flutter_test:

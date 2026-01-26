@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:desktop_drop/desktop_drop.dart';
+import 'package:window_manager/window_manager.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -102,6 +103,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       onResize: _handleResize,
       onTitleChange: (sessionId, title) {
         if (mounted) setState(() {});
+        if (sessionId == _activeSessionId) {
+          _updateWindowTitle();
+        }
       },
       logPrefix: 'Voyager',
     );
@@ -522,6 +526,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     }
     _scheduleActiveResize();
     _restoreScrollOffset(sessionId);
+    _updateWindowTitle();
   }
 
   void _handleSessionClosed(String sessionId) {
@@ -539,6 +544,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     if (mounted) {
       setState(() {});
     }
+    _updateWindowTitle();
   }
 
   void _handleSessionSync(String sessionId, String content) {
@@ -727,6 +733,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     });
     _scheduleActiveResize();
     _restoreScrollOffset(sessionId);
+    _updateWindowTitle();
     if (requestKeyboard && !_multiWindow) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _viewKeyFor(sessionId).currentState?.requestKeyboard();
@@ -736,6 +743,21 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
 
   void _reorderSessions(int oldIndex, int newIndex) {
     _groupStore.reorderSession(_groupStore.activeGroupId, oldIndex, newIndex);
+  }
+
+  void _updateWindowTitle() {
+    if (!Platform.isMacOS && !Platform.isLinux && !Platform.isWindows) {
+      return;
+    }
+    final sessionId = _activeSessionId;
+    String title = 'Voyager';
+    if (sessionId != null) {
+      final terminalTitle = _terminalManager.getTitle(sessionId);
+      if (terminalTitle != null && terminalTitle.isNotEmpty) {
+        title = terminalTitle;
+      }
+    }
+    windowManager.setTitle(title);
   }
 
   void _handleTerminalInput(String sessionId, String data) {

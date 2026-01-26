@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:desktop_drop/desktop_drop.dart';
+import 'package:window_manager/window_manager.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -128,6 +129,9 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       onResize: _handleResize,
       onTitleChange: (sessionId, title) {
         if (mounted) setState(() {});
+        if (sessionId == _activeSessionId) {
+          _updateWindowTitle();
+        }
       },
       logPrefix: 'Horizon',
     );
@@ -872,6 +876,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     }
     _scheduleActiveResize();
     _restoreScrollOffset(sessionId);
+    _updateWindowTitle();
   }
 
   // Handler for remote session created (Voyager mode / network callback)
@@ -891,6 +896,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     }
     _scheduleActiveResize();
     _restoreScrollOffset(sessionId);
+    _updateWindowTitle();
   }
 
   // Handler for local session closed (Horizon mode direct access)
@@ -912,6 +918,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     if (mounted) {
       setState(() {});
     }
+    _updateWindowTitle();
   }
 
   // Handler for remote session closed (Voyager mode / network callback)
@@ -934,6 +941,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     if (mounted) {
       setState(() {});
     }
+    _updateWindowTitle();
   }
 
   void _handleSessionSync(String sessionId, String content) {
@@ -1171,6 +1179,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     });
     _scheduleActiveResize();
     _restoreScrollOffset(sessionId);
+    _updateWindowTitle();
     if (requestKeyboard && !_multiWindow) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _viewKeyFor(sessionId).currentState?.requestKeyboard();
@@ -1182,6 +1191,21 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _groupStore.reorderSession(_groupStore.activeGroupId, oldIndex, newIndex);
   }
 
+  void _updateWindowTitle() {
+    if (!Platform.isMacOS && !Platform.isLinux && !Platform.isWindows) {
+      return;
+    }
+    final sessionId = _activeSessionId;
+    String title = 'Horizon';
+    if (sessionId != null) {
+      final terminalTitle = _terminalManager.getTitle(sessionId);
+      if (terminalTitle != null && terminalTitle.isNotEmpty) {
+        title = terminalTitle;
+      }
+    }
+    windowManager.setTitle(title);
+  }
+
   void _handleTerminalInput(String sessionId, String data) {
     if (_activeSessionId != sessionId) {
       _activeSessionId = sessionId;
@@ -1189,6 +1213,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       if (mounted) {
         setState(() {});
       }
+      _updateWindowTitle();
     }
     var output = data.replaceAll('\n', '\r');
     if (_ctrl) {
