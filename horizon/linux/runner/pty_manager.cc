@@ -127,7 +127,20 @@ void PtyManager::write_stdin(const std::string& session_id, const uint8_t* data,
   if (it == sessions_.end()) {
     return;
   }
-  write(it->second->master_fd, data, len);
+  size_t total_written = 0;
+  while (total_written < len) {
+    ssize_t bytes_written = write(it->second->master_fd, data + total_written, len - total_written);
+    if (bytes_written < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        // Buffer full, wait a bit and retry
+        usleep(1000);  // 1ms
+        continue;
+      }
+      // Actual error - stop writing
+      break;
+    }
+    total_written += bytes_written;
+  }
 }
 
 void PtyManager::resize(const std::string& session_id, int rows, int cols) {

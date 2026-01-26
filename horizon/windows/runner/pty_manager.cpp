@@ -219,8 +219,32 @@ void PtyManager::write_stdin(const std::string& session_id, const uint8_t* data,
   if (it == sessions_.end()) {
     return;
   }
-  DWORD written;
-  WriteFile(it->second->input_pipe_write, data, static_cast<DWORD>(len), &written, NULL);
+  size_t total_written = 0;
+  while (total_written < len) {
+    DWORD written = 0;
+    BOOL success = WriteFile(
+        it->second->input_pipe_write,
+        data + total_written,
+        static_cast<DWORD>(len - total_written),
+        &written,
+        NULL);
+    if (!success) {
+      DWORD err = GetLastError();
+      if (err == ERROR_NO_DATA || err == ERROR_PIPE_BUSY) {
+        // Buffer full, wait a bit and retry
+        Sleep(1);  // 1ms
+        continue;
+      }
+      // Actual error - stop writing
+      break;
+    }
+    if (written == 0) {
+      // No progress, wait a bit
+      Sleep(1);
+      continue;
+    }
+    total_written += written;
+  }
 }
 
 void PtyManager::resize(const std::string& session_id, int rows, int cols) {

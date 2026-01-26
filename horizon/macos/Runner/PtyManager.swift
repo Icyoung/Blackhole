@@ -94,8 +94,26 @@ final class PtyManager {
       return
     }
     data.withUnsafeBytes { rawBuffer in
-      if let baseAddress = rawBuffer.baseAddress {
-        _ = write(session.masterFd, baseAddress, data.count)
+      guard let baseAddress = rawBuffer.baseAddress else { return }
+      var totalWritten = 0
+      let totalBytes = data.count
+      while totalWritten < totalBytes {
+        let bytesWritten = write(
+          session.masterFd,
+          baseAddress.advanced(by: totalWritten),
+          totalBytes - totalWritten
+        )
+        if bytesWritten < 0 {
+          let err = errno
+          if err == EAGAIN || err == EWOULDBLOCK {
+            // Buffer full, wait a bit and retry
+            usleep(1000)  // 1ms
+            continue
+          }
+          // Actual error - stop writing
+          break
+        }
+        totalWritten += bytesWritten
       }
     }
   }

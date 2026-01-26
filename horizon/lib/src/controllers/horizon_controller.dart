@@ -314,12 +314,38 @@ class HorizonController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Write stdin to a local session
+  // Max chunk size to prevent PTY buffer overflow
+  static const int _maxChunkSize = 1024;
+
+  /// Write stdin to a local session (with chunking for large data)
   Future<void> writeLocalStdin(String sessionId, Uint8List data) async {
     if (!_sessions.contains(sessionId)) {
       return;
     }
-    await _terminal.writeStdin(sessionId, data);
+    await _writeStdinSafe(sessionId, data);
+  }
+
+  /// Safe PTY write with chunking to prevent buffer overflow
+  Future<void> _writeStdinSafe(String sessionId, Uint8List data) async {
+    // For small data, write directly
+    if (data.length <= _maxChunkSize) {
+      await _terminal.writeStdin(sessionId, data);
+      return;
+    }
+
+    // For large data, chunk it to prevent PTY buffer overflow
+    for (var offset = 0; offset < data.length; offset += _maxChunkSize) {
+      final end = (offset + _maxChunkSize < data.length)
+          ? offset + _maxChunkSize
+          : data.length;
+      final chunk = data.sublist(offset, end);
+      await _terminal.writeStdin(sessionId, chunk);
+
+      // Small delay between chunks to allow PTY buffer to drain
+      if (end < data.length) {
+        await Future.delayed(const Duration(milliseconds: 5));
+      }
+    }
   }
 
   /// Resize a local session
@@ -653,11 +679,11 @@ class HorizonController extends ChangeNotifier {
         _logDeleteProbe('Horizon/LAN data', data.codeUnits);
         _armStdoutProbe(data.codeUnits);
         final bytes = Uint8List.fromList(utf8.encode(data));
-        await _terminal.writeStdin(sessionId, bytes);
+        await _writeStdinSafe(sessionId, bytes);
       } else if (raw is Uint8List) {
         _logDeleteProbe('Horizon/LAN raw', raw);
         _armStdoutProbe(raw);
-        await _terminal.writeStdin(sessionId, raw);
+        await _writeStdinSafe(sessionId, raw);
       }
     } else if (type == 'resize') {
       final rows = decoded?['rows'];
@@ -1064,11 +1090,11 @@ class HorizonController extends ChangeNotifier {
           _logDeleteProbe('Horizon/Wormhole data', data.codeUnits);
           _armStdoutProbe(data.codeUnits);
           final bytes = Uint8List.fromList(utf8.encode(data));
-          _terminal.writeStdin(sessionId, bytes);
+          unawaited(_writeStdinSafe(sessionId, bytes));
         } else if (raw is Uint8List) {
           _logDeleteProbe('Horizon/Wormhole raw', raw);
           _armStdoutProbe(raw);
-          _terminal.writeStdin(sessionId, raw);
+          unawaited(_writeStdinSafe(sessionId, raw));
         }
       }
       return;
