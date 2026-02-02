@@ -13,3 +13,6 @@ wormhole/target/
 # Docker
 docker-compose.yaml
 !docker-compose.yaml.example
+
+.claude
+.ufoo
