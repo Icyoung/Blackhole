@@ -646,6 +646,9 @@ class _SettingsPageState extends State<SettingsPage> {
       );
       final path = _extractFolderPath(result);
       if (path == null || path.isEmpty) {
+        if (result == true || (result is Map && result['granted'] == true)) {
+          await _loadFolderBookmarks();
+        }
         return;
       }
       if (!_allowedFolders.contains(path)) {
