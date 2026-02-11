@@ -9,6 +9,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:voyager_share/voyager_share.dart' show buildTerminalStyle;
+import 'package:voyager_share/src/services/pinyin_engine.dart';
+import 'package:voyager_share/src/widgets/keyboard/candidate_bar.dart';
 import 'package:xterm/xterm.dart';
 
 import '../models/terminal_group.dart';
@@ -50,7 +52,6 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
 
   bool _connected = false;
   bool _autoReconnect = true;
-  bool _chromeHidden = false;
   bool _useWormhole = false;
   bool _showKeyboardTools = true;
   bool _showHHKB = false;
@@ -59,9 +60,12 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   double _quickBarHeight = 0;
   static const double _hhkbKeyboardHeight = 250; // 5*42 + 4*6 + 16 padding
 
+  static const double _candidateBarHeight = 40;
+
   double get _bottomBarHeight =>
       (_showKeyboardTools ? _quickBarHeight : 0) +
-      (_showHHKB ? _hhkbKeyboardHeight : 0);
+      (_showHHKB ? _hhkbKeyboardHeight : 0) +
+      (_showHHKB && _chineseMode && _pinyinEngine.hasInput ? _candidateBarHeight : 0);
   double _lastMetricsInsetsBottom = 0;
   Size _lastMetricsSize = Size.zero;
 
@@ -73,6 +77,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   bool _ctrl = false;
   bool _alt = false;
   bool _meta = false;
+  bool _chineseMode = false;
+  final PinyinEngine _pinyinEngine = PinyinEngine();
   bool _dragging = false;
   String? _dragTargetSessionId;
 
@@ -208,11 +214,13 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       sendCommand: _connectionManager.sendCommand,
     );
     unawaited(_groupStore.loadLocalOrder());
+    _pinyinEngine.addListener(_onPinyinChanged);
     _urlController.addListener(_handleAddressChange);
     _wormholeController.addListener(_handleAddressChange);
     _sessionController.addListener(_saveSettings);
     _tokenController.addListener(_saveSettings);
     _loadSettings();
+    _pinyinEngine.loadDict();
   }
 
   Future<void> _loadSettings() async {
@@ -241,6 +249,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       _multiWindow = prefs.getBool('multiWindow') ?? false;
       _showKeyboardTools = prefs.getBool('showKeyboardTools') ?? true;
       _showHHKB = prefs.getBool('showHHKB') ?? false;
+      _chineseMode = prefs.getBool('chineseMode') ?? false;
       _deviceKey = prefs.getString('deviceKey');
       _deviceName = deviceName;
       _horizonPublicKey = prefs.getString('horizonPublicKey');
@@ -416,6 +425,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     await prefs.setBool('multiWindow', _multiWindow);
     await prefs.setBool('showKeyboardTools', _showKeyboardTools);
     await prefs.setBool('showHHKB', _showHHKB);
+    await prefs.setBool('chineseMode', _chineseMode);
     if (_deviceKey != null) {
       await prefs.setString('deviceKey', _deviceKey!);
     }
@@ -426,6 +436,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   void dispose() {
     _connectionManager.disconnect(shouldReconnect: false);
     WidgetsBinding.instance.removeObserver(this);
+    _pinyinEngine.removeListener(_onPinyinChanged);
+    _pinyinEngine.dispose();
     _urlController.removeListener(_handleAddressChange);
     _wormholeController.removeListener(_handleAddressChange);
     _sessionController.removeListener(_saveSettings);
@@ -470,8 +482,13 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     _saveSettings();
   }
 
+  void _onPinyinChanged() {
+    if (mounted) setState(() {});
+  }
+
   void _handleDisconnected() {
     _groupStore.onDisconnected();
+    _pinyinEngine.clear();
     _remoteDeviceName = null;
     _sessions.clear();
     _syncedSessions.clear();
@@ -724,6 +741,11 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       }
       return;
     }
+    // Commit pending pinyin when switching tabs
+    if (_chineseMode && _pinyinEngine.hasInput) {
+      final raw = _pinyinEngine.commitRaw();
+      _sendRaw(raw);
+    }
     // Request sync for this session if not already synced
     _requestSyncIfNeeded(sessionId);
     setState(() {
@@ -814,6 +836,74 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       return;
     }
     _connectionManager.sendResize(sessionId, cols, rows);
+  }
+
+  bool _handlePinyinKey(String key, {required bool isSpecial}) {
+    // Letter keys -> add to pinyin buffer
+    if (!isSpecial && key.length == 1 && RegExp(r'[a-zA-Z]').hasMatch(key)) {
+      _pinyinEngine.addChar(key);
+      return true;
+    }
+    // Space -> select first candidate
+    if (key == ' ') {
+      if (_pinyinEngine.candidates.isNotEmpty) {
+        final selected = _pinyinEngine.select(0);
+        if (selected != null) _sendRaw(selected);
+      } else if (_pinyinEngine.hasInput) {
+        // No candidates: commit raw buffer
+        final raw = _pinyinEngine.commitRaw();
+        _sendRaw(raw);
+      } else {
+        // Empty buffer: send space normally
+        _sendRaw(' ');
+      }
+      return true;
+    }
+    // Number keys 1-9 -> select candidate
+    if (key.length == 1 && key.codeUnitAt(0) >= 49 && key.codeUnitAt(0) <= 57) {
+      final index = key.codeUnitAt(0) - 49; // '1' -> 0, '9' -> 8
+      if (_pinyinEngine.hasInput && index < _pinyinEngine.candidates.length) {
+        final selected = _pinyinEngine.select(index);
+        if (selected != null) _sendRaw(selected);
+      } else {
+        // No pinyin input or out of range: send number normally
+        if (_pinyinEngine.hasInput) {
+          final raw = _pinyinEngine.commitRaw();
+          _sendRaw(raw);
+        }
+        _sendRaw(key);
+      }
+      return true;
+    }
+    // Backspace (\x7f) -> delete from buffer or send through
+    if (key == '\x7f') {
+      if (_pinyinEngine.hasInput) {
+        _pinyinEngine.backspace();
+      } else {
+        _sendRaw(key);
+      }
+      return true;
+    }
+    // Enter -> commit candidate/raw but do not send newline if composing
+    if (key == '\r') {
+      if (_pinyinEngine.hasInput) {
+        if (_pinyinEngine.candidates.isNotEmpty) {
+          final selected = _pinyinEngine.select(0);
+          if (selected != null) _sendRaw(selected);
+        } else {
+          final raw = _pinyinEngine.commitRaw();
+          _sendRaw(raw);
+        }
+        return true;
+      }
+      return false;
+    }
+    // Punctuation and other keys -> commit buffer then send
+    if (_pinyinEngine.hasInput) {
+      final raw = _pinyinEngine.commitRaw();
+      _sendRaw(raw);
+    }
+    return false;
   }
 
   void _sendRaw(String data) {
@@ -964,8 +1054,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     final deleteDetection =
         !kIsWeb && (Platform.isAndroid || Platform.isIOS);
     // connectionContent: 32 + 16(padding) = 48, tab栏: 36 + 2(padding) = 38
-    final terminalTopInset =
-        _chromeHidden ? (_visibleSessions.length <= 1 ? 0 : 38) : 48 + 38;
+    const terminalTopInset = 48 + 38;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -1155,8 +1244,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
               ),
             ),
           ),
-          if (!_chromeHidden)
-            Positioned(
+          Positioned(
               top: MediaQuery.of(context).padding.top + 86,
               left: 0,
               right: 0,
@@ -1181,18 +1269,11 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
             left: 0,
             right: 0,
             child: HeaderChrome(
-              hidden: _chromeHidden,
               color: barColor,
               activeColor: activeColor,
               overlayColor: overlayColor,
               error: _error,
               pairingPending: _pairingPending,
-              onToggle: () {
-                setState(() {
-                  _chromeHidden = !_chromeHidden;
-                });
-                _scheduleActiveResize();
-              },
               onAddSession: _sendCreateSession,
               sessions: _visibleSessions,
               activeSessionId: _activeSessionId,
@@ -1238,13 +1319,40 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                             )
                             : const SizedBox.shrink(),
                   ),
+                  if (_showHHKB && _chineseMode && _pinyinEngine.hasInput)
+                    CandidateBar(
+                      pinyin: _pinyinEngine.displayPinyin,
+                      candidates: _pinyinEngine.candidates,
+                      onSelect: (index) {
+                        final selected = _pinyinEngine.select(index);
+                        if (selected != null) _sendRaw(selected);
+                      },
+                    ),
                   if (_showHHKB)
                     HHKBKeyboard(
                       connected: _connected,
                       fn: _hhkbFn,
                       ctrl: _ctrl,
                       alt: _alt,
+                      chineseMode: _chineseMode,
+                      onToggleChineseMode: () {
+                        // Commit any pending pinyin before toggling
+                        if (_chineseMode && _pinyinEngine.hasInput) {
+                          final raw = _pinyinEngine.commitRaw();
+                          _sendRaw(raw);
+                        }
+                        setState(() => _chineseMode = !_chineseMode);
+                        _saveSettings();
+                      },
+                      onScrollToBottom: _scrollToBottom,
                       onKey: (key, {bool isSpecial = false}) {
+                        if (_chineseMode && !_ctrl && !_alt) {
+                          final consumed =
+                              _handlePinyinKey(key, isSpecial: isSpecial);
+                          if (consumed) {
+                            return;
+                          }
+                        }
                         if (_ctrl && !isSpecial) {
                           _sendCtrl(key);
                         } else if (_alt && !isSpecial) {

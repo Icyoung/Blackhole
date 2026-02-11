@@ -14,16 +14,22 @@ class HHKBKeyboard extends StatefulWidget {
     required this.onFnChanged,
     required this.onToggleCtrl,
     required this.onToggleAlt,
+    this.chineseMode = false,
+    this.onToggleChineseMode,
+    this.onScrollToBottom,
   });
 
   final bool connected;
   final bool fn;
   final bool ctrl;
   final bool alt;
+  final bool chineseMode;
   final void Function(String key, {bool isSpecial}) onKey;
   final void Function(bool fn) onFnChanged;
   final VoidCallback onToggleCtrl;
   final VoidCallback onToggleAlt;
+  final VoidCallback? onToggleChineseMode;
+  final VoidCallback? onScrollToBottom;
 
   @override
   State<HHKBKeyboard> createState() => _HHKBKeyboardState();
@@ -33,6 +39,8 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
   // Shift states: 0=off, 1=once (next char), 2=locked (caps)
   int _shiftState = 0;
   DateTime? _lastShiftTap;
+  DateTime? _lastFnTap;
+  bool _fnLocked = false;
 
   static const _bgColor = Color(0xFF1A1A1A);
 
@@ -59,9 +67,28 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
     }
 
     // Auto-return from Fn layer
-    if (widget.fn) {
+    if (widget.fn && !_fnLocked) {
       widget.onFnChanged(false);
     }
+  }
+
+  void _onFnTap() {
+    final now = DateTime.now();
+    if (_lastFnTap != null &&
+        now.difference(_lastFnTap!).inMilliseconds < 300) {
+      // Double tap -> lock/unlock Fn
+      setState(() => _fnLocked = !_fnLocked);
+      widget.onFnChanged(_fnLocked);
+      _lastFnTap = null;
+      return;
+    }
+    _lastFnTap = now;
+    if (_fnLocked) {
+      setState(() => _fnLocked = false);
+      widget.onFnChanged(false);
+      return;
+    }
+    widget.onFnChanged(!widget.fn);
   }
 
   bool get _shift => _shiftState > 0;
@@ -116,7 +143,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
   Widget _buildRow3() {
     List<String> keys;
     if (widget.fn) {
-      keys = ['Hom', '◀W', 'PgU', 'PgD', 'W▶', 'End', '|', ';', ':', ',', '"'];
+      keys = ['Home', '↑', 'PgU', 'PgD', '↓', 'End', '←', '→', '|', ';', ':'];
     } else {
       final letters = ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'];
       keys = [
@@ -137,7 +164,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
       return Row(
         children: [
           _shiftKey(flex: 12, enabled: false),
-          ...['Stop', 'Susp', 'EOF', 'Clr', 'Kill', 'W⌫', 'Yank', '?']
+          ...['Stop', 'Susp', 'EOF', 'Clr', 'Kill', 'W⌫', 'Yank', 'Bot']
               .map((k) => _key(k, flex: 10)),
           _key('⌦', flex: 12),
         ],
@@ -157,16 +184,23 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
     }
   }
 
-  // Row 5: Fn Ctrl Alt [Space] Esc ⏎
+  // Row 5: Fn Ctrl Alt 🌐 [Space] Esc ⏎
   Widget _buildBottomRow() {
     return Row(
       children: [
         _fnKey(flex: 7),
         _modKey('Ctrl', widget.ctrl, widget.onToggleCtrl, flex: 7),
         _modKey('Alt', widget.alt, widget.onToggleAlt, flex: 6),
-        _spaceKey(flex: 28),
+        if (widget.onToggleChineseMode != null)
+          _modKey(
+            widget.chineseMode ? '中' : 'EN',
+            widget.chineseMode,
+            widget.onToggleChineseMode!,
+            flex: 5,
+          ),
+        _spaceKey(flex: widget.onToggleChineseMode != null ? 23 : 28),
         _key('Esc', flex: 7),
-        _key('⏎', flex: 10),
+        _key('↵', flex: 10),
       ],
     );
   }
@@ -212,9 +246,9 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
         child: HHKBKey(
           label: 'Fn',
           enabled: true,
-          active: widget.fn,
+          active: widget.fn || _fnLocked,
           isModifier: true,
-          onTap: () => widget.onFnChanged(!widget.fn),
+          onTap: _onFnTap,
           fontSize: 11,
         ),
       ),
@@ -255,7 +289,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
     } else if (label == 'Tab') {
       output = '\t';
       isSpecialKey = true;
-    } else if (label == '⏎') {
+    } else if (label == '↵' || label == '⏎') {
       output = '\r';
       isSpecialKey = true;
     } else if (label == '⌫') {
@@ -266,11 +300,23 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
       isSpecialKey = true;
     }
     // Fn layer navigation
-    else if (label == 'Hom') {
+    else if (label == 'Home') {
       output = '\x1b[H';
       isSpecialKey = true;
     } else if (label == 'End') {
       output = '\x1b[F';
+      isSpecialKey = true;
+    } else if (label == '↑') {
+      output = '\x1b[A';
+      isSpecialKey = true;
+    } else if (label == '↓') {
+      output = '\x1b[B';
+      isSpecialKey = true;
+    } else if (label == '←') {
+      output = '\x1b[D';
+      isSpecialKey = true;
+    } else if (label == '→') {
+      output = '\x1b[C';
       isSpecialKey = true;
     } else if (label == '◀W') {
       output = '\x1bb'; // Alt+B
@@ -308,6 +354,14 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
       output = '\x19'; // Ctrl+Y
       isSpecialKey = true;
     }
+    // Scroll to bottom (UI action)
+    else if (label == 'Bot') {
+      if (widget.onScrollToBottom != null) {
+        return _actionKey(label, widget.onScrollToBottom!, flex: flex);
+      }
+      output = '\x1b[F';
+      isSpecialKey = true;
+    }
     // Letters with shift
     else if (label.length == 1) {
       final code = label.codeUnitAt(0);
@@ -325,6 +379,26 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
           label: label,
           enabled: widget.connected && output.isNotEmpty,
           onTap: () => _onKeyTap(output, isSpecial: isSpecialKey),
+          fontSize: label.length > 3 ? 9.0 : (label.length > 2 ? 10.0 : 13.0),
+        ),
+      ),
+    );
+  }
+
+  Widget _actionKey(String label, VoidCallback onTap, {int flex = 1}) {
+    return Expanded(
+      flex: flex,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 2.5),
+        child: HHKBKey(
+          label: label,
+          enabled: widget.connected,
+          onTap: () {
+            onTap();
+            if (widget.fn && !_fnLocked) {
+              widget.onFnChanged(false);
+            }
+          },
           fontSize: label.length > 3 ? 9.0 : (label.length > 2 ? 10.0 : 13.0),
         ),
       ),
