@@ -19,7 +19,19 @@ class WsServer {
       return;
     }
     _server = await HttpServer.bind(InternetAddress.anyIPv4, port);
-    _server!.transform(WebSocketTransformer()).listen((socket) {
+    _server!.listen((request) async {
+      // Only accept WebSocket upgrades on /ws path
+      if (request.uri.path != '/ws') {
+        request.response.statusCode = HttpStatus.notFound;
+        await request.response.close();
+        return;
+      }
+      if (!WebSocketTransformer.isUpgradeRequest(request)) {
+        request.response.statusCode = HttpStatus.badRequest;
+        await request.response.close();
+        return;
+      }
+      final socket = await WebSocketTransformer.upgrade(request);
       if (_pingInterval != null) {
         socket.pingInterval = _pingInterval;
       }

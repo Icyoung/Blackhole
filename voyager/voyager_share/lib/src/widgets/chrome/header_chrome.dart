@@ -1,16 +1,13 @@
 import 'package:flutter/material.dart';
 
-import 'chrome_tab_button.dart';
 import 'chrome_tab_pill.dart';
 
 class HeaderChrome extends StatelessWidget {
   const HeaderChrome({
     super.key,
-    required this.hidden,
     required this.color,
     required this.activeColor,
     required this.overlayColor,
-    required this.onToggle,
     required this.onAddSession,
     required this.sessions,
     required this.activeSessionId,
@@ -18,18 +15,18 @@ class HeaderChrome extends StatelessWidget {
     required this.onSelectSession,
     required this.onCloseSession,
     required this.onReorderSessions,
-    required this.connectionContent,
+    this.connectionContent,
     required this.error,
     required this.pairingPending,
     this.pairingTitle = 'Waiting for host approval...',
     this.pairingSubtitle = 'Please check the Horizon app on your computer',
+    this.leadingWidget,
+    this.trailingWidget,
   });
 
-  final bool hidden;
   final Color color;
   final Color activeColor;
   final Color overlayColor;
-  final VoidCallback onToggle;
   final VoidCallback onAddSession;
   final List<String> sessions;
   final String? activeSessionId;
@@ -37,29 +34,31 @@ class HeaderChrome extends StatelessWidget {
   final void Function(String id) onSelectSession;
   final void Function(String id) onCloseSession;
   final void Function(int oldIndex, int newIndex) onReorderSessions;
-  final Widget connectionContent;
+  final Widget? connectionContent;
   final String? error;
   final bool pairingPending;
   final String pairingTitle;
   final String pairingSubtitle;
+  final Widget? leadingWidget;
+  final Widget? trailingWidget;
 
   @override
   Widget build(BuildContext context) {
     final topInset = MediaQuery.of(context).padding.top;
-    final hasMultipleSessions = sessions.length > 1;
-    final showTabs = !hidden || hasMultipleSessions;
+    final hasTopContent =
+        connectionContent != null || pairingPending || error != null;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (!hidden)
+        if (hasTopContent)
           Container(
             color: color,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 SizedBox(height: topInset),
-                connectionContent,
+                if (connectionContent != null) connectionContent!,
                 if (pairingPending)
                   Padding(
                     padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
@@ -67,11 +66,11 @@ class HeaderChrome extends StatelessWidget {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 12, vertical: 10),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF4B7AA6)
+                        color: const Color(0xFF9AA0A6)
                             .withValues(alpha: 0.1),
                         borderRadius: BorderRadius.circular(6),
                         border: Border.all(
-                            color: const Color(0xFF4B7AA6)
+                            color: const Color(0xFF9AA0A6)
                                 .withValues(alpha: 0.2)),
                       ),
                       child: Row(
@@ -81,7 +80,7 @@ class HeaderChrome extends StatelessWidget {
                             height: 14,
                             child: CircularProgressIndicator(
                               strokeWidth: 2,
-                              color: Color(0xFF4B7AA6),
+                              color: Color(0xFF9AA0A6),
                             ),
                           ),
                           const SizedBox(width: 10),
@@ -92,7 +91,7 @@ class HeaderChrome extends StatelessWidget {
                                 Text(
                                   pairingTitle,
                                   style: const TextStyle(
-                                    color: Color(0xFF4B7AA6),
+                                    color: Color(0xFF9AA0A6),
                                     fontSize: 12,
                                     fontWeight: FontWeight.w500,
                                   ),
@@ -146,72 +145,63 @@ class HeaderChrome extends StatelessWidget {
             ),
           ),
         Container(
-          color: showTabs ? color : Colors.transparent,
-          padding: EdgeInsets.only(top: hidden ? topInset : 0, bottom: 2),
+          color: color,
+          padding: EdgeInsets.only(top: (hasTopContent ? 0 : topInset) + 6),
           child: Row(
             children: [
-              if (showTabs)
-                Expanded(
-                  child: SizedBox(
-                    height: 36,
-                    child: Row(
-                      children: [
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: ReorderableListView.builder(
-                            scrollDirection: Axis.horizontal,
-                            buildDefaultDragHandles: false,
-                            proxyDecorator: (child, index, animation) {
-                              return Material(
-                                color: Colors.transparent,
-                                elevation: 4,
-                                shadowColor: Colors.black54,
-                                child: child,
-                              );
-                            },
-                            onReorder: onReorderSessions,
-                            itemCount: sessions.length,
-                            itemBuilder: (context, index) {
-                              final sessionId = sessions[index];
-                              return ReorderableDragStartListener(
-                                key: ValueKey(sessionId),
-                                index: index,
-                                child: ChromeTabPill(
-                                  label: _labelForSession(sessionId, index),
-                                  active: sessionId == activeSessionId,
-                                  onTap: () => onSelectSession(sessionId),
-                                  onClose: () => onCloseSession(sessionId),
-                                  color: activeColor,
-                                  overlayColor: overlayColor,
-                                  width: _tabWidthForCount(
-                                    MediaQuery.of(context).size.width,
-                                    sessions.length,
-                                  ),
+              Expanded(
+                child: SizedBox(
+                  height: 28,
+                  child: Row(
+                    children: [
+                      if (leadingWidget != null) leadingWidget!,
+                      Expanded(
+                        child: ReorderableListView.builder(
+                          scrollDirection: Axis.horizontal,
+                          buildDefaultDragHandles: false,
+                          proxyDecorator: (child, index, animation) {
+                            return Material(
+                              color: Colors.transparent,
+                              elevation: 4,
+                              shadowColor: Colors.black54,
+                              child: child,
+                            );
+                          },
+                          onReorder: onReorderSessions,
+                          itemCount: sessions.length,
+                          itemBuilder: (context, index) {
+                            final sessionId = sessions[index];
+                            return ReorderableDragStartListener(
+                              key: ValueKey(sessionId),
+                              index: index,
+                              child: ChromeTabPill(
+                                label: _labelForSession(sessionId, index),
+                                active: sessionId == activeSessionId,
+                                onTap: () => onSelectSession(sessionId),
+                                onClose: () => onCloseSession(sessionId),
+                                color: activeColor,
+                                overlayColor: overlayColor,
+                                width: _tabWidthForCount(
+                                  MediaQuery.of(context).size.width,
+                                  sessions.length,
                                 ),
-                              );
-                            },
-                          ),
+                              ),
+                            );
+                          },
                         ),
-                        ChromeTabButton(
-                          icon: Icons.add,
-                          onTap: onAddSession,
-                          color: activeColor,
-                          overlayColor: overlayColor,
-                          inverted: true,
-                        ),
-                      ],
-                    ),
+                      ),
+                      _CircleIconButton(
+                        icon: Icons.add,
+                        onTap: onAddSession,
+                      ),
+                    ],
                   ),
-                )
-              else
-                const Spacer(),
-              ChromeTabButton(
-                icon:
-                    hidden ? Icons.keyboard_arrow_down : Icons.keyboard_arrow_up,
-                onTap: onToggle,
-                color: activeColor,
-                overlayColor: overlayColor,
+                ),
               ),
+              if (trailingWidget != null) ...[
+                trailingWidget!,
+                const SizedBox(width: 4),
+              ],
             ],
           ),
         ),
@@ -225,6 +215,59 @@ class HeaderChrome extends StatelessWidget {
       return 'TERM ${index + 1}';
     }
     return label;
+  }
+}
+
+class _CircleIconButton extends StatefulWidget {
+  const _CircleIconButton({required this.icon, required this.onTap});
+
+  final IconData icon;
+  final VoidCallback onTap;
+
+  @override
+  State<_CircleIconButton> createState() => _CircleIconButtonState();
+}
+
+class _CircleIconButtonState extends State<_CircleIconButton> {
+  bool _hovered = false;
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color bg;
+    if (_pressed) {
+      bg = Colors.white.withValues(alpha: 0.15);
+    } else if (_hovered) {
+      bg = Colors.white.withValues(alpha: 0.08);
+    } else {
+      bg = Colors.transparent;
+    }
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() {
+        _hovered = false;
+        _pressed = false;
+      }),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (_) => setState(() => _pressed = true),
+        onTapUp: (_) => setState(() => _pressed = false),
+        onTapCancel: () => setState(() => _pressed = false),
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          width: 24,
+          height: 24,
+          margin: const EdgeInsets.symmetric(horizontal: 4),
+          decoration: BoxDecoration(
+            color: bg,
+            shape: BoxShape.circle,
+          ),
+          child: Center(child: Icon(widget.icon, color: Colors.white54, size: 14)),
+        ),
+      ),
+    );
   }
 }
 

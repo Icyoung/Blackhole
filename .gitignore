@@ -4,7 +4,7 @@ internal/
 xterm/
 
 # Rust build artifacts
-wormhole/target/
+**/target/
 
 # Environment files
 .env
@@ -14,5 +14,6 @@ wormhole/target/
 docker-compose.yaml
 !docker-compose.yaml.example
 
-.claude
+# Ufoo
 .ufoo
+.claude

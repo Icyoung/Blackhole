@@ -18,6 +18,10 @@ dependencies:
   cryptography: ^2.7.0
   google_fonts: ^6.2.1
 
+flutter:
+  assets:
+    - assets/pinyin_dict.json
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

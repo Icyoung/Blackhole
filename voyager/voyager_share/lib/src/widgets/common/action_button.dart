@@ -26,7 +26,7 @@ class ActionButton extends StatelessWidget {
     if (modifier) {
       bgColor = active ? const Color(0xFF284058) : const Color(0xFF141B24);
       borderColor =
-          active ? const Color(0xFF4B7AA6) : const Color(0xFF223042);
+          active ? const Color(0xFF9AA0A6) : const Color(0xFF223042);
     } else {
       bgColor = enabled ? const Color(0xFF1B2430) : const Color(0xFF0E131A);
       borderColor =

@@ -145,7 +145,7 @@ class _GroupDrawerState extends State<GroupDrawer> {
                   padding: const EdgeInsets.fromLTRB(16, 16, 8, 8),
                   child: Row(
                     children: [
-                      const Icon(Icons.folder_outlined, color: Color(0xFF4B7AA6), size: 20),
+                      const Icon(Icons.folder_outlined, color: Color(0xFF9AA0A6), size: 20),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
@@ -309,12 +309,12 @@ class _GroupDrawerState extends State<GroupDrawer> {
                                 child: Row(
                                   mainAxisAlignment: MainAxisAlignment.center,
                                   children: [
-                                    Icon(Icons.add, color: Color(0xFF4B7AA6), size: 20),
+                                    Icon(Icons.add, color: Color(0xFF9AA0A6), size: 20),
                                     SizedBox(width: 8),
                                     Text(
                                       'Add Group',
                                       style: TextStyle(
-                                        color: Color(0xFF4B7AA6),
+                                        color: Color(0xFF9AA0A6),
                                         fontSize: 14,
                                         fontWeight: FontWeight.w500,
                                       ),
@@ -401,12 +401,12 @@ class _GroupSection extends StatelessWidget {
     final headerColor = isDragOver
         ? const Color(0xFF1A3A2A)
         : isActive
-            ? const Color(0xFF1A2A3A)
+            ? const Color(0xFF2D2E30)
             : const Color(0xFF121824);
     final borderColor = isDragOver
         ? const Color(0xFF4BA66B)
         : isActive
-            ? const Color(0xFF4B7AA6)
+            ? const Color(0xFF9AA0A6)
             : Colors.white.withValues(alpha: 0.08);
 
     // The group content widget
@@ -497,7 +497,7 @@ class _GroupSection extends StatelessWidget {
 
   Widget _buildHeader(bool isEditingThisGroup, String label) {
     final addColor =
-        isEditingThisGroup ? Colors.white24 : const Color(0xFF4B7AA6);
+        isEditingThisGroup ? Colors.white24 : const Color(0xFF9AA0A6);
     final headerWidget = Material(
       type: MaterialType.transparency,
       child: InkWell(
@@ -625,7 +625,7 @@ class _SessionTile extends StatelessWidget {
         leading: Icon(
           Icons.circle,
           size: 8,
-          color: active ? const Color(0xFF4B7AA6) : Colors.white24,
+          color: active ? const Color(0xFF9AA0A6) : Colors.white24,
         ),
         title: GestureDetector(
           onDoubleTap: onDoubleTap,
@@ -658,7 +658,7 @@ class _SessionTile extends StatelessWidget {
           width: 200,
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           decoration: BoxDecoration(
-            color: const Color(0xFF1A2A3A),
+            color: const Color(0xFF2D2E30),
             borderRadius: BorderRadius.circular(8),
             boxShadow: [
               BoxShadow(
@@ -671,7 +671,7 @@ class _SessionTile extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.terminal, size: 16, color: Color(0xFF4B7AA6)),
+              const Icon(Icons.terminal, size: 16, color: Color(0xFF9AA0A6)),
               const SizedBox(width: 8),
               Flexible(
                 child: Text(

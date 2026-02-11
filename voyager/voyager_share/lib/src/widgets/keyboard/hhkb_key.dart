@@ -31,7 +31,7 @@ class _HHKBKeyState extends State<HHKBKey> {
   static const _keyColor = Color(0xFF2D2D2D);
   static const _keyPressedColor = Color(0xFF1A1A1A);
   static const _keyBorder = Color(0xFF3D3D3D);
-  static const _modActiveColor = Color(0xFF4B7AA6);
+  static const _modActiveColor = Color(0xFF9AA0A6);
   static const _modPressedColor = Color(0xFF3A6080);
 
   @override

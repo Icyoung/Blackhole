@@ -57,7 +57,7 @@ class SettingsDrawer extends StatelessWidget {
           children: [
             Row(
               children: [
-                const Icon(Icons.settings_outlined, color: Color(0xFF4B7AA6)),
+                const Icon(Icons.settings_outlined, color: Color(0xFF9AA0A6)),
                 const SizedBox(width: 12),
                 Text(
                   'VOYAGER SETTINGS',
@@ -161,7 +161,7 @@ class SettingsDrawer extends StatelessWidget {
     return Text(
       title.toUpperCase(),
       style: const TextStyle(
-        color: Color(0xFF4B7AA6),
+        color: Color(0xFF9AA0A6),
         fontSize: 11,
         fontWeight: FontWeight.bold,
         letterSpacing: 0.5,
@@ -218,7 +218,7 @@ class SettingsDrawer extends StatelessWidget {
       ),
       focusedBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(10),
-        borderSide: const BorderSide(color: Color(0xFF4B7AA6), width: 1.5),
+        borderSide: const BorderSide(color: Color(0xFF9AA0A6), width: 1.5),
       ),
     );
   }

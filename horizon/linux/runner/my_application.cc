@@ -1,5 +1,12 @@
 #include "my_application.h"
 
+#include <signal.h>
+#include <unistd.h>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <string>
+
 #include <flutter_linux/flutter_linux.h>
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
@@ -11,9 +18,117 @@
 struct _MyApplication {
   GtkApplication parent_instance;
   char** dart_entrypoint_arguments;
+  GtkWindow* window;
+  GtkStatusIcon* tray_icon;
+  GtkWidget* tray_menu;
+  gboolean allow_close;
 };
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
+
+static void show_main_window(MyApplication* self) {
+  if (self->window == nullptr) {
+    return;
+  }
+  gtk_widget_show(GTK_WIDGET(self->window));
+  gtk_window_present(self->window);
+}
+
+static void tray_menu_show(GtkMenuItem* /*menuitem*/, gpointer user_data) {
+  auto* self = MY_APPLICATION(user_data);
+  show_main_window(self);
+}
+
+static void tray_menu_quit(GtkMenuItem* /*menuitem*/, gpointer user_data) {
+  auto* self = MY_APPLICATION(user_data);
+  const char* home = g_get_home_dir();
+  if (home != nullptr) {
+    std::string pid_path = std::string(home) + "/.blackhole/horizon/daemon.pid";
+    std::ifstream pid_file(pid_path);
+    if (pid_file) {
+      std::string pid_text;
+      std::getline(pid_file, pid_text);
+      pid_t pid = static_cast<pid_t>(std::strtol(pid_text.c_str(), nullptr, 10));
+      if (pid > 0) {
+        kill(pid, SIGTERM);
+      }
+      std::remove(pid_path.c_str());
+    }
+  }
+  self->allow_close = TRUE;
+  if (self->window != nullptr) {
+    gtk_window_close(self->window);
+  }
+  g_application_quit(G_APPLICATION(self));
+}
+
+static void tray_icon_activate(GtkStatusIcon* /*status_icon*/, gpointer user_data) {
+  auto* self = MY_APPLICATION(user_data);
+  show_main_window(self);
+}
+
+static void tray_icon_popup_menu(GtkStatusIcon* status_icon,
+                                 guint button,
+                                 guint activate_time,
+                                 gpointer user_data) {
+  auto* self = MY_APPLICATION(user_data);
+  if (self->tray_menu == nullptr) {
+    return;
+  }
+  gtk_menu_popup(
+      GTK_MENU(self->tray_menu),
+      nullptr,
+      nullptr,
+      gtk_status_icon_position_menu,
+      status_icon,
+      button,
+      activate_time);
+}
+
+static gboolean window_delete_event(GtkWidget* widget, GdkEvent* /*event*/, gpointer user_data) {
+  auto* self = MY_APPLICATION(user_data);
+  if (self->allow_close) {
+    return FALSE;  // allow close
+  }
+  if (self->tray_icon == nullptr || !gtk_status_icon_is_embedded(self->tray_icon)) {
+    return FALSE;  // tray unavailable, allow close
+  }
+  gtk_widget_hide(widget);
+  return TRUE;  // prevent close (keep running)
+}
+
+static void ensure_tray(MyApplication* self) {
+  if (self->tray_icon != nullptr) {
+    return;
+  }
+  self->tray_icon = gtk_status_icon_new_from_file("resources/app_icon.png");
+  if (self->tray_icon == nullptr) {
+    // Fallback to a theme icon if the bundled icon can't be loaded.
+    self->tray_icon = gtk_status_icon_new_from_icon_name("utilities-terminal");
+  }
+  gtk_status_icon_set_tooltip_text(self->tray_icon, "Horizon");
+  gtk_status_icon_set_visible(self->tray_icon, TRUE);
+  g_signal_connect(self->tray_icon, "activate", G_CALLBACK(tray_icon_activate), self);
+  g_signal_connect(
+      self->tray_icon,
+      "popup-menu",
+      G_CALLBACK(tray_icon_popup_menu),
+      self);
+
+  self->tray_menu = gtk_menu_new();
+  GtkWidget* show_item = gtk_menu_item_new_with_label("Show Horizon");
+  g_signal_connect(show_item, "activate", G_CALLBACK(tray_menu_show), self);
+  gtk_menu_shell_append(GTK_MENU_SHELL(self->tray_menu), show_item);
+
+  GtkWidget* sep = gtk_separator_menu_item_new();
+  gtk_menu_shell_append(GTK_MENU_SHELL(self->tray_menu), sep);
+
+  GtkWidget* quit_item = gtk_menu_item_new_with_label("Quit");
+  g_signal_connect(quit_item, "activate", G_CALLBACK(tray_menu_quit), self);
+  gtk_menu_shell_append(GTK_MENU_SHELL(self->tray_menu), quit_item);
+
+  gtk_widget_show_all(self->tray_menu);
+}
 
 // Implements GApplication::activate.
 static void my_application_activate(GApplication* application) {
@@ -59,6 +174,11 @@ static void my_application_activate(GApplication* application) {
   } else {
     g_clear_error(&icon_error);
   }
+
+  self->window = window;
+  self->allow_close = FALSE;
+  g_signal_connect(window, "delete-event", G_CALLBACK(window_delete_event), self);
+  ensure_tray(self);
 
   gtk_widget_show(GTK_WIDGET(window));
 
@@ -120,6 +240,15 @@ static void my_application_shutdown(GApplication* application) {
 static void my_application_dispose(GObject* object) {
   MyApplication* self = MY_APPLICATION(object);
   g_clear_pointer(&self->dart_entrypoint_arguments, g_strfreev);
+  if (self->tray_menu != nullptr) {
+    gtk_widget_destroy(self->tray_menu);
+    self->tray_menu = nullptr;
+  }
+  if (self->tray_icon != nullptr) {
+    g_object_unref(self->tray_icon);
+    self->tray_icon = nullptr;
+  }
+  self->window = nullptr;
   G_OBJECT_CLASS(my_application_parent_class)->dispose(object);
 }
 
@@ -131,7 +260,13 @@ static void my_application_class_init(MyApplicationClass* klass) {
   G_OBJECT_CLASS(klass)->dispose = my_application_dispose;
 }
 
-static void my_application_init(MyApplication* self) {}
+static void my_application_init(MyApplication* self) {
+  self->dart_entrypoint_arguments = nullptr;
+  self->window = nullptr;
+  self->tray_icon = nullptr;
+  self->tray_menu = nullptr;
+  self->allow_close = FALSE;
+}
 
 MyApplication* my_application_new() {
   // Set the program name to the application ID, which helps various systems

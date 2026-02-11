@@ -36,7 +36,7 @@ class ChromeTabPill extends StatelessWidget {
         inverted: true,
         child: Container(
           width: width,
-          height: 36,
+          height: 28,
           padding: const EdgeInsets.symmetric(horizontal: 17),
           decoration: active
               ? BoxDecoration(

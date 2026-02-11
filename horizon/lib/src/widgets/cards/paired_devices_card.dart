@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 
+import '../../app.dart';
 import '../../controllers/horizon_controller.dart';
 import '../common/section_title.dart';
-import '../common/status_message.dart';
 
 class PairedDevicesCard extends StatelessWidget {
   const PairedDevicesCard({
@@ -32,10 +32,7 @@ class PairedDevicesCard extends StatelessWidget {
             const SizedBox(height: 16),
           ],
           if (devices.isEmpty)
-            const StatusMessage(
-              message: 'No paired devices. New devices will require approval.',
-              isError: false,
-            )
+            const _EmptyDevicesState()
           else
             ...devices.asMap().entries.map((entry) {
               final index = entry.key;
@@ -75,7 +72,45 @@ class PairedDevicesCard extends StatelessWidget {
   }
 }
 
-class DeviceListTile extends StatelessWidget {
+class _EmptyDevicesState extends StatelessWidget {
+  const _EmptyDevicesState();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 24),
+      width: double.infinity,
+      child: Column(
+        children: [
+          Icon(
+            Icons.devices_other,
+            size: 32,
+            color: HorizonColors.textMuted.withValues(alpha: 0.4),
+          ),
+          const SizedBox(height: 12),
+          const Text(
+            'No paired devices',
+            style: TextStyle(
+              color: HorizonColors.textTertiary,
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'New devices will require approval',
+            style: TextStyle(
+              color: HorizonColors.textMuted.withValues(alpha: 0.6),
+              fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class DeviceListTile extends StatefulWidget {
   const DeviceListTile({
     super.key,
     required this.device,
@@ -88,65 +123,99 @@ class DeviceListTile extends StatelessWidget {
   final bool flat;
 
   @override
-  Widget build(BuildContext context) {
-    final lastSeen = _formatLastSeen(device.lastSeenAt);
+  State<DeviceListTile> createState() => _DeviceListTileState();
+}
 
-    final icon = switch (device.deviceType) {
+class _DeviceListTileState extends State<DeviceListTile> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final lastSeen = _formatLastSeen(widget.device.lastSeenAt);
+
+    final icon = switch (widget.device.deviceType) {
       DeviceType.mobile => Icons.smartphone,
       DeviceType.desktop => Icons.computer,
       DeviceType.web => Icons.language,
       DeviceType.unknown => Icons.devices,
     };
 
-    final row = Row(
-      children: [
-        Icon(icon, size: 18, color: const Color(0xFF4B7AA6)),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                device.deviceName,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                'Last seen: $lastSeen',
-                style: const TextStyle(
-                  color: Color(0xFF9AA6B2),
-                  fontSize: 11,
-                ),
-              ),
-            ],
-          ),
-        ),
-        IconButton(
-          icon:
-              const Icon(Icons.delete_outline, size: 18, color: Color(0xFFFF5C5C)),
-          onPressed: onRemove,
-          tooltip: 'Remove device',
-        ),
-      ],
-    );
+    final iconColor = switch (widget.device.deviceType) {
+      DeviceType.mobile => const Color(0xFF5B9FE4),
+      DeviceType.desktop => HorizonColors.accent,
+      DeviceType.web => const Color(0xFFE4A55B),
+      DeviceType.unknown => HorizonColors.textMuted,
+    };
 
-    if (flat) {
-      return row;
-    }
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.2),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
+    final row = MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: widget.flat
+            ? EdgeInsets.zero
+            : const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: widget.flat
+            ? null
+            : BoxDecoration(
+                color: _hovered
+                    ? Colors.white.withValues(alpha: 0.04)
+                    : Colors.black.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(6),
+                border:
+                    Border.all(color: HorizonColors.borderSubtle),
+              ),
+        child: Row(
+          children: [
+            Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                color: iconColor.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Icon(icon, size: 16, color: iconColor),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    widget.device.deviceName,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Last seen: $lastSeen',
+                    style: const TextStyle(
+                      color: HorizonColors.textTertiary,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            AnimatedOpacity(
+              opacity: _hovered || widget.flat ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 150),
+              child: IconButton(
+                icon: const Icon(Icons.delete_outline,
+                    size: 18, color: HorizonColors.error),
+                onPressed: widget.onRemove,
+                tooltip: 'Remove device',
+              ),
+            ),
+          ],
+        ),
       ),
-      child: row,
     );
+
+    return row;
   }
 
   String _formatLastSeen(DateTime lastSeen) {

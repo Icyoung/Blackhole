@@ -20,6 +20,7 @@ class TerminalWindowCard extends StatefulWidget {
     this.showActiveShadow = true,
     this.showActiveChevron = true,
     this.showCloseButton = true,
+    this.showStatusDot = true,
     this.onTap,
     this.onClose,
   });
@@ -37,6 +38,7 @@ class TerminalWindowCard extends StatefulWidget {
   final bool showActiveShadow;
   final bool showActiveChevron;
   final bool showCloseButton;
+  final bool showStatusDot;
   final VoidCallback? onTap;
   final VoidCallback? onClose;
 
@@ -80,14 +82,14 @@ class _TerminalWindowCardState extends State<TerminalWindowCard>
           borderRadius: BorderRadius.circular(10),
           border: Border.all(
             color: widget.isActive
-                ? const Color(0xFF4B7AA6).withValues(alpha: 0.6)
+                ? const Color(0xFF9AA0A6).withValues(alpha: 0.6)
                 : Colors.white.withValues(alpha: 0.05),
             width: widget.isActive ? 1.5 : 1.0,
           ),
           boxShadow: [
             if (widget.isActive && widget.showActiveShadow)
               BoxShadow(
-                color: const Color(0xFF4B7AA6).withValues(alpha: 0.1),
+                color: const Color(0xFF9AA0A6).withValues(alpha: 0.1),
                 blurRadius: 10,
                 spreadRadius: 0,
               ),
@@ -102,7 +104,7 @@ class _TerminalWindowCardState extends State<TerminalWindowCard>
                   padding: const EdgeInsets.symmetric(horizontal: 10),
                   decoration: BoxDecoration(
                     color: widget.isActive
-                        ? const Color(0xFF1A2A3A).withValues(alpha: 0.4)
+                        ? const Color(0xFF2D2E30).withValues(alpha: 0.4)
                         : const Color(0xFF111620).withValues(alpha: 0.2),
                     borderRadius: const BorderRadius.only(
                       topLeft: Radius.circular(9),
@@ -111,8 +113,10 @@ class _TerminalWindowCardState extends State<TerminalWindowCard>
                   ),
                   child: Row(
                     children: [
-                      StatusDot(connected: widget.isActive, size: 6),
-                      const SizedBox(width: 8),
+                      if (widget.showStatusDot) ...[
+                        StatusDot(connected: widget.isActive, size: 6),
+                        const SizedBox(width: 8),
+                      ],
                       Expanded(
                         child: Text(
                           widget.label,
@@ -137,7 +141,7 @@ class _TerminalWindowCardState extends State<TerminalWindowCard>
                               const Icon(
                                 Icons.keyboard_arrow_right,
                                 size: 12,
-                                color: Color(0xFF4B7AA6),
+                                color: Color(0xFF9AA0A6),
                               ),
                               const SizedBox(width: 8),
                             ],
@@ -187,7 +191,7 @@ class _TerminalWindowCardState extends State<TerminalWindowCard>
               Positioned.fill(
                 child: Container(
                   decoration: BoxDecoration(
-                    color: Colors.blue.withValues(alpha: 0.15),
+                    color: const Color(0xFF9AA0A6).withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(10),
                   ),
                 ),

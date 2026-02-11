@@ -5,6 +5,7 @@ import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:window_manager/window_manager.dart';
 
 import '../app.dart';
 
@@ -634,8 +635,26 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> _addFolder() async {
     try {
-      final result = await _systemChannel.invokeMethod('requestFolderAccess');
-      if (result == true) {
+      final home = Platform.environment['HOME'] ?? '';
+      final initialPath =
+          _allowedFolders.isNotEmpty
+              ? _allowedFolders.last
+              : (home.isNotEmpty ? home : null);
+      final result = await _systemChannel.invokeMethod(
+        'requestFolderAccess',
+        initialPath != null ? {'initialPath': initialPath} : null,
+      );
+      final path = _extractFolderPath(result);
+      if (path == null || path.isEmpty) {
+        return;
+      }
+      if (!_allowedFolders.contains(path)) {
+        setState(() {
+          _allowedFolders.add(path);
+          _selectedFolderIndex = _allowedFolders.length - 1;
+        });
+        await _saveFolderBookmarks();
+      } else {
         await _loadFolderBookmarks();
       }
     } catch (e) {
@@ -652,6 +671,24 @@ class _SettingsPageState extends State<SettingsPage> {
       });
       _saveFolderBookmarks();
     }
+  }
+
+  String? _extractFolderPath(dynamic result) {
+    if (result is String) {
+      final trimmed = result.trim();
+      return trimmed.isEmpty ? null : trimmed;
+    }
+    if (result is Map) {
+      final path = result['path'];
+      if (path is String) {
+        final trimmed = path.trim();
+        return trimmed.isEmpty ? null : trimmed;
+      }
+      if (result['granted'] == true) {
+        return null;
+      }
+    }
+    return null;
   }
 
   // ===== Remote Tab =====
@@ -820,13 +857,20 @@ class _SettingsPageState extends State<SettingsPage> {
                       itemCount: _pairedDevices.length,
                       itemBuilder: (context, index) {
                         final device = _pairedDevices[index];
+                        final isSelected = _selectedDeviceIndex == index;
                         return ListTile(
                           dense: true,
+                          selected: isSelected,
+                          selectedTileColor:
+                              HorizonColors.accent.withValues(alpha: 0.08),
                           leading: Icon(
                             (device['deviceType'] as String?) == 'mobile'
                                 ? Icons.phone_iphone
                                 : Icons.desktop_mac,
-                            color: HorizonColors.textMuted,
+                            color:
+                                isSelected
+                                    ? HorizonColors.accent
+                                    : HorizonColors.textMuted,
                             size: 18,
                           ),
                           title: Text(
@@ -843,6 +887,7 @@ class _SettingsPageState extends State<SettingsPage> {
                               fontSize: 11,
                             ),
                           ),
+                          onTap: () => _selectDeviceForRemoval(index),
                         );
                       },
                     ),
@@ -856,6 +901,12 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   int? _selectedDeviceIndex;
+
+  void _selectDeviceForRemoval(int index) {
+    setState(() {
+      _selectedDeviceIndex = _selectedDeviceIndex == index ? null : index;
+    });
+  }
 
   void _removeSelectedDevice() {
     if (_selectedDeviceIndex != null &&
@@ -923,7 +974,7 @@ class _SettingsPageState extends State<SettingsPage> {
             _buildPrimaryButton('Connect', () {
               _saveSettings();
               // Close window - the main app will handle reconnection
-              Navigator.of(context).maybePop();
+              windowManager.close();
             }),
           ],
         ),

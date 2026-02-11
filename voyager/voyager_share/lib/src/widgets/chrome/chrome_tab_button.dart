@@ -27,7 +27,7 @@ class ChromeTabButton extends StatelessWidget {
       inverted: inverted,
       child: SizedBox(
         width: 48,
-        height: 36,
+        height: 28,
         child: Center(
           child: Icon(
             icon,

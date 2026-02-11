@@ -3,6 +3,7 @@
 
 #include <flutter/dart_project.h>
 #include <flutter/flutter_view_controller.h>
+#include <shellapi.h>
 
 #include <memory>
 
@@ -23,11 +24,29 @@ class FlutterWindow : public Win32Window {
                          LPARAM const lparam) noexcept override;
 
  private:
+  void EnsureTrayIcon();
+  void RemoveTrayIcon();
+ void HideToTray();
+ void ShowFromTray();
+ void ShowTrayMenu();
+ void RequestQuit();
+  void StopDaemonIfRunning();
+
+  static constexpr UINT kTrayCallbackMessage = WM_APP + 1;
+  static constexpr UINT kTrayMenuShow = 1001;
+  static constexpr UINT kTrayMenuQuit = 1002;
+
   // The project to run.
   flutter::DartProject project_;
 
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
+
+  bool tray_initialized_ = false;
+  bool tray_available_ = false;
+  bool allow_close_ = false;
+  NOTIFYICONDATAW tray_icon_data_ = {};
+  HMENU tray_menu_ = nullptr;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

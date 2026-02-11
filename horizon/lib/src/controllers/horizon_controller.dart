@@ -394,16 +394,37 @@ class HorizonController extends ChangeNotifier {
   Future<void> requestFolderAccess() async {
     final home = Platform.environment['HOME'] ?? '/';
     try {
-      final granted = await _systemChannel.invokeMethod<bool>('requestFolderAccess', {
-        'initialPath': home,
-      });
-      _accessMessage = granted == true
+      final result = await _systemChannel.invokeMethod<dynamic>(
+        'requestFolderAccess',
+        {'initialPath': home},
+      );
+      final granted = _folderAccessGranted(result);
+      _accessMessage = granted
           ? 'Folder access granted.'
           : 'Folder access denied.';
     } catch (error) {
       _accessMessage = 'Folder access failed: $error';
     }
     notifyListeners();
+  }
+
+  bool _folderAccessGranted(dynamic result) {
+    if (result is bool) {
+      return result;
+    }
+    if (result is String) {
+      return result.trim().isNotEmpty;
+    }
+    if (result is Map) {
+      if (result['granted'] == true) {
+        return true;
+      }
+      final path = result['path'];
+      if (path is String && path.trim().isNotEmpty) {
+        return true;
+      }
+    }
+    return false;
   }
 
   Future<void> start() async {

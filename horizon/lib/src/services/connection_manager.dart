@@ -42,6 +42,7 @@ class ConnectionManager {
     required this.onSessionCreated,
     required this.onSessionClosed,
     required this.onStdout,
+    this.onCwd,
     this.onSessionSync,
   });
 
@@ -54,11 +55,12 @@ class ConnectionManager {
   final void Function(Map<String, dynamic> payload) onGroupSync;
   final void Function(String message) onGroupError;
   final void Function({required bool approved, String? assignedKey})
-      onPairingResult;
+  onPairingResult;
   final void Function(List<String> sessions) onSessionList;
   final void Function(String sessionId) onSessionCreated;
   final void Function(String sessionId) onSessionClosed;
   final void Function(String sessionId, String text) onStdout;
+  final void Function(String sessionId, String cwd)? onCwd;
   final void Function(String sessionId, String content)? onSessionSync;
 
   WebSocketChannel? _channel;
@@ -87,6 +89,8 @@ class ConnectionManager {
   }) async {
     _shouldReconnect = true;
     _autoReconnect = autoReconnect;
+    // Auto-append /ws if not present
+    uri = _ensureWsPath(uri);
     _lastUri = uri;
     _lastWaitForPairing = waitForPairing;
     _resetConnectionState();
@@ -179,9 +183,7 @@ class ConnectionManager {
         cols & 0xFF,
       ]),
     );
-    debugPrint(
-      '[Voyager] resize session=$sessionId rows=$rows cols=$cols',
-    );
+    debugPrint('[Voyager] resize session=$sessionId rows=$rows cols=$cols');
     channel.sink.add(payload);
   }
 
@@ -277,6 +279,14 @@ class ConnectionManager {
       }
       return;
     }
+    if (type == 'cwd') {
+      final sessionId = decoded['sessionId'];
+      final cwd = decoded['cwd'];
+      if (sessionId is String && cwd is String) {
+        onCwd?.call(sessionId, cwd);
+      }
+      return;
+    }
     if (type == 'error') {
       final message = decoded['message'];
       if (message is String) {
@@ -292,9 +302,10 @@ class ConnectionManager {
     if (type == 'group_error') {
       final message = decoded['message'];
       final code = decoded['code'];
-      final text = message is String
-          ? message
-          : code is String
+      final text =
+          message is String
+              ? message
+              : code is String
               ? code
               : 'Unknown group error';
       onGroupError(text);
@@ -405,7 +416,9 @@ class ConnectionManager {
       return;
     }
     final sample = bytes.length > 64 ? bytes.sublist(0, 64) : bytes;
-    final hex = sample.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+    final hex = sample
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join(' ');
     debugPrint('[Voyager] stdout after delete bytes: $hex');
     _stdoutProbeArmed = false;
   }
@@ -449,14 +462,12 @@ class ConnectionManager {
     required Uint8List data,
   }) {
     final sessionBytes = utf8.encode(sessionId);
-    final buffer = BytesBuilder(copy: false)
-      ..add([1, type.code])
-      ..add([
-        (sessionBytes.length >> 8) & 0xFF,
-        sessionBytes.length & 0xFF,
-      ])
-      ..add(sessionBytes)
-      ..add(data);
+    final buffer =
+        BytesBuilder(copy: false)
+          ..add([1, type.code])
+          ..add([(sessionBytes.length >> 8) & 0xFF, sessionBytes.length & 0xFF])
+          ..add(sessionBytes)
+          ..add(data);
     return buffer.toBytes();
   }
 
@@ -509,5 +520,17 @@ class ConnectionManager {
       case _BinaryType.unknown:
         return {'type': 'unsupported', 'version': version};
     }
+  }
+
+  /// Ensures the URI has /ws path suffix for WebSocket connections.
+  /// Only adds /ws if path is empty or root (LAN mode).
+  /// For Wormhole URLs with existing paths (e.g., /host/ABC123), leaves unchanged.
+  Uri _ensureWsPath(Uri uri) {
+    final path = uri.path;
+    if (path.isEmpty || path == '/') {
+      return uri.replace(path: '/ws');
+    }
+    // Path already has content (e.g., Wormhole paths), don't modify
+    return uri;
   }
 }

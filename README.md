@@ -70,6 +70,24 @@ cd horizon
 flutter run -d macos  # or linux, windows
 ```
 
+#### Flutter as shell (external Rust core)
+
+If you run `horizon-daemon` as a separate process, start the Flutter app with `HORIZON_CORE=1` (or `--external-core`) so it won’t try to bind the host port itself.
+
+In shell mode, the host (Wormhole) settings in the Horizon panel are applied to the daemon; when they change, the app will request the daemon to restart to apply the new config.
+
+#### macOS: close-to-tray
+
+On macOS, clicking the window close button hides Horizon and keeps it running in the menu bar (use the menu bar item to show/quit).
+
+#### Windows/Linux: close-to-tray
+
+On Windows and Linux desktop builds, clicking the window close button hides Horizon and keeps it running in the system tray (right-click the tray icon to show/quit).
+
+#### Tray “Quit” stops the daemon
+
+If `horizon-daemon` is running, choosing **Quit** from the tray/menu-bar menu will also attempt to stop the daemon (via `~/.blackhole/horizon/daemon.pid`).
+
 ### 2. Run Voyager (Client)
 
 ```bash
@@ -83,6 +101,20 @@ flutter run -d ios     # or macos, android, chrome, linux, windows
 cd wormhole
 WORMHOLE_TOKEN=your-secret-token cargo run
 ```
+
+### 4. Run Horizon (Headless, no GUI) - Optional
+
+For servers without a desktop environment (e.g. Linux without GUI), you can run a headless host that speaks the same LAN WebSocket protocol:
+
+```bash
+cd horizon/daemon
+cargo run -- --bind 0.0.0.0 --port 9527
+```
+
+Notes:
+- The daemon is **single-instance** (uses `~/.blackhole/horizon/daemon.pid`).
+- Windows uses **ConPTY** (Windows 10+). If you don’t pass `--shell`, it defaults to `COMSPEC` (usually `cmd.exe`).
+- To stop the daemon locally, call `POST /shutdown` (loopback-only), e.g. `curl -X POST http://127.0.0.1:9527/shutdown`.
 
 ## Connection Modes
 
@@ -116,4 +148,3 @@ releasing your source code under GPL-3.0, you must obtain a
 commercial license.
 
 Contact: dev@blackhole-ai.com
-
