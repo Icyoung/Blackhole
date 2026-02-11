@@ -1,14 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:characters/characters.dart';
 import 'package:desktop_drop/desktop_drop.dart';
-import 'package:window_manager/window_manager.dart';
+import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:voyager_share/voyager_share.dart' show buildTerminalStyle;
 import 'package:xterm/xterm.dart';
@@ -17,18 +18,15 @@ import '../controllers/horizon_controller.dart';
 import '../models/dev_mode_config.dart';
 import '../models/terminal_group.dart';
 import '../services/connection_manager.dart';
+import '../services/daemon_manager.dart';
 import '../services/group_store.dart';
 import '../services/terminal_manager.dart';
 import '../services/terminal_service.dart';
-import '../widgets/add_terminal_card.dart';
-import '../widgets/chrome/header_chrome.dart';
-import '../widgets/common/status_dot.dart';
-import '../widgets/group_drawer.dart';
+import '../widgets/dialogs/pairing_dialog.dart';
 import '../widgets/keyboard/hhkb_keyboard.dart';
 import '../widgets/quick_actions_bar.dart';
-import '../widgets/settings_drawer.dart';
-import '../widgets/terminal_window_card.dart';
-import '../widgets/dialogs/pairing_dialog.dart';
+import '../widgets/session_card.dart';
+import '../app.dart';
 
 class HorizonHome extends StatefulWidget {
   const HorizonHome({super.key, required this.devModeConfig});
@@ -40,6 +38,12 @@ class HorizonHome extends StatefulWidget {
 }
 
 class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
+  static const _systemChannel = MethodChannel('com.blackhole/system');
+  static const _settingsChannel = WindowMethodChannel(
+    'com.blackhole/settings',
+    mode: ChannelMode.unidirectional,
+  );
+
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final GlobalKey _quickBarKey = GlobalKey();
   final TextEditingController _urlController = TextEditingController(
@@ -51,28 +55,41 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   final TextEditingController _sessionController = TextEditingController();
   final TextEditingController _tokenController = TextEditingController();
   Timer? _metricsDebounce;
+  Timer? _daemonPairingPoll;
+  Timer? _settingsDebounce;
 
   late final HorizonController _hostController;
+  final DaemonManager _daemonManager = DaemonManager();
   late final TextEditingController _hostWormholeUrlController;
   late final TextEditingController _hostWormholeTokenController;
   late final TextEditingController _hostCustomSessionController;
   bool _hostPairingDialogShown = false;
-  String? _remoteDeviceName;
 
   late final ConnectionManager _connectionManager;
   late final TerminalManager _terminalManager;
 
   bool _connected = false;
   bool _autoReconnect = true;
-  bool _chromeHidden = false;
   bool _useWormhole = false;
   bool _isHorizonMode = true; // true = Horizon (host), false = Voyager (client)
   bool _showKeyboardTools = true;
   bool _showHHKB = false;
   bool _hhkbFn = false;
   bool _multiWindow = false;
+  bool _showSidebar = false;
   double _quickBarHeight = 0;
   static const double _hhkbKeyboardHeight = 250; // 5*42 + 4*6 + 16 padding
+  final Set<String> _collapsedGroupIds = {};
+  String _sidebarSearchQuery = '';
+  String? _hoveredGroupId;
+  String? _hoveredSessionRowId;
+  String? _hoveredTabId;
+  final ScrollController _tabScrollController = ScrollController();
+  final ScrollController _groupScrollController = ScrollController();
+  bool _showTabLeftFade = false;
+  bool _showTabRightFade = false;
+  bool _showGroupTopFade = false;
+  bool _showGroupBottomFade = false;
 
   double get _bottomBarHeight =>
       (_showKeyboardTools ? _quickBarHeight : 0) +
@@ -94,6 +111,9 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   // GlobalKeys for terminal cards in multi-window mode (for hit testing)
   final Map<String, GlobalKey> _terminalCardKeys = {};
 
+  // Track settings window to prevent multiple instances
+  static WindowController? _settingsWindowController;
+
   String? _error;
 
   // Device pairing related state
@@ -104,8 +124,9 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
 
   // Local mode (Horizon) output subscription
   StreamSubscription<TerminalOutput>? _localOutputSub;
-  static const bool _logTerminalOutput =
-      bool.fromEnvironment('BH_LOG_TERMINAL_OUTPUT');
+  static const bool _logTerminalOutput = bool.fromEnvironment(
+    'BH_LOG_TERMINAL_OUTPUT',
+  );
   IOSink? _terminalOutputSink;
   String? _terminalOutputLogPath;
 
@@ -114,7 +135,14 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   final Map<String, String> _sessionCwds = {};
   static const Duration _cwdPollInterval = Duration(seconds: 2);
 
+  // Daemon status polling (for native/macOS settings driven daemon)
+  Timer? _daemonStatusPoll;
+  DaemonStatus? _daemonStatus;
+
   List<String> get _visibleSessions => _groupStore.activeGroupSessionIds;
+
+  // Daemon architecture: even in "server" mode we connect via WebSocket.
+  bool get _usingDirectLocalPty => false;
 
   @override
   void initState() {
@@ -160,12 +188,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
         });
       },
       onHostInfo: (hostName) {
-        if (!mounted) {
-          return;
-        }
-        setState(() {
-          _remoteDeviceName = hostName;
-        });
+        // Currently unused in UI; keep callback to avoid breaking protocol.
       },
       onError: (message) {
         if (!mounted) {
@@ -216,6 +239,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       onSessionCreated: _handleRemoteSessionCreated,
       onSessionClosed: _handleRemoteSessionClosed,
       onStdout: _handleStdout,
+      onCwd: _handleCwd,
       onSessionSync: _handleSessionSync,
     );
     _groupStore = GroupStore(
@@ -234,14 +258,281 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     );
     _hostCustomSessionController.addListener(_syncHostCustomSession);
     _hostController.addListener(_handleHostChange);
-    if (!_hostController.requiresDevModeConfirmation) {
-      _hostController.start();
-    }
     _urlController.addListener(_handleAddressChange);
     _wormholeController.addListener(_handleAddressChange);
     _sessionController.addListener(_saveSettings);
     _tokenController.addListener(_saveSettings);
+    _tabScrollController.addListener(_updateTabFades);
+    _groupScrollController.addListener(_updateGroupFades);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _updateTabFades();
+      _updateGroupFades();
+    });
+    _setupSystemChannel();
+    _setupSettingsChannel();
     _loadSettings();
+  }
+
+  void _setupSystemChannel() {
+    _systemChannel.setMethodCallHandler((call) async {
+      if (call.method == 'settingsChanged') {
+        _handleNativeSettingsChanged();
+      } else if (call.method == 'toggleMultiWindow') {
+        _toggleMultiWindow();
+      } else if (call.method == 'getMultiWindowState') {
+        return _multiWindow;
+      } else if (call.method == 'openSettings') {
+        _openSettings();
+      }
+      return null;
+    });
+  }
+
+  void _setupSettingsChannel() {
+    _settingsChannel.setMethodCallHandler((call) async {
+      if (call.method == 'settingsChanged') {
+        _handleNativeSettingsChanged();
+      }
+      return null;
+    });
+  }
+
+  Future<void> _openSettings() async {
+    if (!mounted) return;
+
+    // Check if settings window already exists
+    if (_settingsWindowController != null) {
+      try {
+        await _settingsWindowController!.show();
+        return;
+      } catch (_) {
+        // Window was closed, create a new one
+        _settingsWindowController = null;
+      }
+    }
+
+    final controller = await WindowController.create(
+      WindowConfiguration(hiddenAtLaunch: true, arguments: 'settings'),
+    );
+    _settingsWindowController = controller;
+  }
+
+  void _toggleMultiWindow() {
+    setState(() => _multiWindow = !_multiWindow);
+    _saveSettings();
+    _notifyNativeMultiWindowState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scheduleActiveResize();
+    });
+  }
+
+  Future<void> _notifyNativeMultiWindowState() async {
+    try {
+      await _systemChannel.invokeMethod('multiWindowChanged', _multiWindow);
+    } catch (e) {
+      // Ignore if native side isn't ready yet
+      debugPrint('[Horizon] Native multiWindowChanged not ready: $e');
+    }
+  }
+
+  void _handleNativeSettingsChanged() {
+    // Debounce to prevent multiple rapid calls from causing redundant daemon restarts.
+    _settingsDebounce?.cancel();
+    _settingsDebounce = Timer(const Duration(milliseconds: 300), () {
+      debugPrint('[Horizon] Native settings changed, reloading...');
+      // Re-apply config from native settings and restart daemon if needed.
+      _reloadAppMode();
+    });
+  }
+
+  int? _readInt(dynamic value) {
+    if (value is int) return value;
+    if (value is String) return int.tryParse(value.trim());
+    return null;
+  }
+
+  bool _readBool(dynamic value, {required bool fallback}) {
+    if (value is bool) return value;
+    if (value is String) {
+      final v = value.trim().toLowerCase();
+      if (v == 'true') return true;
+      if (v == 'false') return false;
+    }
+    return fallback;
+  }
+
+  String? _readString(dynamic value) {
+    if (value is! String) return null;
+    final trimmed = value.trim();
+    return trimmed.isEmpty ? null : trimmed;
+  }
+
+  Future<void> _ensureLocalDaemonFromNativeSettings() async {
+    final nativeSettings = await _readNativeSettings();
+    final lanEnabled = _readBool(nativeSettings['lanEnabled'], fallback: true);
+    final lanPort = _readInt(nativeSettings['lanPort']) ?? 9527;
+    final hostName = _readString(nativeSettings['hostName']) ?? _deviceName;
+
+    final wormholeEnabled = _readBool(
+      nativeSettings['wormholeEnabled'],
+      fallback: false,
+    );
+    final wormholeUrl =
+        wormholeEnabled ? _readString(nativeSettings['wormholeBaseUrl']) : null;
+    final wormholeToken =
+        wormholeEnabled ? _readString(nativeSettings['wormholeToken']) : null;
+
+    final customSessionEnabled = _readBool(
+      nativeSettings['customSessionEnabled'],
+      fallback: false,
+    );
+    final wormholeSession =
+        customSessionEnabled
+            ? _readString(nativeSettings['customSessionId'])
+            : null;
+
+    // Flutter connects to the daemon over loopback; LAN exposure is controlled by bindHost.
+    final wsUri = Uri(
+      scheme: 'ws',
+      host: '127.0.0.1',
+      port: lanPort,
+      path: '/ws',
+    );
+    setState(() {
+      _urlController.text = wsUri.toString();
+      _useWormhole = false;
+    });
+
+    // Ensure local PTY host isn't accidentally running (would conflict on port).
+    unawaited(_hostController.stop());
+
+    final bindHost = lanEnabled ? '0.0.0.0' : '127.0.0.1';
+    final started = await _daemonManager.ensureRunning(
+      wsUri: wsUri,
+      hostName: hostName,
+      devMode: widget.devModeConfig.requested,
+      wormholeUrl: wormholeUrl,
+      wormholeToken: wormholeToken,
+      wormholeSession: wormholeSession,
+      bindHost: bindHost,
+    );
+    if (started) {
+      _startDaemonStatusPolling(wsUri);
+      _startDaemonPairingPolling(wsUri);
+      _maybeAutoConnectLocal();
+    }
+  }
+
+  Future<void> _reloadAppMode() async {
+    final nativeSettings = await _readNativeSettings();
+    final appMode = nativeSettings['appMode'] as String? ?? 'server';
+    debugPrint('[Mode] Native settings changed: appMode=$appMode');
+
+    if (appMode == 'client') {
+      if (mounted) {
+        setState(() {
+          _isHorizonMode = false;
+        });
+      } else {
+        _isHorizonMode = false;
+      }
+
+      // Switching into client mode: clear local state and connect using native settings.
+      _unsubscribeLocalOutput();
+      _stopCwdPolling();
+      _sessionCwds.clear();
+      _sessions.clear();
+      _syncedSessions.clear();
+      _activeSessionId = null;
+      _terminalManager.activeSessionId = null;
+      _terminalManager.clear();
+
+      final connectionType =
+          nativeSettings['clientConnectionType'] as String? ?? 'lan';
+      final isRemote = connectionType == 'remote';
+
+      if (isRemote) {
+        // Remote mode: connect via wormhole
+        final remoteServer =
+            nativeSettings['clientRemoteServer'] as String? ?? '';
+        final remoteSession =
+            nativeSettings['clientRemoteSession'] as String? ?? '';
+        final remoteToken =
+            nativeSettings['clientRemoteToken'] as String? ?? '';
+
+        if (remoteServer.isNotEmpty && remoteSession.isNotEmpty) {
+          debugPrint(
+            '[Mode] Client remote: server=$remoteServer session=$remoteSession',
+          );
+          setState(() {
+            _wormholeController.text = remoteServer;
+            _sessionController.text = remoteSession;
+            _tokenController.text = remoteToken;
+            _useWormhole = true;
+          });
+          _connectionManager.disconnect(shouldReconnect: false);
+          await _connect();
+        }
+      } else {
+        // LAN mode: connect to specified host
+        final lanUrl = nativeSettings['clientLanUrl'] as String? ?? '';
+        if (lanUrl.isNotEmpty) {
+          debugPrint('[Mode] Client LAN: url=$lanUrl');
+          setState(() {
+            _urlController.text = lanUrl;
+            _useWormhole = false;
+          });
+          _connectionManager.disconnect(shouldReconnect: false);
+          // If connecting to local address, ensure daemon is running
+          final wsUri = Uri.tryParse(lanUrl);
+          if (wsUri != null && DaemonManager.isLocalWs(wsUri)) {
+            debugPrint('[Mode] Client LAN local: starting daemon');
+            await _ensureLocalDaemonFromNativeSettings();
+          } else {
+            await _connect();
+          }
+        }
+      }
+    } else {
+      debugPrint('[Mode] Server mode: connecting to local daemon');
+      if (mounted) {
+        setState(() {
+          _isHorizonMode = true;
+          _useWormhole = false;
+        });
+      } else {
+        _isHorizonMode = true;
+        _useWormhole = false;
+      }
+
+      await _ensureLocalDaemonFromNativeSettings();
+    }
+
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<Map<String, dynamic>> _readNativeSettings() async {
+    try {
+      final home = Platform.environment['HOME'] ?? '';
+      if (home.isEmpty) return {};
+      final settingsPath = '$home/.blackhole/horizon/settings.json';
+      final file = File(settingsPath);
+      if (!await file.exists()) return {};
+      final content = await file.readAsString();
+      final json = jsonDecode(content) as Map<String, dynamic>;
+      return json['settings'] as Map<String, dynamic>? ?? {};
+    } catch (e) {
+      debugPrint('[Mode] Failed to read native settings: $e');
+      return {};
+    }
+  }
+
+  Future<String> _readAppModeFromNativeSettings() async {
+    final settings = await _readNativeSettings();
+    return settings['appMode'] as String? ?? 'server';
   }
 
   Future<void> _loadSettings() async {
@@ -257,9 +548,12 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     if (needsRefresh && savedDeviceName != deviceName) {
       await prefs.setString('deviceName', deviceName);
     }
+    // Read app mode from native settings file
+    final appMode = await _readAppModeFromNativeSettings();
+    debugPrint('[Mode] Native appMode=$appMode');
     setState(() {
       _urlController.text =
-          prefs.getString('lanAddress') ?? 'ws://127.0.0.1:9527';
+          prefs.getString('lanAddress') ?? 'ws://127.0.0.1:9527/ws';
       _wormholeController.text =
           prefs.getString('wormholeAddress') ?? 'ws://127.0.0.1:8080/ws';
       _sessionController.text = prefs.getString('sessionId') ?? '';
@@ -269,28 +563,30 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       _multiWindow = prefs.getBool('multiWindow') ?? false;
       _showKeyboardTools = prefs.getBool('showKeyboardTools') ?? true;
       _showHHKB = prefs.getBool('showHHKB') ?? false;
-      _isHorizonMode = prefs.getBool('isHorizonMode') ?? true;
+      _isHorizonMode = appMode == 'server';
       _deviceKey = prefs.getString('deviceKey');
       _deviceName = deviceName;
     });
     _hostController.setHostDeviceName(deviceName);
     _connectionManager.updateAutoReconnect(_autoReconnect);
 
-    // Always subscribe to local output (for Horizon mode)
-    if (_hostController.running) {
-      _subscribeLocalOutput();
-      if (_isHorizonMode) {
-        _loadLocalSessions();
-      }
-    }
-    // Always try to connect Voyager client (for Voyager mode)
-    _maybeAutoConnectLocal();
+    // Notify native about initial multiWindow state (delay to ensure native is ready)
+    Future.delayed(
+      const Duration(milliseconds: 100),
+      _notifyNativeMultiWindowState,
+    );
+
+    // Apply mode/config from native settings and connect.
+    unawaited(_reloadAppMode());
   }
 
   void _handleGroupChange() {
     if (!mounted) {
       return;
     }
+    _collapsedGroupIds.removeWhere(
+      (id) => !_groupStore.groups.any((group) => group.id == id),
+    );
     // Request sync for all sessions in the new group (Voyager mode only)
     for (final sessionId in _visibleSessions) {
       _requestSyncIfNeeded(sessionId);
@@ -306,9 +602,18 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     }
     if (_hostController.running) {
       if (!_hostConfigSynced) {
-        _safeSetText(_hostWormholeUrlController, _hostController.wormholeBaseUrl);
-        _safeSetText(_hostWormholeTokenController, _hostController.wormholeToken);
-        _safeSetText(_hostCustomSessionController, _hostController.customSessionId);
+        _safeSetText(
+          _hostWormholeUrlController,
+          _hostController.wormholeBaseUrl,
+        );
+        _safeSetText(
+          _hostWormholeTokenController,
+          _hostController.wormholeToken,
+        );
+        _safeSetText(
+          _hostCustomSessionController,
+          _hostController.customSessionId,
+        );
         _hostConfigSynced = true;
       }
       // Always subscribe to local output (for Horizon mode data)
@@ -319,8 +624,10 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
           _loadLocalSessions();
         }
       }
-      // Always try to auto-connect Voyager client (for Voyager mode data)
-      _maybeAutoConnectLocal();
+      // Only auto-connect when acting as a client (Voyager mode).
+      if (!_isHorizonMode) {
+        _maybeAutoConnectLocal();
+      }
       return;
     }
     if (_isHorizonMode) {
@@ -330,50 +637,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       _terminalManager.clear();
       _stopCwdPolling();
       _sessionCwds.clear();
-      setState(() {});
-    }
-  }
-
-  void _handleModeSwitch(bool isHorizon) {
-    debugPrint(
-      '[Mode] Switching to ${isHorizon ? "Horizon" : "Voyager"} mode, connected=$_connected',
-    );
-    if (isHorizon) {
-      if (_hostController.running) {
-        _subscribeLocalOutput();
-        _loadLocalSessions();
-        // _startCwdPolling() is called inside _loadLocalSessions
-      } else {
-        _sessions.clear();
-        _activeSessionId = null;
-        _terminalManager.activeSessionId = null;
-        _terminalManager.clear();
-        _stopCwdPolling();
-      }
-      if (mounted) {
-        setState(() {});
-      }
-      return;
-    }
-
-    // Switching to Voyager mode - stop cwd polling
-    _stopCwdPolling();
-    _sessionCwds.clear();
-
-    final keepSessions = _isLocalVoyagerTarget();
-    if (!keepSessions) {
-      _sessions.clear();
-      _activeSessionId = null;
-      _terminalManager.activeSessionId = null;
-      _terminalManager.clear();
-    }
-    if (_connected) {
-      _sendListSessions();
-      _syncActiveTerminalView();
-    } else {
-      _maybeAutoConnectLocal();
-    }
-    if (mounted) {
       setState(() {});
     }
   }
@@ -512,7 +775,10 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
 
   void _startCwdPolling() {
     _stopCwdPolling();
-    if (!_isHorizonMode || !_hostController.running) {
+    if (!_isHorizonMode) {
+      return;
+    }
+    if (!_usingDirectLocalPty && !_connected) {
       return;
     }
     // Poll immediately once
@@ -529,21 +795,49 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   Future<void> _pollSessionCwds() async {
-    if (!_isHorizonMode || !_hostController.running) {
+    if (!_isHorizonMode) {
       return;
     }
-    var changed = false;
-    for (final sessionId in _sessions) {
-      final cwd = await _hostController.getLocalCwd(sessionId);
-      if (cwd != null && cwd.isNotEmpty) {
+    if (_usingDirectLocalPty) {
+      for (final sessionId in _sessions) {
+        final cwd = await _hostController.getLocalCwd(sessionId);
+        if (cwd == null || cwd.isEmpty) {
+          continue;
+        }
         final oldCwd = _sessionCwds[sessionId];
         if (oldCwd != cwd) {
           _sessionCwds[sessionId] = cwd;
-          changed = true;
         }
       }
+      if (mounted) {
+        setState(() {});
+      }
+      return;
     }
-    if (changed && mounted) {
+    if (!_connected) {
+      return;
+    }
+    for (final sessionId in _sessions) {
+      _connectionManager.sendCommand({
+        'type': 'getCwd',
+        'sessionId': sessionId,
+      });
+    }
+  }
+
+  void _handleCwd(String sessionId, String cwd) {
+    if (!_isHorizonMode) {
+      return;
+    }
+    if (cwd.isEmpty) {
+      return;
+    }
+    final oldCwd = _sessionCwds[sessionId];
+    if (oldCwd == cwd) {
+      return;
+    }
+    _sessionCwds[sessionId] = cwd;
+    if (mounted) {
       setState(() {});
     }
   }
@@ -569,35 +863,56 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     }
     _hostPairingDialogShown = true;
 
+    _showPairingDialogWith(
+      deviceName: pending.deviceName,
+      onApprove:
+          (remember) => _hostController.approvePairing(remember: remember),
+      onReject: _hostController.rejectPairing,
+    );
+  }
+
+  void _showPairingDialogWith({
+    required String deviceName,
+    required void Function(bool remember) onApprove,
+    required VoidCallback onReject,
+  }) {
     showDialog<void>(
       context: context,
       barrierDismissible: false,
       builder:
           (context) => PairingDialog(
-            pending: pending,
+            deviceName: deviceName,
             onApprove: (remember) {
               Navigator.of(context).pop();
               _hostPairingDialogShown = false;
-              _hostController.approvePairing(remember: remember);
+              onApprove(remember);
             },
             onReject: () {
               Navigator.of(context).pop();
               _hostPairingDialogShown = false;
-              _hostController.rejectPairing();
+              onReject();
             },
           ),
     );
   }
 
-  void _syncHostWormholeConfig() {
-    _hostController.updateWormholeConfig(
-      baseUrl: _hostWormholeUrlController.text,
-      token: _hostWormholeTokenController.text,
-    );
+  void _syncHostCustomSession() {
+    unawaited(_ensureDaemonHostConfig());
   }
 
-  void _syncHostCustomSession() {
-    _hostController.setCustomSessionId(_hostCustomSessionController.text);
+  Future<void> _ensureDaemonHostConfig() async {
+    final wsUri = Uri.tryParse(_urlController.text.trim());
+    if (wsUri == null || !DaemonManager.isLocalWs(wsUri)) {
+      return;
+    }
+    await _daemonManager.ensureRunning(
+      wsUri: wsUri,
+      hostName: _deviceName,
+      devMode: widget.devModeConfig.requested,
+      wormholeUrl: _hostWormholeUrlController.text.trim(),
+      wormholeToken: _hostWormholeTokenController.text.trim(),
+      wormholeSession: _hostCustomSessionController.text.trim(),
+    );
   }
 
   void _syncActiveSessionWithGroup() {
@@ -748,8 +1063,13 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   @override
   void dispose() {
     _connectionManager.disconnect(shouldReconnect: false);
+    _settingsChannel.setMethodCallHandler(null);
     _unsubscribeLocalOutput();
     _stopCwdPolling();
+    _daemonStatusPoll?.cancel();
+    _daemonStatusPoll = null;
+    _daemonPairingPoll?.cancel();
+    _daemonPairingPoll = null;
     WidgetsBinding.instance.removeObserver(this);
     _hostController.removeListener(_handleHostChange);
     _hostCustomSessionController.removeListener(_syncHostCustomSession);
@@ -765,11 +1085,85 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _sessionController.dispose();
     _tokenController.dispose();
     _metricsDebounce?.cancel();
+    _settingsDebounce?.cancel();
     _terminalManager.dispose();
     _hostController.dispose();
     _terminalOutputSink?.close();
     _terminalOutputSink = null;
+    _tabScrollController.dispose();
+    _groupScrollController.dispose();
     super.dispose();
+  }
+
+  void _startDaemonPairingPolling(Uri wsUri) {
+    _daemonPairingPoll?.cancel();
+    _daemonPairingPoll = Timer.periodic(const Duration(milliseconds: 700), (
+      _,
+    ) async {
+      if (!mounted) {
+        return;
+      }
+      if (_hostPairingDialogShown) {
+        return;
+      }
+      final deviceName = await _daemonManager.tryGetPendingPairingDeviceName(
+        wsUri,
+      );
+      if (!mounted || deviceName == null) {
+        return;
+      }
+      _hostPairingDialogShown = true;
+      _showPairingDialogWith(
+        deviceName: deviceName,
+        onApprove: (remember) async {
+          await _daemonManager.approvePairing(wsUri, remember: remember);
+          _sendListSessions();
+        },
+        onReject: () async {
+          await _daemonManager.rejectPairing(wsUri);
+        },
+      );
+    });
+  }
+
+  void _startDaemonStatusPolling(Uri wsUri) {
+    _daemonStatusPoll?.cancel();
+    _daemonStatusPoll = null;
+    _daemonStatus = null;
+
+    if (!DaemonManager.isLocalWs(wsUri)) {
+      return;
+    }
+
+    Future<void> pollOnce() async {
+      final status = await _daemonManager.tryGetStatus(wsUri);
+      if (!mounted) {
+        return;
+      }
+      if (status == null) {
+        if (_daemonStatus != null) {
+          setState(() => _daemonStatus = null);
+        }
+        return;
+      }
+      final shouldUpdate =
+          _daemonStatus?.configId != status.configId ||
+          _daemonStatus?.lanBind != status.lanBind ||
+          _daemonStatus?.lanPort != status.lanPort ||
+          _daemonStatus?.lanClients != status.lanClients ||
+          _daemonStatus?.wormholeConnected != status.wormholeConnected ||
+          _daemonStatus?.wormholeSessionId != status.wormholeSessionId ||
+          _daemonStatus?.wormholeUrl != status.wormholeUrl ||
+          _daemonStatus?.sessionCount != status.sessionCount;
+      if (shouldUpdate) {
+        setState(() => _daemonStatus = status);
+      }
+    }
+
+    unawaited(pollOnce());
+    _daemonStatusPoll = Timer.periodic(const Duration(seconds: 1), (_) {
+      unawaited(pollOnce());
+    });
   }
 
   @override
@@ -805,15 +1199,16 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
 
   void _handleDisconnected() {
     _groupStore.onDisconnected();
-    _remoteDeviceName = null;
 
-    // Only update UI if in Voyager mode
-    if (!_isHorizonMode) {
+    // If using network backend (daemon / remote host), clear the network-driven UI state.
+    if (!_usingDirectLocalPty) {
       _sessions.clear();
       _syncedSessions.clear();
       _activeSessionId = null;
       _terminalManager.activeSessionId = null;
       _terminalManager.clear();
+      _stopCwdPolling();
+      _sessionCwds.clear();
       if (mounted) {
         setState(() {});
       }
@@ -824,9 +1219,8 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     debugPrint(
       '[Mode] Received session list: ${sessions.length} sessions, isHorizonMode=$_isHorizonMode',
     );
-    // Only update UI if in Voyager mode
-    if (_isHorizonMode) {
-      debugPrint('[Mode] Ignoring session list (in Horizon mode)');
+    if (_usingDirectLocalPty) {
+      debugPrint('[Mode] Ignoring session list (using direct PTY backend)');
       return;
     }
 
@@ -857,6 +1251,9 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     if (_activeSessionId != null) {
       _restoreScrollOffset(_activeSessionId!);
     }
+    if (_isHorizonMode) {
+      _startCwdPolling();
+    }
   }
 
   // Handler for local session created (Horizon mode direct access)
@@ -881,8 +1278,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
 
   // Handler for remote session created (Voyager mode / network callback)
   void _handleRemoteSessionCreated(String sessionId) {
-    // Only update UI if in Voyager mode
-    if (_isHorizonMode) {
+    if (_usingDirectLocalPty) {
       return;
     }
     if (!_sessions.contains(sessionId)) {
@@ -923,8 +1319,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
 
   // Handler for remote session closed (Voyager mode / network callback)
   void _handleRemoteSessionClosed(String sessionId) {
-    // Only update UI if in Voyager mode
-    if (_isHorizonMode) {
+    if (_usingDirectLocalPty) {
       return;
     }
     _sessions.remove(sessionId);
@@ -945,8 +1340,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   void _handleSessionSync(String sessionId, String content) {
-    // Only update terminal if in Voyager mode
-    if (_isHorizonMode) {
+    if (_usingDirectLocalPty) {
       return;
     }
     if (content.isEmpty) {
@@ -957,7 +1351,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   void _requestSyncIfNeeded(String sessionId) {
-    if (_isHorizonMode) {
+    if (_usingDirectLocalPty) {
       return;
     }
     if (_syncedSessions.contains(sessionId)) {
@@ -968,8 +1362,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   void _handleStdout(String sessionId, String text) {
-    // Only update terminal if in Voyager mode
-    if (_isHorizonMode) {
+    if (_usingDirectLocalPty) {
       return;
     }
     _terminalManager.writeToTerminal(sessionId, text);
@@ -1069,17 +1462,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       }
       _forceResizeActiveTerminal();
     });
-  }
-
-  void _syncActiveTerminalView() {
-    final sessionId = _activeSessionId;
-    if (sessionId == null) {
-      return;
-    }
-    _terminalManager.activeSessionId = sessionId;
-    _terminalFor(sessionId);
-    _scheduleActiveResize();
-    _restoreScrollOffset(sessionId);
   }
 
   void _updateQuickBarHeight() {
@@ -1188,22 +1570,14 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   void _reorderSessions(int oldIndex, int newIndex) {
+    if (newIndex > oldIndex) {
+      newIndex -= 1;
+    }
     _groupStore.reorderSession(_groupStore.activeGroupId, oldIndex, newIndex);
   }
 
   void _updateWindowTitle() {
-    if (!Platform.isMacOS && !Platform.isLinux && !Platform.isWindows) {
-      return;
-    }
-    final sessionId = _activeSessionId;
-    String title = 'Horizon';
-    if (sessionId != null) {
-      final terminalTitle = _terminalManager.getTitle(sessionId);
-      if (terminalTitle != null && terminalTitle.isNotEmpty) {
-        title = terminalTitle;
-      }
-    }
-    windowManager.setTitle(title);
+    // Disabled due to window_manager crash issue.
   }
 
   void _handleTerminalInput(String sessionId, String data) {
@@ -1264,7 +1638,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     if (!_multiWindow && _activeSessionId != sessionId) {
       return;
     }
-    if (_isHorizonMode) {
+    if (_usingDirectLocalPty) {
       _hostController.resizeLocalSession(sessionId, rows, cols);
     } else {
       _connectionManager.sendResize(sessionId, cols, rows);
@@ -1280,7 +1654,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   void _sendRawFor(String sessionId, String data) {
-    if (_isHorizonMode) {
+    if (_usingDirectLocalPty) {
       final bytes = Uint8List.fromList(utf8.encode(data));
       _hostController.writeLocalStdin(sessionId, bytes);
     } else {
@@ -1293,7 +1667,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   void _sendGroupCommand(Map<String, dynamic> payload) {
-    if (_isHorizonMode) {
+    if (_usingDirectLocalPty) {
       unawaited(_hostController.applyLocalGroupCommand(payload));
       return;
     }
@@ -1306,7 +1680,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   void _sendCreateSession() {
-    if (_isHorizonMode) {
+    if (_usingDirectLocalPty) {
       _createLocalSession();
       return;
     }
@@ -1336,7 +1710,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   void _sendCloseSession(String sessionId) {
-    if (_isHorizonMode) {
+    if (_usingDirectLocalPty) {
       _closeLocalSession(sessionId);
       return;
     }
@@ -1456,19 +1830,9 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    const barColor = Color(0xFF111620);
-    const activeColor = Color(0xFF1E2D3D); // Slightly lighter for contrast
-    const overlayColor =
-        Colors.transparent; // No longer need overlay with solid background
-    final isInputActive = _isHorizonMode ? _hostController.running : _connected;
-    final terminal = _activeTerminal ?? _idleTerminal;
-    final controller = _activeController ?? _idleController;
-    final scrollController = _activeScrollController ?? _idleScrollController;
-    final deleteDetection =
-        !kIsWeb && (Platform.isAndroid || Platform.isIOS);
-    // connectionContent: 32 + 16(padding) = 48, tab栏: 36 + 2(padding) = 38
-    final terminalTopInset =
-        _chromeHidden ? (_visibleSessions.length <= 1 ? 0 : 38) : 48 + 38;
+    final isInputActive =
+        _usingDirectLocalPty ? _hostController.running : _connected;
+    final deleteDetection = !kIsWeb && (Platform.isAndroid || Platform.isIOS);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -1486,19 +1850,1066 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
           });
         }
 
+        const sidebarExpandedWidth = 240.0;
+        const sidebarCollapsedWidth = 64.0;
+        const topBarHeight = 56.0;
+        const animDuration = Duration(milliseconds: 220);
+        const animCurve = Curves.easeOutCubic;
+
         return Scaffold(
           key: _scaffoldKey,
-          backgroundColor: Colors.black,
-          drawer: _buildGroupDrawer(context),
-          endDrawer: _buildSettingsDrawer(context),
-          onDrawerChanged: (isOpened) {
-            _groupStore.setDeferredSync(isOpened && !_isHorizonMode);
-          },
+          backgroundColor: HorizonColors.background,
           body: Stack(
             children: [
-              Positioned.fill(child: Container(color: Colors.black)),
-              Positioned.fill(
-                top: terminalTopInset.toDouble(),
+              Positioned.fill(child: _buildBackground()),
+              Row(
+                children: [
+                  AnimatedContainer(
+                    duration: animDuration,
+                    curve: animCurve,
+                    width:
+                        _showSidebar
+                            ? sidebarExpandedWidth
+                            : sidebarCollapsedWidth,
+                    child:
+                        _showSidebar
+                            ? _buildSidebarContent(context)
+                            : _buildSidebarRail(context),
+                  ),
+                  Expanded(
+                    child: Column(
+                      children: [
+                        _buildTopBar(context, topBarHeight),
+                        Expanded(
+                          child: Stack(
+                            children: [
+                              Positioned.fill(
+                                child: _buildSessionCanvas(
+                                  context,
+                                  deleteDetection: deleteDetection,
+                                ),
+                              ),
+                              Positioned(
+                                left: 0,
+                                right: 0,
+                                bottom: 0,
+                                child: SafeArea(
+                                  top: false,
+                                  child: _buildBottomBars(isInputActive),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildBackground() {
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          colors: [Color(0xFF0B0F14), Color(0xFF121925)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTopBar(BuildContext context, double height) {
+    final leftPad = _showSidebar ? 0.0 : 32.0;
+    final group = _groupStore.activeGroup;
+    final tabs = _visibleSessions;
+
+    return Container(
+      height: height,
+      padding: EdgeInsets.fromLTRB(leftPad, 8, 12, 8),
+      decoration: const BoxDecoration(color: HorizonColors.surface),
+      child: Row(
+        children: [
+          Expanded(child: _buildTabStrip(tabs)),
+          const SizedBox(width: 12),
+          _buildViewModeToggleButton(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSidebarToggle() {
+    return Tooltip(
+      message: _showSidebar ? 'Collapse sidebar' : 'Expand sidebar',
+      child: InkWell(
+        onTap: () => setState(() => _showSidebar = !_showSidebar),
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          width: 32,
+          height: 32,
+          decoration: BoxDecoration(
+            color: HorizonColors.surfaceBright,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: HorizonColors.borderSubtle),
+          ),
+          child: const Icon(
+            Icons.menu_rounded,
+            size: 18,
+            color: HorizonColors.textSecondary,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGroupBadge(String name) {
+    return Container(
+      height: 32,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: HorizonColors.surfaceBright,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: HorizonColors.borderSubtle),
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.folder_open_rounded,
+            size: 16,
+            color: HorizonColors.textSecondary,
+          ),
+          const SizedBox(width: 8),
+          Text(
+            name,
+            style: const TextStyle(
+              color: HorizonColors.textPrimary,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTopStatusPill() {
+    final bool hasError = _error != null && _error!.isNotEmpty;
+    final bool pairing = _clientPairingPending;
+    final bool active =
+        _usingDirectLocalPty ? _hostController.running : _connected;
+    String label;
+    Color color;
+    if (hasError) {
+      label = _error!;
+      color = HorizonColors.error;
+    } else if (pairing) {
+      label = 'Pairing pending';
+      color = const Color(0xFFF59E0B);
+    } else {
+      label = active ? 'Connected' : 'Offline';
+      color = active ? HorizonColors.success : HorizonColors.textMuted;
+    }
+
+    return Container(
+      constraints: BoxConstraints(minHeight: 32, maxHeight: 32),
+      margin: EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+      decoration: BoxDecoration(
+        color: HorizonColors.surfaceBright,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: HorizonColors.borderSubtle),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(
+              color: color,
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: color.withValues(alpha: 0.35),
+                  blurRadius: 6,
+                  spreadRadius: 0,
+                ),
+              ],
+            ),
+          ),
+          if (_showSidebar) const SizedBox(width: 8),
+          if (_showSidebar)
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: HorizonColors.textSecondary,
+                fontSize: 11,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildViewModeToggleButton() {
+    final Widget icon =
+        _multiWindow
+            ? SvgPicture.asset(
+              'assets/icons/square.grid.2x2.svg',
+              width: 16,
+              height: 16,
+              colorFilter: const ColorFilter.mode(
+                HorizonColors.textSecondary,
+                BlendMode.srcIn,
+              ),
+            )
+            : const Icon(
+              Icons.crop_square,
+              size: 18,
+              color: HorizonColors.textSecondary,
+            );
+    return Tooltip(
+      message: _multiWindow ? 'Multi session' : 'Single session',
+      child: InkWell(
+        onTap: _toggleMultiWindow,
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          width: 32,
+          height: 32,
+          decoration: BoxDecoration(
+            color: HorizonColors.surfaceBright,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: HorizonColors.borderSubtle),
+          ),
+          child: Center(child: icon),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTabStrip(List<String> sessions) {
+    if (sessions.isEmpty) {
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: TextButton.icon(
+          onPressed: _sendCreateSession,
+          icon: const Icon(Icons.add_rounded, size: 16),
+          label: const Text('New session'),
+        ),
+      );
+    }
+    _scheduleTabFadeUpdate();
+
+    return Row(
+      children: [
+        Expanded(
+          child: Stack(
+            children: [
+              SizedBox(
+                height: 32,
+                child: ReorderableListView.builder(
+                  scrollController: _tabScrollController,
+                  scrollDirection: Axis.horizontal,
+                  buildDefaultDragHandles: false,
+                  shrinkWrap: true,
+                  padding: EdgeInsets.zero,
+                  proxyDecorator: (child, index, animation) {
+                    return Material(
+                      color: Colors.transparent,
+                      elevation: 6,
+                      child: child,
+                    );
+                  },
+                  onReorder: _reorderSessions,
+                  itemCount: sessions.length,
+                  itemBuilder: (context, index) {
+                    final sessionId = sessions[index];
+                    final label = _getSessionLabel(sessionId, index);
+                    final isActive = sessionId == _activeSessionId;
+                    return Padding(
+                      key: ValueKey('tab-$sessionId'),
+                      padding: const EdgeInsets.only(right: 8),
+                      child: _buildTabItem(
+                        sessionId: sessionId,
+                        label: label,
+                        isActive: isActive,
+                        index: index,
+                      ),
+                    );
+                  },
+                ),
+              ),
+              if (_showTabLeftFade)
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: 14,
+                  child: _edgeFade(left: true, color: HorizonColors.surface),
+                ),
+              if (_showTabRightFade)
+                Positioned(
+                  right: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: 14,
+                  child: _edgeFade(left: false, color: HorizonColors.surface),
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 6),
+        Tooltip(
+          message: 'New tab',
+          child: InkWell(
+            onTap: _sendCreateSession,
+            borderRadius: BorderRadius.circular(10),
+            child: Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                color: HorizonColors.surfaceBright,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: HorizonColors.borderSubtle),
+              ),
+              child: const Icon(
+                Icons.add_rounded,
+                size: 16,
+                color: HorizonColors.textSecondary,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildTabItem({
+    required String sessionId,
+    required String label,
+    required bool isActive,
+    required int index,
+  }) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hoveredTabId = sessionId),
+      onExit:
+          (_) => setState(() {
+            if (_hoveredTabId == sessionId) {
+              _hoveredTabId = null;
+            }
+          }),
+      child: InkWell(
+        onTap: () => _setActiveSession(sessionId, requestKeyboard: true),
+        borderRadius: BorderRadius.circular(12),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          height: 32,
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          decoration: BoxDecoration(
+            color:
+                isActive
+                    ? HorizonColors.surfaceBright
+                    : HorizonColors.surfaceVariant,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color:
+                  isActive
+                      ? HorizonColors.accent.withValues(alpha: 0.5)
+                      : HorizonColors.borderSubtle,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 140),
+                child: Text(
+                  label,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color:
+                        isActive
+                            ? HorizonColors.textPrimary
+                            : HorizonColors.textSecondary,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              _buildTabActions(sessionId, index),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTabActions(String sessionId, int index) {
+    final show =
+        _hoveredTabId == sessionId ||
+        (!kIsWeb && (Platform.isAndroid || Platform.isIOS));
+    return _hoverReveal(
+      show: show,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            onTap: () => _sendCloseSession(sessionId),
+            borderRadius: BorderRadius.circular(8),
+            child: const SizedBox(
+              width: 24,
+              height: 32,
+              child: Center(
+                child: Icon(
+                  Icons.close_rounded,
+                  size: 14,
+                  color: HorizonColors.textMuted,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 2),
+          ReorderableDragStartListener(
+            index: index,
+            child: const SizedBox(
+              width: 24,
+              height: 32,
+              child: Center(
+                child: Icon(
+                  Icons.drag_indicator_rounded,
+                  size: 14,
+                  color: HorizonColors.textMuted,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _hoverReveal({required bool show, required Widget child}) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 160),
+      switchInCurve: Curves.easeOut,
+      switchOutCurve: Curves.easeIn,
+      transitionBuilder: (child, animation) {
+        return FadeTransition(
+          opacity: animation,
+          child: SizeTransition(
+            sizeFactor: animation,
+            axis: Axis.horizontal,
+            axisAlignment: -1,
+            child: child,
+          ),
+        );
+      },
+      child:
+          show
+              ? KeyedSubtree(key: const ValueKey('show'), child: child)
+              : const SizedBox.shrink(),
+    );
+  }
+
+  Widget _edgeFade({required bool left, required Color color}) {
+    return IgnorePointer(
+      child: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: left ? Alignment.centerLeft : Alignment.centerRight,
+            end: left ? Alignment.centerRight : Alignment.centerLeft,
+            colors: [color, color.withValues(alpha: 0.0)],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _edgeFadeVertical({required bool top, required Color color}) {
+    return IgnorePointer(
+      child: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: top ? Alignment.topCenter : Alignment.bottomCenter,
+            end: top ? Alignment.bottomCenter : Alignment.topCenter,
+            colors: [color, color.withValues(alpha: 0.0)],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _scheduleTabFadeUpdate() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _updateTabFades();
+    });
+  }
+
+  void _scheduleGroupFadeUpdate() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _updateGroupFades();
+    });
+  }
+
+  void _updateTabFades() {
+    if (!_tabScrollController.hasClients) {
+      return;
+    }
+    final position = _tabScrollController.position;
+    final max = position.maxScrollExtent;
+    final offset = position.pixels;
+    final left = offset > 0.5;
+    final right = offset < max - 0.5;
+    if (left == _showTabLeftFade && right == _showTabRightFade) {
+      return;
+    }
+    setState(() {
+      _showTabLeftFade = left;
+      _showTabRightFade = right;
+    });
+  }
+
+  void _updateGroupFades() {
+    if (!_groupScrollController.hasClients) {
+      return;
+    }
+    final position = _groupScrollController.position;
+    final max = position.maxScrollExtent;
+    final offset = position.pixels;
+    final top = offset > 0.5;
+    final bottom = offset < max - 0.5;
+    if (top == _showGroupTopFade && bottom == _showGroupBottomFade) {
+      return;
+    }
+    setState(() {
+      _showGroupTopFade = top;
+      _showGroupBottomFade = bottom;
+    });
+  }
+
+  Widget _buildSidebarRail(BuildContext context) {
+    final chromeTopPad = Platform.isMacOS ? 48.0 : 0.0;
+    return Container(
+      color: HorizonColors.surface,
+      child: SafeArea(
+        child: Column(
+          children: [
+            SizedBox(height: chromeTopPad + 8),
+            _buildSidebarToggle(),
+            const SizedBox(height: 12),
+            if (_groupStore.activeGroup != null)
+              _buildCollapsedGroupAvatar(_groupStore.activeGroup!.name),
+            const Spacer(),
+            Tooltip(
+              message: 'New group',
+              child: InkWell(
+                onTap: _promptCreateGroup,
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: HorizonColors.surfaceBright,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: HorizonColors.borderSubtle),
+                  ),
+                  child: const Icon(
+                    Icons.add_rounded,
+                    size: 18,
+                    color: HorizonColors.textSecondary,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            _buildTopStatusPill(),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCollapsedGroupAvatar(String name) {
+    final letter = name.isNotEmpty ? name.characters.first : 'G';
+    return Container(
+      width: 32,
+      height: 32,
+      decoration: BoxDecoration(
+        color: HorizonColors.surfaceBright,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: HorizonColors.borderSubtle),
+      ),
+      child: Center(
+        child: Text(
+          letter.toUpperCase(),
+          style: const TextStyle(
+            color: HorizonColors.textSecondary,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSidebarContent(BuildContext context) {
+    final groups = _filteredGroups();
+    final chromeTopPad = Platform.isMacOS ? 48.0 : 0.0;
+    _scheduleGroupFadeUpdate();
+
+    return Container(
+      color: HorizonColors.surface,
+      child: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: EdgeInsets.fromLTRB(16, 6 + chromeTopPad, 16, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: SizedBox(
+                      height: 32,
+                      child: TextField(
+                        style: const TextStyle(
+                          color: HorizonColors.textPrimary,
+                          fontSize: 12,
+                          height: 1.0,
+                        ),
+                        decoration: InputDecoration(
+                          hintText: 'Search',
+                          prefixIcon: const Icon(
+                            Icons.search_rounded,
+                            size: 16,
+                            color: HorizonColors.textMuted,
+                          ),
+                          prefixIconConstraints: const BoxConstraints(
+                            minWidth: 32,
+                            minHeight: 32,
+                          ),
+                        ),
+                        onChanged:
+                            (value) =>
+                                setState(() => _sidebarSearchQuery = value),
+                      ),
+                    ),
+                  ),
+                  SizedBox(width: 4),
+                  Tooltip(
+                    message: 'New group',
+                    child: InkWell(
+                      onTap: _promptCreateGroup,
+                      borderRadius: BorderRadius.circular(10),
+                      child: Container(
+                        width: 32,
+                        height: 32,
+                        decoration: BoxDecoration(
+                          color: HorizonColors.surfaceBright,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: HorizonColors.borderSubtle),
+                        ),
+                        child: const Icon(
+                          Icons.add_rounded,
+                          size: 16,
+                          color: HorizonColors.textSecondary,
+                        ),
+                      ),
+                    ),
+                  ),
+                  SizedBox(width: 4),
+                  _buildSidebarToggle(),
+                ],
+              ),
+            ),
+            Expanded(
+              child: Stack(
+                children: [
+                  ReorderableListView.builder(
+                    scrollController: _groupScrollController,
+                    padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+                    buildDefaultDragHandles: false,
+                    onReorder: _reorderGroups,
+                    itemCount: groups.length,
+                    itemBuilder: (context, index) {
+                      final group = groups[index];
+                      return Padding(
+                        key: ValueKey('group-${group.id}'),
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: _buildGroupTile(group, index),
+                      );
+                    },
+                  ),
+                  if (_showGroupTopFade)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      top: 0,
+                      height: 16,
+                      child: _edgeFadeVertical(
+                        top: true,
+                        color: HorizonColors.surface,
+                      ),
+                    ),
+                  if (_showGroupBottomFade)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      height: 16,
+                      child: _edgeFadeVertical(
+                        top: false,
+                        color: HorizonColors.surface,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            _buildTopStatusPill(),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+  }
+
+  List<TerminalGroup> _filteredGroups() {
+    if (_sidebarSearchQuery.trim().isEmpty) {
+      return _groupStore.groups;
+    }
+    final query = _sidebarSearchQuery.trim().toLowerCase();
+    final matches = <TerminalGroup>[];
+    for (final group in _groupStore.groups) {
+      if (group.name.toLowerCase().contains(query)) {
+        matches.add(group);
+        continue;
+      }
+      final hasSession = group.sessionIds.asMap().entries.any((entry) {
+        final label = _getSessionLabel(entry.value, entry.key);
+        return label.toLowerCase().contains(query);
+      });
+      if (hasSession) {
+        matches.add(group);
+      }
+    }
+    return matches;
+  }
+
+  Widget _buildGroupTile(TerminalGroup group, int index) {
+    final isActive = group.id == _groupStore.activeGroupId;
+    final isCollapsed = _collapsedGroupIds.contains(group.id);
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 160),
+      decoration: BoxDecoration(
+        color:
+            isActive
+                ? HorizonColors.surfaceBright
+                : HorizonColors.surfaceVariant,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color:
+              isActive
+                  ? HorizonColors.accent.withValues(alpha: 0.45)
+                  : HorizonColors.borderSubtle,
+        ),
+      ),
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hoveredGroupId = group.id),
+        onExit:
+            (_) => setState(() {
+              if (_hoveredGroupId == group.id) {
+                _hoveredGroupId = null;
+              }
+            }),
+        child: Column(
+          children: [
+            InkWell(
+              onTap: () => _groupStore.setActiveGroup(group.id),
+              borderRadius: BorderRadius.circular(14),
+              child: SizedBox(
+                height: 32,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      GestureDetector(
+                        onTap: () => _toggleGroupCollapse(group.id),
+                        child: Icon(
+                          isCollapsed
+                              ? Icons.chevron_right_rounded
+                              : Icons.expand_more_rounded,
+                          color: HorizonColors.textMuted,
+                          size: 16,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          group.name,
+                          style: const TextStyle(
+                            color: HorizonColors.textPrimary,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      _buildGroupActions(group, index),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            if (!isCollapsed) _buildSessionList(group, isActive),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGroupActions(TerminalGroup group, int index) {
+    final show =
+        _hoveredGroupId == group.id ||
+        (!kIsWeb && (Platform.isAndroid || Platform.isIOS));
+    return _hoverReveal(
+      show: show,
+      child: SizedBox(
+        height: 32,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Tooltip(
+              message: 'New session',
+              child: InkWell(
+                onTap: () => _sendCreateSessionInGroup(group.id),
+                borderRadius: BorderRadius.circular(8),
+                child: const SizedBox(
+                  width: 32,
+                  height: 32,
+                  child: Center(
+                    child: Icon(
+                      Icons.add_rounded,
+                      size: 16,
+                      color: HorizonColors.textMuted,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            _buildGroupMenu(group),
+            if (_sidebarSearchQuery.trim().isEmpty)
+              ReorderableDragStartListener(
+                index: index,
+                child: const SizedBox(
+                  width: 24,
+                  height: 32,
+                  child: Center(
+                    child: Icon(
+                      Icons.drag_indicator_rounded,
+                      size: 16,
+                      color: HorizonColors.textMuted,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGroupMenu(TerminalGroup group) {
+    return PopupMenuButton<String>(
+      tooltip: 'Group actions',
+      color: HorizonColors.surfaceBright,
+      onSelected: (value) {
+        switch (value) {
+          case 'rename':
+            _promptRenameGroup(group);
+            break;
+          case 'delete':
+            _confirmDeleteGroup(group, deleteSessions: false);
+            break;
+          case 'delete_all':
+            _confirmDeleteGroup(group, deleteSessions: true);
+            break;
+        }
+      },
+      itemBuilder:
+          (context) => [
+            const PopupMenuItem(value: 'rename', child: Text('Rename group')),
+            const PopupMenuItem(value: 'delete', child: Text('Delete group')),
+            const PopupMenuItem(
+              value: 'delete_all',
+              child: Text('Delete group + sessions'),
+            ),
+          ],
+      child: Container(
+        width: 32,
+        height: 32,
+        alignment: Alignment.center,
+        child: const Icon(
+          Icons.more_vert_rounded,
+          size: 16,
+          color: HorizonColors.textMuted,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSessionList(TerminalGroup group, bool isActiveGroup) {
+    if (group.sessionIds.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: Text(
+            'No sessions yet',
+            style: TextStyle(
+              color: HorizonColors.textMuted.withValues(alpha: 0.8),
+              fontSize: 11,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 10),
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      itemCount: group.sessionIds.length,
+      itemBuilder: (context, index) {
+        final sessionId = group.sessionIds[index];
+        final label = _getSessionLabel(sessionId, index);
+        final isActive = sessionId == _activeSessionId && isActiveGroup;
+        return _buildSessionRow(
+          groupId: group.id,
+          sessionId: sessionId,
+          label: label,
+          isActive: isActive,
+        );
+      },
+    );
+  }
+
+  Widget _buildSessionRow({
+    required String groupId,
+    required String sessionId,
+    required String label,
+    required bool isActive,
+  }) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hoveredSessionRowId = sessionId),
+      onExit:
+          (_) => setState(() {
+            if (_hoveredSessionRowId == sessionId) {
+              _hoveredSessionRowId = null;
+            }
+          }),
+      child: InkWell(
+        onTap: () {
+          _groupStore.setActiveGroup(groupId);
+          _setActiveSession(sessionId, requestKeyboard: true);
+        },
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 4),
+          height: 32,
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          decoration: BoxDecoration(
+            color: isActive ? HorizonColors.surface : Colors.transparent,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color:
+                  isActive
+                      ? HorizonColors.accent.withValues(alpha: 0.45)
+                      : Colors.transparent,
+            ),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color:
+                        isActive
+                            ? HorizonColors.textPrimary
+                            : HorizonColors.textSecondary,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              _buildSessionRowClose(sessionId),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSessionRowClose(String sessionId) {
+    final show =
+        _hoveredSessionRowId == sessionId ||
+        (!kIsWeb && (Platform.isAndroid || Platform.isIOS));
+    return _hoverReveal(
+      show: show,
+      child: InkWell(
+        onTap: () => _sendCloseSession(sessionId),
+        borderRadius: BorderRadius.circular(8),
+        child: const SizedBox(
+          width: 24,
+          height: 32,
+          child: Center(
+            child: Icon(
+              Icons.close_rounded,
+              size: 14,
+              color: HorizonColors.textMuted,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSessionCanvas(
+    BuildContext context, {
+    required bool deleteDetection,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(0, 0, 12, 12),
+      child: SizedBox.expand(
+        child: Container(
+          color: HorizonColors.surface,
+          child: SizedBox.expand(
+            child: Container(
+              decoration: BoxDecoration(
+                color: HorizonColors.background,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(16),
                 child: DropTarget(
                   onDragDone: _handleFileDrop,
                   onDragEntered: (details) {
@@ -1531,427 +2942,148 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                   child: Stack(
                     children: [
                       _multiWindow
-                          ? LayoutBuilder(
-                            builder: (context, constraints) {
-                              final width = constraints.maxWidth;
-                              var columns = 1;
-                              if (width >= 2500) {
-                                columns = 5;
-                              } else if (width >= 2000) {
-                                columns = 4;
-                              } else if (width >= 1500) {
-                                columns = 3;
-                              } else if (width >= 1000) {
-                                columns = 2;
-                              }
-                              final sessions =
-                                  _visibleSessions.isNotEmpty
-                                      ? _visibleSessions
-                                      : (_activeSessionId != null
-                                          ? [_activeSessionId!]
-                                          : <String>[]);
-                              final displaySessions =
-                                  sessions.isEmpty ? <String>[] : sessions;
-                              final aspectRatio =
-                                  columns == 1
-                                      ? 1.4
-                                      : (columns == 2
-                                          ? 1.5
-                                          : (columns == 3
-                                              ? 1.6
-                                              : (columns == 4 ? 1.7 : 1.8)));
-                              final padding = EdgeInsets.fromLTRB(
-                                16,
-                                12,
-                                16,
-                                _bottomBarHeight + 20,
-                              );
-
-                              if (displaySessions.isEmpty) {
-                                return Padding(
-                                  padding: padding,
-                                  child: TerminalView(
-                                    _idleTerminal,
-                                    key: _idleTerminalViewKey,
-                                    controller: _idleController,
-                                    scrollController: _idleScrollController,
-                                    autoResize: true,
-                                    autofocus: true,
-                                    deleteDetection: deleteDetection,
-                                    readOnly: _showHHKB,
-                                    keyboardType:
-                                        _showHHKB
-                                            ? TextInputType.none
-                                            : TextInputType.text,
-                                    backgroundOpacity: 1.0,
-                                    padding: const EdgeInsets.all(8),
-                                    textStyle: buildTerminalStyle(
-                                      fontSize: 14,
-                                    ),
-                                  ),
-                                );
-                              }
-
-                              return GridView.builder(
-                                padding: padding,
-                                physics: const BouncingScrollPhysics(),
-                                gridDelegate:
-                                    SliverGridDelegateWithFixedCrossAxisCount(
-                                      crossAxisCount: columns,
-                                      crossAxisSpacing: 12,
-                                      mainAxisSpacing: 12,
-                                      childAspectRatio: aspectRatio,
-                                    ),
-                                itemCount: displaySessions.length + 1,
-                                itemBuilder: (context, index) {
-                                  if (index == displaySessions.length) {
-                                    return AddTerminalCard(
-                                      onTap: _sendCreateSession,
-                                    );
-                                  }
-                                  final sessionId = displaySessions[index];
-                                  // Generate label with same priority as tab labels
-                                  // Priority: custom name > xterm title > cwd name > default
-                                  String cardLabel;
-                                  if (_groupStore.hasCustomSessionName(sessionId)) {
-                                    cardLabel = _groupStore.getSessionName(sessionId, index);
-                                  } else {
-                                    final xtermTitle = _terminalManager.getTitle(sessionId);
-                                    if (xtermTitle != null && xtermTitle.isNotEmpty) {
-                                      cardLabel = xtermTitle;
-                                    } else if (_isHorizonMode) {
-                                      final cwdName = _getCwdDisplayName(sessionId);
-                                      cardLabel = cwdName ?? _groupStore.getSessionName(sessionId, index);
-                                    } else {
-                                      cardLabel = _groupStore.getSessionName(sessionId, index);
-                                    }
-                                  }
-                                  return TerminalWindowCard(
-                                    key: _terminalCardKeyFor(sessionId),
-                                    sessionId: sessionId,
-                                    terminal: _terminalFor(sessionId),
-                                    controller: _controllerFor(sessionId),
-                                    scrollController: _scrollControllerFor(
-                                      sessionId,
-                                    ),
-                                    viewKey: _viewKeyFor(sessionId),
-                                    label: cardLabel,
-                                    isActive: sessionId == _activeSessionId,
-                                    showHHKB: _showHHKB,
-                                    isDragTarget:
-                                        _dragging &&
-                                        _dragTargetSessionId == sessionId,
-                                    showActiveChevron: false,
-                                    showActiveShadow: false,
-                                    terminalStyle: buildTerminalStyle(
-                                      fontSize: 12,
-                                    ),
-                                    onTap:
-                                        () => _setActiveSession(
-                                          sessionId,
-                                          requestKeyboard: true,
-                                        ),
-                                    onClose: () => _sendCloseSession(sessionId),
-                                  );
-                                },
-                              );
-                            },
-                          )
-                          : TerminalView(
-                            terminal,
-                            key: _activeViewKey ?? _idleTerminalViewKey,
-                            controller: controller,
-                            scrollController: scrollController,
-                            autoResize: false,
-                            autofocus: true,
-                            deleteDetection: deleteDetection,
-                            readOnly: _showHHKB,
-                            keyboardType:
-                                _showHHKB
-                                    ? TextInputType.none
-                                    : TextInputType.text,
-                            backgroundOpacity: 1.0,
-                            padding: EdgeInsets.fromLTRB(
-                              8,
-                              4,
-                              8,
-                              _bottomBarHeight + 8,
-                            ),
-                            textStyle: buildTerminalStyle(
-                              fontSize: 14,
-                            ),
-                          ),
-                      if (_dragging && !_multiWindow)
+                          ? _buildMultiSessionGrid(deleteDetection)
+                          : _buildSingleSessionView(deleteDetection),
+                      if (_dragging)
                         Positioned.fill(
                           child: Container(
-                            color: Colors.blue.withValues(alpha: 0.15),
+                            color: HorizonColors.accent.withValues(alpha: 0.12),
                           ),
                         ),
                     ],
                   ),
                 ),
               ),
-              if (!_chromeHidden)
-                Positioned(
-                  top: MediaQuery.of(context).padding.top + 86,
-                  left: 0,
-                  right: 0,
-                  height: 24,
-                  child: IgnorePointer(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                          colors: [
-                            Colors.black.withValues(alpha: 0.4),
-                            Colors.transparent,
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                child: HeaderChrome(
-                  hidden: _chromeHidden,
-                  color: barColor,
-                  activeColor: activeColor,
-                  overlayColor: overlayColor,
-                  error: _error,
-                  pairingPending: _clientPairingPending,
-                  pairingTitle: 'Waiting for approval...',
-                  pairingSubtitle: 'Approve this device on the workstation',
-                  onToggle: () {
-                    setState(() {
-                      _chromeHidden = !_chromeHidden;
-                    });
-                    _scheduleActiveResize();
-                  },
-                  onAddSession: _sendCreateSession,
-                  sessions: _visibleSessions,
-                  activeSessionId: _activeSessionId,
-                  sessionLabelBuilder: (sessionId, index) {
-                    // Priority: custom name > xterm title > cwd name > default
-                    // User custom name has highest priority
-                    if (_groupStore.hasCustomSessionName(sessionId)) {
-                      return _groupStore.getSessionName(sessionId, index);
-                    }
-                    final xtermTitle = _terminalManager.getTitle(sessionId);
-                    if (xtermTitle != null && xtermTitle.isNotEmpty) {
-                      return xtermTitle;
-                    }
-                    // In Horizon mode, show cwd name
-                    if (_isHorizonMode) {
-                      final cwdName = _getCwdDisplayName(sessionId);
-                      if (cwdName != null && cwdName.isNotEmpty) {
-                        return cwdName;
-                      }
-                    }
-                    return _groupStore.getSessionName(sessionId, index);
-                  },
-                  onSelectSession:
-                      (id) => _setActiveSession(id, requestKeyboard: true),
-                  onCloseSession: _sendCloseSession,
-                  onReorderSessions: _reorderSessions,
-                  connectionContent: _buildConnectionContent(context),
-                ),
-              ),
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: SafeArea(
-                  top: false,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      KeyedSubtree(
-                        key: _quickBarKey,
-                        child:
-                            _showKeyboardTools
-                                ? QuickActionsBar(
-                                  connected: isInputActive,
-                                  ctrl: _ctrl,
-                                  alt: _alt,
-                                  meta: _meta,
-                                  onToggleCtrl:
-                                      () => setState(() => _ctrl = !_ctrl),
-                                  onToggleAlt:
-                                      () => setState(() => _alt = !_alt),
-                                  onToggleMeta:
-                                      () => setState(() => _meta = !_meta),
-                                  onKey: _sendKey,
-                                  onPaste: _pasteClipboard,
-                                  onCopy: _copySelection,
-                                  onSend: _sendRaw,
-                                  onScrollToBottom: _scrollToBottom,
-                                )
-                                : const SizedBox.shrink(),
-                      ),
-                      if (_showHHKB)
-                        HHKBKeyboard(
-                          connected: isInputActive,
-                          fn: _hhkbFn,
-                          ctrl: _ctrl,
-                          alt: _alt,
-                          onKey: (key, {bool isSpecial = false}) {
-                            if (_ctrl && !isSpecial) {
-                              _sendCtrl(key);
-                            } else if (_alt && !isSpecial) {
-                              _sendRaw('\x1b$key');
-                            } else {
-                              _sendRaw(key);
-                            }
-                            // Reset modifiers after key press
-                            if (_ctrl || _alt) {
-                              setState(() {
-                                _ctrl = false;
-                                _alt = false;
-                              });
-                            }
-                          },
-                          onFnChanged: (fn) => setState(() => _hhkbFn = fn),
-                          onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
-                          onToggleAlt: () => setState(() => _alt = !_alt),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMultiSessionGrid(bool deleteDetection) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth;
+        var columns = 1;
+        if (width >= 2400) {
+          columns = 4;
+        } else if (width >= 1800) {
+          columns = 3;
+        } else if (width >= 1200) {
+          columns = 2;
+        }
+        final sessions =
+            _visibleSessions.isNotEmpty
+                ? _visibleSessions
+                : (_activeSessionId != null ? [_activeSessionId!] : <String>[]);
+        final displaySessions = sessions.isEmpty ? <String>[] : sessions;
+        final aspectRatio = columns == 1 ? 1.35 : (columns == 2 ? 1.45 : 1.55);
+        final padding = EdgeInsets.fromLTRB(18, 16, 18, _bottomBarHeight + 20);
+
+        if (displaySessions.isEmpty) {
+          return _buildEmptySessionState(padding);
+        }
+
+        return GridView.builder(
+          padding: padding,
+          physics: const BouncingScrollPhysics(),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: columns,
+            crossAxisSpacing: 14,
+            mainAxisSpacing: 14,
+            childAspectRatio: aspectRatio,
+          ),
+          itemCount: displaySessions.length + 1,
+          itemBuilder: (context, index) {
+            if (index == displaySessions.length) {
+              return _buildAddSessionCard();
+            }
+            final sessionId = displaySessions[index];
+            final label = _getSessionLabel(sessionId, index);
+            return HorizonSessionCard(
+              key: _terminalCardKeyFor(sessionId),
+              sessionId: sessionId,
+              terminal: _terminalFor(sessionId),
+              controller: _controllerFor(sessionId),
+              scrollController: _scrollControllerFor(sessionId),
+              viewKey: _viewKeyFor(sessionId),
+              label: label,
+              isActive: sessionId == _activeSessionId,
+              showHHKB: _showHHKB,
+              deleteDetection: deleteDetection,
+              isDragTarget: _dragging && _dragTargetSessionId == sessionId,
+              terminalStyle: buildTerminalStyle(fontSize: 12),
+              onTap: () => _setActiveSession(sessionId, requestKeyboard: false),
+              onClose: () => _sendCloseSession(sessionId),
+            );
+          },
         );
       },
     );
   }
 
-  Widget _buildConnectionContent(BuildContext context) {
-    // Determine title and subtitle based on mode
-    String title;
-    String subtitle;
-    bool switchValue;
-    void Function(bool) onSwitchChanged;
+  Widget _buildSingleSessionView(bool deleteDetection) {
+    final terminal = _activeTerminal ?? _idleTerminal;
+    final controller = _activeController ?? _idleController;
+    final scrollController = _activeScrollController ?? _idleScrollController;
+    final padding = EdgeInsets.fromLTRB(12, 10, 12, _bottomBarHeight + 12);
 
-    if (_isHorizonMode) {
-      // Horizon mode (host)
-      final localName = _hostController.hostDeviceName;
-      final isRunning = _hostController.running;
-      final clientCount = _hostController.clientCount;
-      final lanEnabled = _hostController.lanEnabled;
-      final wormholeEnabled = _hostController.wormholeEnabled;
-      final wormholeConnected = _hostController.wormholeConnected;
-
-      title = 'Horizon · $localName';
-
-      if (!isRunning) {
-        subtitle = 'Service stopped';
-      } else {
-        final modes = <String>[];
-        if (lanEnabled) modes.add('LAN');
-        if (wormholeEnabled) {
-          modes.add(wormholeConnected ? 'Wormhole' : 'Wormhole (connecting)');
-        }
-        final modeStr = modes.isEmpty ? 'No sharing' : modes.join(' + ');
-        subtitle =
-            '$modeStr · $clientCount client${clientCount == 1 ? '' : 's'}';
-      }
-
-      switchValue = isRunning;
-      onSwitchChanged = (value) {
-        if (value) {
-          _hostController.start();
-        } else {
-          _hostController.stop();
-        }
-      };
-    } else {
-      // Voyager mode (client)
-      // Title: "Voyager · deviceName" or just "Voyager"
-      title =
-          _remoteDeviceName != null && _remoteDeviceName!.isNotEmpty
-              ? 'Voyager · $_remoteDeviceName'
-              : 'Voyager';
-
-      // Subtitle: "Connected to LAN/Wormhole" or "Disconnected"
-      if (_connected) {
-        subtitle = _useWormhole ? 'Connected to Wormhole' : 'Connected to LAN';
-      } else {
-        subtitle = 'Disconnected';
-      }
-
-      switchValue = _connected;
-      onSwitchChanged = (value) {
-        if (value) {
-          _connect();
-        } else {
-          _connectionManager.disconnect(shouldReconnect: false);
-        }
-      };
+    if (_activeSessionId == null) {
+      return _buildEmptySessionState(padding);
     }
 
-    final isActive = _isHorizonMode ? _hostController.running : _connected;
-
     return Padding(
-      padding: const EdgeInsets.only(top: 8, bottom: 8),
-      child: SizedBox(
-        height: 32,
-        child: Row(
+      padding: padding,
+      child: TerminalView(
+        terminal,
+        key: _activeViewKey ?? _idleTerminalViewKey,
+        controller: controller,
+        scrollController: scrollController,
+        theme: HorizonTerminalTheme.dark,
+        autoResize: false,
+        autofocus: true,
+        deleteDetection: deleteDetection,
+        readOnly: _showHHKB,
+        keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
+        backgroundOpacity: 1.0,
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+        textStyle: buildTerminalStyle(fontSize: 14),
+      ),
+    );
+  }
+
+  Widget _buildEmptySessionState(EdgeInsets padding) {
+    return Padding(
+      padding: padding,
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            IconButton(
-              icon: const Icon(Icons.menu, color: Colors.white70, size: 20),
-              onPressed: () => _scaffoldKey.currentState?.openDrawer(),
-              tooltip: 'Sessions',
+            const Icon(
+              Icons.terminal_rounded,
+              size: 32,
+              color: HorizonColors.textMuted,
             ),
-            const SizedBox(width: 4),
-            StatusDot(connected: isActive, size: 8),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 14,
-                      height: 1.1,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(height: 1),
-                  Text(
-                    subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Color(0xFF4B7AA6),
-                      fontSize: 10,
-                      height: 1.1,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 0.8,
-                    ),
-                  ),
-                ],
+            const SizedBox(height: 12),
+            const Text(
+              'No sessions yet',
+              style: TextStyle(
+                color: HorizonColors.textSecondary,
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
               ),
             ),
-            const SizedBox(width: 16),
-            Switch(value: switchValue, onChanged: onSwitchChanged),
-            const SizedBox(width: 8),
-            IconButton(
-              icon: const Icon(
-                Icons.settings_outlined,
-                color: Colors.white70,
-                size: 20,
-              ),
-              onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
-              tooltip: 'Settings',
+            const SizedBox(height: 4),
+            const Text(
+              'Create a new session to begin.',
+              style: TextStyle(color: HorizonColors.textMuted, fontSize: 12),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: _sendCreateSession,
+              icon: const Icon(Icons.add_rounded, size: 16),
+              label: const Text('New session'),
             ),
           ],
         ),
@@ -1959,15 +3091,222 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     );
   }
 
-  bool _isLocalVoyagerTarget() {
-    if (_useWormhole) {
-      return false;
+  Widget _buildAddSessionCard() {
+    return InkWell(
+      onTap: _sendCreateSession,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        decoration: BoxDecoration(
+          color: HorizonColors.surfaceVariant,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: HorizonColors.borderSubtle, width: 1),
+        ),
+        child: const Center(
+          child: Icon(
+            Icons.add_rounded,
+            size: 30,
+            color: HorizonColors.textMuted,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBottomBars(bool isInputActive) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        KeyedSubtree(
+          key: _quickBarKey,
+          child:
+              _showKeyboardTools
+                  ? QuickActionsBar(
+                    connected: isInputActive,
+                    ctrl: _ctrl,
+                    alt: _alt,
+                    meta: _meta,
+                    onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
+                    onToggleAlt: () => setState(() => _alt = !_alt),
+                    onToggleMeta: () => setState(() => _meta = !_meta),
+                    onKey: _sendKey,
+                    onPaste: _pasteClipboard,
+                    onCopy: _copySelection,
+                    onSend: _sendRaw,
+                    onScrollToBottom: _scrollToBottom,
+                  )
+                  : const SizedBox.shrink(),
+        ),
+        if (_showHHKB)
+          HHKBKeyboard(
+            connected: isInputActive,
+            fn: _hhkbFn,
+            ctrl: _ctrl,
+            alt: _alt,
+            onScrollToBottom: _scrollToBottom,
+            onKey: (key, {bool isSpecial = false}) {
+              if (_ctrl && !isSpecial) {
+                _sendCtrl(key);
+              } else if (_alt && !isSpecial) {
+                _sendRaw('$key');
+              } else {
+                _sendRaw(key);
+              }
+              if (_ctrl || _alt) {
+                setState(() {
+                  _ctrl = false;
+                  _alt = false;
+                });
+              }
+            },
+            onFnChanged: (fn) => setState(() => _hhkbFn = fn),
+            onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
+            onToggleAlt: () => setState(() => _alt = !_alt),
+          ),
+      ],
+    );
+  }
+
+  String _getSessionLabel(String sessionId, int index) {
+    if (_groupStore.hasCustomSessionName(sessionId)) {
+      return _groupStore.getSessionName(sessionId, index);
     }
-    final uri = Uri.tryParse(_urlController.text.trim());
-    if (uri == null) {
-      return false;
+    final xtermTitle = _terminalManager.getTitle(sessionId);
+    if (xtermTitle != null && xtermTitle.isNotEmpty) {
+      return xtermTitle;
     }
-    return _isLocalHost(uri.host);
+    if (_isHorizonMode) {
+      final cwdName = _getCwdDisplayName(sessionId);
+      if (cwdName != null && cwdName.isNotEmpty) {
+        return cwdName;
+      }
+    }
+    return _groupStore.getSessionName(sessionId, index);
+  }
+
+  void _toggleGroupCollapse(String groupId) {
+    setState(() {
+      if (_collapsedGroupIds.contains(groupId)) {
+        _collapsedGroupIds.remove(groupId);
+      } else {
+        _collapsedGroupIds.add(groupId);
+      }
+    });
+  }
+
+  void _reorderGroups(int oldIndex, int newIndex) {
+    if (_sidebarSearchQuery.trim().isNotEmpty) {
+      return;
+    }
+    if (newIndex > oldIndex) {
+      newIndex -= 1;
+    }
+    final groups = _groupStore.groups;
+    if (oldIndex < 0 || oldIndex >= groups.length) {
+      return;
+    }
+    final groupId = groups[oldIndex].id;
+    _groupStore.reorderGroup(groupId, newIndex);
+  }
+
+  void _promptCreateGroup() {
+    final controller = TextEditingController();
+    showDialog<void>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Create group'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: const InputDecoration(hintText: 'Group name'),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final name = controller.text.trim();
+                if (name.isEmpty) {
+                  _groupStore.createGroup();
+                } else {
+                  _groupStore.createGroup(name: name);
+                }
+                Navigator.of(context).pop();
+              },
+              child: const Text('Create'),
+            ),
+          ],
+        );
+      },
+    ).whenComplete(controller.dispose);
+  }
+
+  void _promptRenameGroup(TerminalGroup group) {
+    final controller = TextEditingController(text: group.name);
+    showDialog<void>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Rename group'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: const InputDecoration(hintText: 'Group name'),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                _groupStore.renameGroup(group.id, controller.text);
+                Navigator.of(context).pop();
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    ).whenComplete(controller.dispose);
+  }
+
+  void _confirmDeleteGroup(
+    TerminalGroup group, {
+    required bool deleteSessions,
+  }) {
+    showDialog<void>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Delete group?'),
+          content: Text(
+            deleteSessions
+                ? 'This will delete the group and all its sessions.'
+                : 'This will remove the group but keep its sessions.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                if (deleteSessions) {
+                  _groupStore.deleteGroupWithSessions(group.id);
+                } else {
+                  _groupStore.deleteGroup(group.id);
+                }
+                Navigator.of(context).pop();
+              },
+              child: const Text('Delete'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   bool _isLocalHost(String host) {
@@ -1981,89 +3320,5 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       return true;
     }
     return _hostController.addresses.contains(host);
-  }
-
-  Widget _buildGroupDrawer(BuildContext context) {
-    return GroupDrawer(
-      manager: _groupStore,
-      activeSessionId: _activeSessionId,
-      onSelectSession:
-          (sessionId) => _setActiveSession(sessionId, requestKeyboard: true),
-      onCloseSession: _sendCloseSession,
-      onAddSession: _sendCreateSessionInGroup,
-      title: 'Sessions',
-      showGroupCount: false,
-      sessionLabelBuilder: (sessionId, index) {
-        return _terminalManager.getTitle(sessionId) ??
-            _groupStore.getSessionName(sessionId, index);
-      },
-    );
-  }
-
-  Widget _buildSettingsDrawer(BuildContext context) {
-    return SettingsDrawer(
-      isHorizonMode: _isHorizonMode,
-      onModeChanged: (isHorizon) {
-        setState(() => _isHorizonMode = isHorizon);
-        _saveSettings();
-        _handleModeSwitch(isHorizon);
-      },
-      useWormhole: _useWormhole,
-      autoReconnect: _autoReconnect,
-      multiWindow: _multiWindow,
-      showKeyboardTools: _showKeyboardTools,
-      showHHKB: _showHHKB,
-      urlController: _urlController,
-      wormholeController: _wormholeController,
-      sessionController: _sessionController,
-      tokenController: _tokenController,
-      onUseWormholeChanged: (value) {
-        if (_useWormhole == value) {
-          return;
-        }
-        setState(() => _useWormhole = value);
-        _connectionManager.disconnect(shouldReconnect: false);
-        _saveSettings();
-        if (!value) {
-          _maybeAutoConnectLocal();
-        }
-      },
-      onAutoReconnectChanged: (value) {
-        setState(() => _autoReconnect = value);
-        _connectionManager.updateAutoReconnect(value);
-        _saveSettings();
-      },
-      onMultiWindowChanged: (value) {
-        setState(() => _multiWindow = value);
-        _saveSettings();
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _scheduleActiveResize();
-        });
-      },
-      onShowKeyboardToolsChanged: (value) {
-        setState(() {
-          _showKeyboardTools = value;
-          if (!value) {
-            _quickBarHeight = 0;
-          }
-        });
-        _saveSettings();
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _scheduleActiveResize();
-        });
-      },
-      onShowHHKBChanged: (value) {
-        setState(() => _showHHKB = value);
-        _saveSettings();
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _scheduleActiveResize();
-        });
-      },
-      hostController: _hostController,
-      hostWormholeUrlController: _hostWormholeUrlController,
-      hostWormholeTokenController: _hostWormholeTokenController,
-      hostCustomSessionController: _hostCustomSessionController,
-      onHostWormholeConfigCommit: _syncHostWormholeConfig,
-    );
   }
 }
