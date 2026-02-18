@@ -721,6 +721,8 @@ class AppDelegate: FlutterAppDelegate {
       if url.startAccessingSecurityScopedResource() {
         self.securityScopedUrls.append(url)
         self.saveBookmark(for: url)
+        // Also save to JSON file for Flutter side to read
+        self.saveFolderToBookmarksFile(path: url.path)
         completion(url.path)
       } else {
         completion(nil)
@@ -740,6 +742,48 @@ class AppDelegate: FlutterAppDelegate {
       UserDefaults.standard.set(saved, forKey: bookmarkDefaultsKey)
     } catch {
       NSLog("Failed to save security bookmark: %@", error.localizedDescription)
+    }
+  }
+
+  private func saveFolderToBookmarksFile(path: String) {
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    let bookmarksPath = home.appendingPathComponent(".blackhole/horizon/folder_bookmarks.json")
+
+    do {
+      // Create directory if it doesn't exist
+      let dir = bookmarksPath.deletingLastPathComponent()
+      if !FileManager.default.fileExists(atPath: dir.path) {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
+      }
+
+      // Read existing bookmarks or create new structure
+      var bookmarks: [[String: String]] = []
+      if FileManager.default.fileExists(atPath: bookmarksPath.path) {
+        let data = try Data(contentsOf: bookmarksPath)
+        if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let existingBookmarks = json["bookmarks"] as? [[String: String]] {
+          bookmarks = existingBookmarks
+        }
+      }
+
+      // Check if path already exists
+      let alreadyExists = bookmarks.contains { $0["path"] == path }
+      if !alreadyExists {
+        bookmarks.append(["path": path])
+      }
+
+      // Save updated bookmarks
+      let json: [String: Any] = [
+        "version": 1,
+        "bookmarks": bookmarks
+      ]
+
+      let jsonData = try JSONSerialization.data(withJSONObject: json, options: .prettyPrinted)
+      try jsonData.write(to: bookmarksPath)
+
+      NSLog("Saved folder bookmark to JSON: %@", path)
+    } catch {
+      NSLog("Failed to save folder to bookmarks file: %@", error.localizedDescription)
     }
   }
 

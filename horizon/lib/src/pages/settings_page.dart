@@ -137,11 +137,15 @@ class _SettingsPageState extends State<SettingsPage> {
 
       final bookmarksPath = '$home/.blackhole/horizon/folder_bookmarks.json';
       final file = File(bookmarksPath);
-      if (!await file.exists()) return;
+      if (!await file.exists()) {
+        debugPrint('[Settings] Bookmarks file does not exist: $bookmarksPath');
+        return;
+      }
 
       final content = await file.readAsString();
       final json = jsonDecode(content) as Map<String, dynamic>;
       final bookmarks = json['bookmarks'] as List<dynamic>? ?? [];
+      debugPrint('[Settings] Loading ${bookmarks.length} bookmarks from file');
 
       setState(() {
         _allowedFolders = bookmarks
@@ -149,6 +153,7 @@ class _SettingsPageState extends State<SettingsPage> {
             .whereType<String>()
             .toList();
       });
+      debugPrint('[Settings] Loaded ${_allowedFolders.length} folders');
     } catch (e) {
       debugPrint('[Settings] Failed to load bookmarks: $e');
     }
@@ -227,11 +232,13 @@ class _SettingsPageState extends State<SettingsPage> {
         'version': 1,
         'bookmarks': _allowedFolders.map((p) => {'path': p}).toList(),
       };
+      debugPrint('[Settings] Saving ${_allowedFolders.length} folders to bookmarks');
 
       final file = File('$home/.blackhole/horizon/folder_bookmarks.json');
       await file.writeAsString(
         const JsonEncoder.withIndent('  ').convert(json),
       );
+      debugPrint('[Settings] Bookmarks saved successfully');
     } catch (e) {
       debugPrint('[Settings] Failed to save bookmarks: $e');
     }
@@ -644,21 +651,50 @@ class _SettingsPageState extends State<SettingsPage> {
         'requestFolderAccess',
         initialPath != null ? {'initialPath': initialPath} : null,
       );
-      final path = _extractFolderPath(result);
-      if (path == null || path.isEmpty) {
-        if (result == true || (result is Map && result['granted'] == true)) {
-          await _loadFolderBookmarks();
-        }
+      debugPrint('[Settings] requestFolderAccess result: $result (type: ${result.runtimeType})');
+
+      // Handle the result from native side
+      if (result == null) {
+        debugPrint('[Settings] User cancelled folder selection');
         return;
       }
-      if (!_allowedFolders.contains(path)) {
+
+      String? path;
+      if (result is Map) {
+        // Native returns {"granted": true, "path": "/path/to/folder"}
+        if (result['granted'] == true && result['path'] != null) {
+          path = result['path'] as String;
+        }
+      } else if (result is String) {
+        // Direct string path (legacy support)
+        path = result;
+      }
+
+      debugPrint('[Settings] Extracted path: $path');
+
+      if (path == null || path.isEmpty) {
+        debugPrint('[Settings] No valid path received');
+        return;
+      }
+
+      // Path is guaranteed non-null here
+      final validPath = path;
+
+      if (!_allowedFolders.contains(validPath)) {
+        debugPrint('[Settings] Adding new folder: $validPath');
         setState(() {
-          _allowedFolders.add(path);
+          _allowedFolders.add(validPath);
           _selectedFolderIndex = _allowedFolders.length - 1;
         });
         await _saveFolderBookmarks();
+        debugPrint('[Settings] Folder saved. Total folders: ${_allowedFolders.length}');
+
+        // Force reload to ensure UI is in sync
+        if (mounted) {
+          setState(() {});
+        }
       } else {
-        await _loadFolderBookmarks();
+        debugPrint('[Settings] Folder already exists in list');
       }
     } catch (e) {
       debugPrint('[Settings] Failed to add folder: $e');
@@ -676,23 +712,6 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  String? _extractFolderPath(dynamic result) {
-    if (result is String) {
-      final trimmed = result.trim();
-      return trimmed.isEmpty ? null : trimmed;
-    }
-    if (result is Map) {
-      final path = result['path'];
-      if (path is String) {
-        final trimmed = path.trim();
-        return trimmed.isEmpty ? null : trimmed;
-      }
-      if (result['granted'] == true) {
-        return null;
-      }
-    }
-    return null;
-  }
 
   // ===== Remote Tab =====
   Widget _buildRemoteTab() {
