@@ -1692,11 +1692,27 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     // Disabled due to window_manager crash issue.
   }
 
-  // Track last input to prevent duplicates
-  String _lastInput = '';
-  int _lastInputTime = 0;
+  // Track last input for debugging
+  String _lastInputData = '';
+  int _lastInputTimestamp = 0;
 
   void _handleTerminalInput(String sessionId, String data) {
+    // When HHKB keyboard is shown, TerminalView is read-only
+    // and input is handled by the keyboard widget instead
+    if (_showHHKB) {
+      return;
+    }
+
+    // Detect duplicate input within a short time window
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (data == _lastInputData && (now - _lastInputTimestamp) < 20) {
+      // Skip duplicate input within 20ms
+      debugPrint('[Input] Skipping duplicate: "$data" within ${now - _lastInputTimestamp}ms');
+      return;
+    }
+    _lastInputData = data;
+    _lastInputTimestamp = now;
+
     if (_activeSessionId != sessionId) {
       _activeSessionId = sessionId;
       _terminalManager.activeSessionId = sessionId;
@@ -1705,15 +1721,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       }
       _updateWindowTitle();
     }
-
-    // Debounce duplicate inputs within 50ms window
-    final now = DateTime.now().millisecondsSinceEpoch;
-    if (data == _lastInput && (now - _lastInputTime) < 50) {
-      // Skip duplicate input
-      return;
-    }
-    _lastInput = data;
-    _lastInputTime = now;
 
     var output = data.replaceAll('\n', '\r');
     if (_ctrl) {
