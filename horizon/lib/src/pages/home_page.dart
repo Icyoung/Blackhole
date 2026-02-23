@@ -142,7 +142,12 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   List<String> get _visibleSessions => _groupStore.activeGroupSessionIds;
 
   // Daemon architecture: even in "server" mode we connect via WebSocket.
+  // In-process fallback: when daemon binary is unavailable, _hostController
+  // runs the WS server directly, so we consider the system active if either
+  // the WebSocket client is connected OR the in-process host is running.
   bool get _usingDirectLocalPty => false;
+  bool get _isSystemActive =>
+      _connected || (_isHorizonMode && _hostController.running);
 
   @override
   void initState() {
@@ -405,7 +410,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     });
 
     // Ensure local PTY host isn't accidentally running (would conflict on port).
-    unawaited(_hostController.stop());
+    await _hostController.stop();
 
     final bindHost = lanEnabled ? '0.0.0.0' : '127.0.0.1';
     final started = await _daemonManager.ensureRunning(
@@ -421,6 +426,25 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       _startDaemonStatusPolling(wsUri);
       _startDaemonPairingPolling(wsUri);
       _maybeAutoConnectLocal();
+    } else {
+      // Daemon binary not available — fall back to in-process HorizonController.
+      debugPrint('[Horizon] Daemon unavailable, falling back to in-process host');
+      _hostController.setHostDeviceName(hostName);
+      await _hostController.start();
+      if (_hostController.running) {
+        _subscribeLocalOutput();
+        _maybeAutoConnectLocal();
+      } else {
+        // In-process host failed (e.g. port already in use by another instance).
+        // Try connecting to the existing server on that port as a client fallback.
+        debugPrint(
+          '[Horizon] In-process host failed: ${_hostController.error ?? "unknown"}, '
+          'trying to connect to existing server on port $lanPort',
+        );
+        // Attempt to connect as client; if that also fails, try killing the
+        // orphaned process and restarting the in-process host.
+        await _connectOrRecoverPort(wsUri, hostName);
+      }
     }
   }
 
@@ -1403,6 +1427,94 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     }
   }
 
+  /// Try connecting as a client to an existing server on [wsUri].
+  /// If the connection doesn't establish within a short timeout, assume the
+  /// port is held by an orphaned process, kill it, and restart the in-process
+  /// host.
+  Future<void> _connectOrRecoverPort(Uri wsUri, String hostName) async {
+    // First, try connecting as a client to whatever is on that port.
+    await _connect();
+
+    // Give the connection a moment to establish.
+    await Future.delayed(const Duration(seconds: 2));
+
+    if (_connected) {
+      debugPrint('[Horizon] Connected to existing server as client fallback');
+      return;
+    }
+
+    // Connection failed — the port holder is likely an orphaned process.
+    // Try to kill it by finding the PID listening on the port.
+    debugPrint('[Horizon] Client fallback failed, attempting port recovery');
+    final recovered = await _tryRecoverPort(wsUri.port);
+    if (recovered) {
+      // Port is free now, restart the in-process host.
+      debugPrint('[Horizon] Port recovered, restarting in-process host');
+      _hostController.setHostDeviceName(hostName);
+      await _hostController.start();
+      if (_hostController.running) {
+        _subscribeLocalOutput();
+        _maybeAutoConnectLocal();
+      } else {
+        debugPrint(
+          '[Horizon] In-process host still failed after port recovery: '
+          '${_hostController.error ?? "unknown"}',
+        );
+      }
+    } else {
+      debugPrint('[Horizon] Port recovery failed, staying offline');
+    }
+  }
+
+  /// Attempt to free [port] by killing any orphaned Horizon process holding it.
+  /// Returns true if the port was freed.
+  Future<bool> _tryRecoverPort(int port) async {
+    if (Platform.isWindows) {
+      // Port recovery not supported on Windows yet.
+      return false;
+    }
+    try {
+      // Use lsof to find the PID holding the port (macOS/Linux)
+      final result = await Process.run('lsof', ['-ti', ':$port']);
+      if (result.exitCode != 0) {
+        return false;
+      }
+      final pids = (result.stdout as String)
+          .split('\n')
+          .map((s) => int.tryParse(s.trim()))
+          .whereType<int>()
+          .where((p) => p != _pidSelf)
+          .toSet();
+      if (pids.isEmpty) {
+        return false;
+      }
+      for (final pid in pids) {
+        debugPrint('[Horizon] Killing orphaned process on port $port: PID $pid');
+        Process.killPid(pid, ProcessSignal.sigterm);
+      }
+      // Wait for the port to be freed
+      for (var i = 0; i < 10; i++) {
+        await Future.delayed(const Duration(milliseconds: 200));
+        try {
+          final server = await ServerSocket.bind(
+            InternetAddress.loopbackIPv4,
+            port,
+          );
+          await server.close();
+          return true;
+        } catch (_) {
+          // Port still in use, keep waiting
+        }
+      }
+      return false;
+    } catch (e) {
+      debugPrint('[Horizon] Port recovery error: $e');
+      return false;
+    }
+  }
+
+  int get _pidSelf => pid;
+
   Future<void> _ensureDeviceNameReady() async {
     if (!_isGenericDeviceName(_deviceName)) {
       return;
@@ -1580,6 +1692,10 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     // Disabled due to window_manager crash issue.
   }
 
+  // Track last input to prevent duplicates
+  String _lastInput = '';
+  int _lastInputTime = 0;
+
   void _handleTerminalInput(String sessionId, String data) {
     if (_activeSessionId != sessionId) {
       _activeSessionId = sessionId;
@@ -1589,6 +1705,16 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       }
       _updateWindowTitle();
     }
+
+    // Debounce duplicate inputs within 50ms window
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (data == _lastInput && (now - _lastInputTime) < 50) {
+      // Skip duplicate input
+      return;
+    }
+    _lastInput = data;
+    _lastInputTime = now;
+
     var output = data.replaceAll('\n', '\r');
     if (_ctrl) {
       output = _applyCtrl(output);
@@ -1830,8 +1956,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    final isInputActive =
-        _usingDirectLocalPty ? _hostController.running : _connected;
+    final isInputActive = _isSystemActive;
     final deleteDetection = !kIsWeb && (Platform.isAndroid || Platform.isIOS);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -2001,8 +2126,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   Widget _buildTopStatusPill() {
     final bool hasError = _error != null && _error!.isNotEmpty;
     final bool pairing = _clientPairingPending;
-    final bool active =
-        _usingDirectLocalPty ? _hostController.running : _connected;
+    final bool active = _isSystemActive;
     String label;
     Color color;
     if (hasError) {
