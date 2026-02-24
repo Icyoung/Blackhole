@@ -134,9 +134,7 @@ class _QuickActionsBarState extends State<QuickActionsBar> {
       final boxGlobal = box.localToGlobal(Offset.zero);
       final ancestorGlobal = ancestor.localToGlobal(Offset.zero);
 
-      return _scrollController.offset +
-          (boxGlobal.dx - ancestorGlobal.dx) -
-          12;
+      return _scrollController.offset + (boxGlobal.dx - ancestorGlobal.dx) - 12;
     } catch (_) {
       return null;
     }
@@ -145,9 +143,12 @@ class _QuickActionsBarState extends State<QuickActionsBar> {
   @override
   Widget build(BuildContext context) {
     return Container(
+      width: double.infinity,
       decoration: BoxDecoration(
         color: const Color(0xFF111620),
-        border: Border(top: BorderSide(color: Colors.white.withValues(alpha: 0.05))),
+        border: Border(
+          top: BorderSide(color: Colors.white.withValues(alpha: 0.05)),
+        ),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       child: NotificationListener<ScrollNotification>(
@@ -181,50 +182,56 @@ class _QuickActionsBarState extends State<QuickActionsBar> {
                 key: _snapKeys[0],
                 label: 'TAB',
                 onTap:
-                    widget.connected ? () => widget.onKey(TerminalKey.tab) : null,
+                    widget.connected
+                        ? () => widget.onKey(TerminalKey.tab)
+                        : null,
               ),
               const SizedBox(width: 6),
               ActionButton(
                 label: 'ESC',
-                onTap: widget.connected
-                    ? () => widget.onKey(TerminalKey.escape)
-                    : null,
+                onTap:
+                    widget.connected
+                        ? () => widget.onKey(TerminalKey.escape)
+                        : null,
               ),
               const SizedBox(width: 12),
               ActionButton(
                 key: _snapKeys[1],
                 icon: Icons.keyboard_arrow_up,
-                onTap: widget.connected
-                    ? () => widget.onKey(TerminalKey.arrowUp)
-                    : null,
+                onTap:
+                    widget.connected
+                        ? () => widget.onKey(TerminalKey.arrowUp)
+                        : null,
               ),
               const SizedBox(width: 6),
               ActionButton(
                 icon: Icons.keyboard_arrow_down,
-                onTap: widget.connected
-                    ? () => widget.onKey(TerminalKey.arrowDown)
-                    : null,
+                onTap:
+                    widget.connected
+                        ? () => widget.onKey(TerminalKey.arrowDown)
+                        : null,
               ),
               const SizedBox(width: 6),
               ActionButton(
                 icon: Icons.keyboard_arrow_left,
-                onTap: widget.connected
-                    ? () => widget.onKey(TerminalKey.arrowLeft)
-                    : null,
+                onTap:
+                    widget.connected
+                        ? () => widget.onKey(TerminalKey.arrowLeft)
+                        : null,
               ),
               const SizedBox(width: 6),
               ActionButton(
                 icon: Icons.keyboard_arrow_right,
-                onTap: widget.connected
-                    ? () => widget.onKey(TerminalKey.arrowRight)
-                    : null,
+                onTap:
+                    widget.connected
+                        ? () => widget.onKey(TerminalKey.arrowRight)
+                        : null,
               ),
               const SizedBox(width: 12),
               ActionButton(
                 key: _snapKeys[2],
                 icon: Icons.keyboard_return,
-                onTap:
-                    widget.connected ? () => widget.onSend('\r') : null,
+                onTap: widget.connected ? () => widget.onSend('\r') : null,
               ),
               const SizedBox(width: 6),
               ActionButton(
@@ -235,8 +242,7 @@ class _QuickActionsBarState extends State<QuickActionsBar> {
               const SizedBox(width: 12),
               ActionButton(
                 label: 'LF',
-                onTap:
-                    widget.connected ? () => widget.onSend('\n') : null,
+                onTap: widget.connected ? () => widget.onSend('\n') : null,
               ),
               const SizedBox(width: 6),
               ActionButton(

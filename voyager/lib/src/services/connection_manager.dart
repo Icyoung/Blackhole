@@ -5,6 +5,10 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import 'transport_models.dart';
+import 'transport_orchestrator.dart';
+import 'transport_telemetry.dart';
+
 enum _BinaryType {
   stdin(1),
   stdout(2),
@@ -72,6 +76,8 @@ class ConnectionManager {
   DateTime? _lastMessageAt;
   DateTime? _stdoutProbeUntil;
   bool _stdoutProbeArmed = false;
+  final TransportOrchestrator _transportOrchestrator = TransportOrchestrator();
+  final TransportTelemetry _telemetry = TransportTelemetry(source: 'voyager');
 
   bool _connected = false;
   bool _pairingPending = false;
@@ -80,19 +86,42 @@ class ConnectionManager {
   int _reconnectDelaySeconds = 2;
   Uri? _lastUri;
   bool _lastWaitForPairing = false;
+  TransportKind _activeTransportKind = TransportKind.unknown;
+  String? _activeTransportId;
+  String? _activePathId;
+  String? _activeSwitchReason;
+  String? _activeFallbackReason;
+  int? _activeProbeRttMs;
 
   bool get connected => _connected;
   bool get pairingPending => _pairingPending;
+  TransportKind get activeTransportKind => _activeTransportKind;
+  String? get activeTransportId => _activeTransportId;
+  String? get activePathId => _activePathId;
+  String? get activeSwitchReason => _activeSwitchReason;
+  String? get activeFallbackReason => _activeFallbackReason;
+  int? get activeProbeRttMs => _activeProbeRttMs;
 
   Future<void> connect({
     required Uri uri,
     required bool waitForPairing,
     required bool autoReconnect,
+    TransportKind transportKind = TransportKind.unknown,
+    String? transportId,
+    String? pathId,
   }) async {
     _shouldReconnect = true;
     _autoReconnect = autoReconnect;
+    // Auto-append /ws if not present (LAN mode).
+    uri = _ensureWsPath(uri);
     _lastUri = uri;
     _lastWaitForPairing = waitForPairing;
+    _activeTransportKind = transportKind;
+    _activeTransportId = transportId;
+    _activePathId = pathId ?? transportId;
+    _activeSwitchReason = null;
+    _activeFallbackReason = null;
+    _activeProbeRttMs = null;
     _resetConnectionState();
 
     try {
@@ -106,21 +135,120 @@ class ConnectionManager {
           _handleConnectionClosed();
         },
       );
+      try {
+        await channel.ready;
+      } catch (error) {
+        onError('Failed to connect: $error');
+        _setConnected(false);
+        _setPairingPending(false);
+        _scheduleReconnect();
+        return;
+      }
       _setConnected(true);
       _setPairingPending(waitForPairing);
       _lastMessageAt = DateTime.now();
       _reconnectDelaySeconds = 2;
+      _telemetry.emit(
+        event: 'connection_opened',
+        kind: _activeTransportKind,
+        transportId: _activeTransportId,
+        pathId: _activePathId,
+        connected: true,
+      );
       onConnected(waitForPairing: waitForPairing);
       _startHeartbeat();
     } catch (error) {
       onError('Failed to connect: $error');
+      _telemetry.emit(
+        event: 'connection_closed',
+        kind: _activeTransportKind,
+        transportId: _activeTransportId,
+        pathId: _activePathId,
+        connected: false,
+        error: error,
+      );
       _setConnected(false);
       _setPairingPending(false);
       _scheduleReconnect();
     }
   }
 
+  Future<void> connectWithCandidates({
+    required List<TransportCandidate> candidates,
+    required bool autoReconnect,
+  }) async {
+    if (candidates.isEmpty) {
+      onError('No transport candidate available.');
+      return;
+    }
+
+    // Keep legacy behavior for single candidate to avoid side effects
+    // (e.g. pairing prompts triggered by probe connections).
+    if (candidates.length == 1) {
+      final candidate = candidates.first;
+      await connect(
+        uri: candidate.uri,
+        waitForPairing: candidate.waitForPairing,
+        autoReconnect: autoReconnect,
+        transportKind: candidate.kind,
+        transportId: candidate.id,
+        pathId: '${candidate.kind.wireName}:${candidate.id}',
+      );
+      return;
+    }
+
+    final selection = await _transportOrchestrator.selectBest(
+      candidates: candidates,
+      probe: _probeCandidate,
+    );
+    final chosen = selection?.candidate ?? candidates.first;
+    if (selection == null && chosen.kind == TransportKind.wormholeRelay) {
+      _activeFallbackReason = 'probe_unavailable';
+      _telemetry.emit(
+        event: 'fallback_triggered',
+        kind: chosen.kind,
+        transportId: chosen.id,
+        pathId: '${chosen.kind.wireName}:${chosen.id}',
+        fallbackReason: _activeFallbackReason,
+      );
+    }
+    _telemetry.emit(
+      event: 'connection_selected',
+      kind: chosen.kind,
+      transportId: chosen.id,
+      pathId: selection?.pathId ?? '${chosen.kind.wireName}:${chosen.id}',
+      switchReason: selection?.switchReason,
+      fallbackReason: selection?.fallbackReason ?? _activeFallbackReason,
+      probeRttMs: selection?.probeResult.rtt?.inMilliseconds,
+      extra: {'candidate_count': candidates.length},
+    );
+
+    await connect(
+      uri: chosen.uri,
+      waitForPairing: chosen.waitForPairing,
+      autoReconnect: autoReconnect,
+      transportKind: chosen.kind,
+      transportId: chosen.id,
+      pathId: selection?.pathId ?? '${chosen.kind.wireName}:${chosen.id}',
+    );
+    if (selection != null) {
+      _activeSwitchReason = selection.switchReason;
+      _activeFallbackReason = selection.fallbackReason;
+      _activeProbeRttMs = selection.probeResult.rtt?.inMilliseconds;
+    }
+  }
+
   void disconnect({bool shouldReconnect = false}) {
+    if (_connected) {
+      _telemetry.emit(
+        event: 'connection_closed',
+        kind: _activeTransportKind,
+        transportId: _activeTransportId,
+        pathId: _activePathId,
+        connected: false,
+        extra: {'reason': 'manual_disconnect'},
+      );
+    }
     _shouldReconnect = shouldReconnect;
     _resetConnectionState();
   }
@@ -178,7 +306,9 @@ class ConnectionManager {
 
     for (var offset = 0; offset < bytes.length; offset += _maxChunkSize) {
       final end =
-          (offset + _maxChunkSize < bytes.length) ? offset + _maxChunkSize : bytes.length;
+          (offset + _maxChunkSize < bytes.length)
+              ? offset + _maxChunkSize
+              : bytes.length;
       final chunk = bytes.sublist(offset, end);
 
       final payload = _encodeBinaryMessage(
@@ -222,10 +352,77 @@ class ConnectionManager {
     channel.sink.add(_encodeMessage({'type': 'ping'}));
   }
 
+  Future<TransportProbeResult> _probeCandidate(
+    TransportCandidate candidate,
+  ) async {
+    _telemetry.emit(
+      event: 'probe_started',
+      kind: candidate.kind,
+      transportId: candidate.id,
+      pathId: '${candidate.kind.wireName}:${candidate.id}',
+    );
+    if (!candidate.probeByConnect) {
+      _telemetry.emit(
+        event: 'probe_result',
+        kind: candidate.kind,
+        transportId: candidate.id,
+        pathId: '${candidate.kind.wireName}:${candidate.id}',
+        probeRttMs: 999,
+        extra: {'probe_mode': 'connect_skipped'},
+      );
+      return TransportProbeResult(
+        candidate: candidate,
+        success: true,
+        rtt: const Duration(milliseconds: 999),
+      );
+    }
+    final probeUri = _ensureWsPath(candidate.uri);
+    final started = DateTime.now();
+    try {
+      final channel = WebSocketChannel.connect(probeUri);
+      await channel.ready.timeout(const Duration(seconds: 3));
+      final elapsed = DateTime.now().difference(started);
+      await channel.sink.close();
+      _telemetry.emit(
+        event: 'probe_result',
+        kind: candidate.kind,
+        transportId: candidate.id,
+        pathId: '${candidate.kind.wireName}:${candidate.id}',
+        probeRttMs: elapsed.inMilliseconds,
+      );
+      return TransportProbeResult(
+        candidate: candidate,
+        success: true,
+        rtt: elapsed,
+      );
+    } catch (error) {
+      _telemetry.emit(
+        event: 'probe_result',
+        kind: candidate.kind,
+        transportId: candidate.id,
+        pathId: '${candidate.kind.wireName}:${candidate.id}',
+        error: error,
+      );
+      return TransportProbeResult(
+        candidate: candidate,
+        success: false,
+        error: error,
+      );
+    }
+  }
+
   void _handleConnectionClosed() {
     if (!_connected) {
       return;
     }
+    _telemetry.emit(
+      event: 'connection_closed',
+      kind: _activeTransportKind,
+      transportId: _activeTransportId,
+      pathId: _activePathId,
+      connected: false,
+      extra: {'reason': 'remote_closed'},
+    );
     _resetConnectionState();
     _scheduleReconnect();
   }
@@ -248,6 +445,9 @@ class ConnectionManager {
           uri: uri,
           waitForPairing: _lastWaitForPairing,
           autoReconnect: _autoReconnect,
+          transportKind: _activeTransportKind,
+          transportId: _activeTransportId,
+          pathId: _activePathId,
         ),
       );
     });
@@ -294,7 +494,27 @@ class ConnectionManager {
     }
     _lastMessageAt = DateTime.now();
     final type = decoded['type'];
+    final controlType = TransportControlType.fromType(type as String?);
     if (type == 'pong') {
+      return;
+    }
+    if (controlType == TransportControlType.transportProbeResult) {
+      _handleTransportProbeResult(decoded);
+      return;
+    }
+    if (controlType == TransportControlType.transportSwitchPrepare ||
+        controlType == TransportControlType.transportSwitchCommit ||
+        controlType == TransportControlType.transportSwitchAbort) {
+      _applyTransportMetadata(decoded);
+      _telemetry.emit(
+        event: controlType.wireName.replaceAll('transport_', ''),
+        kind: _activeTransportKind,
+        transportId: _activeTransportId,
+        pathId: _activePathId,
+        switchReason: _activeSwitchReason,
+        fallbackReason: _activeFallbackReason,
+        probeRttMs: _activeProbeRttMs,
+      );
       return;
     }
     if (type == 'error') {
@@ -544,6 +764,54 @@ class ConnectionManager {
         return {'type': 'pong'};
       case _BinaryType.unknown:
         return {'type': 'unsupported', 'version': version};
+    }
+  }
+
+  /// Ensures the URI has /ws path suffix for WebSocket connections.
+  /// Only adds /ws if path is empty or root (LAN mode).
+  /// For Wormhole URLs with existing paths, leaves unchanged.
+  Uri _ensureWsPath(Uri uri) {
+    final path = uri.path;
+    if (path.isEmpty || path == '/') {
+      return uri.replace(path: '/ws');
+    }
+    return uri;
+  }
+
+  void _handleTransportProbeResult(Map<String, dynamic> decoded) {
+    final transportKind = TransportKind.fromWireName(
+      decoded['transportKind'] as String?,
+    );
+    if (transportKind != TransportKind.unknown) {
+      _activeTransportKind = transportKind;
+    }
+    _applyTransportMetadata(decoded);
+  }
+
+  void _applyTransportMetadata(Map<String, dynamic> decoded) {
+    final metadata = TransportMetadata.fromWire(decoded);
+    if (metadata.transportId != null && metadata.transportId!.isNotEmpty) {
+      _activeTransportId = metadata.transportId;
+    }
+    if (metadata.pathId != null && metadata.pathId!.isNotEmpty) {
+      _activePathId = metadata.pathId;
+    }
+    if (metadata.switchReason != null && metadata.switchReason!.isNotEmpty) {
+      _activeSwitchReason = metadata.switchReason;
+    }
+    if (metadata.fallbackReason != null &&
+        metadata.fallbackReason!.isNotEmpty) {
+      _activeFallbackReason = metadata.fallbackReason;
+      _telemetry.emit(
+        event: 'fallback_triggered',
+        kind: _activeTransportKind,
+        transportId: _activeTransportId,
+        pathId: _activePathId,
+        fallbackReason: _activeFallbackReason,
+      );
+    }
+    if (metadata.probeRttMs != null && metadata.probeRttMs! >= 0) {
+      _activeProbeRttMs = metadata.probeRttMs;
     }
   }
 }

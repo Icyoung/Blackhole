@@ -43,6 +43,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
   bool _fnLocked = false;
 
   static const _bgColor = Color(0xFF1A1A1A);
+  static const _shiftDeleteFlex = 12;
 
   void _onShiftTap() {
     final now = DateTime.now();
@@ -117,12 +118,11 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
 
   // Row 1: Numbers (Fn: symbols)
   Widget _buildRow1() {
-    final keys = widget.fn
-        ? ['!', '@', '#', '\$', '%', '^', '&', '*', '(', ')']
-        : ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
-    return Row(
-      children: keys.map((k) => _key(k, flex: 1)).toList(),
-    );
+    final keys =
+        widget.fn
+            ? ['!', '@', '#', '\$', '%', '^', '&', '*', '(', ')']
+            : ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
+    return Row(children: keys.map((k) => _key(k, flex: 1)).toList());
   }
 
   // Row 2: QWERTY (Fn: brackets)
@@ -134,9 +134,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
       final letters = ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'];
       keys = _shift ? letters : letters.map((l) => l.toLowerCase()).toList();
     }
-    return Row(
-      children: keys.map((k) => _key(k, flex: 1)).toList(),
-    );
+    return Row(children: keys.map((k) => _key(k, flex: 1)).toList());
   }
 
   // Row 3: Tab ASDFGHJKL. (Fn: navigation + punct)
@@ -152,9 +150,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
         '.', // Don't change on shift
       ];
     }
-    return Row(
-      children: keys.map((k) => _key(k, flex: 1)).toList(),
-    );
+    return Row(children: keys.map((k) => _key(k, flex: 1)).toList());
   }
 
   // Row 4: ⇧ ZXCVBNM / ⌫ (Fn: ⇧ + actions + ⌦)
@@ -163,10 +159,18 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
       // Fn layer: Shift(inactive) + terminal actions + ⌦
       return Row(
         children: [
-          _shiftKey(flex: 12, enabled: false),
-          ...['Stop', 'Susp', 'EOF', 'Clr', 'Kill', 'W⌫', 'Yank', 'Bot']
-              .map((k) => _key(k, flex: 10)),
-          _key('⌦', flex: 12),
+          _shiftKey(flex: _shiftDeleteFlex, enabled: false),
+          ...[
+            'Stop',
+            'Susp',
+            'EOF',
+            'Clr',
+            'Kill',
+            'W⌫',
+            'Yank',
+            'Bot',
+          ].map((k) => _key(k, flex: 10)),
+          _key('⌦', flex: _shiftDeleteFlex),
         ],
       );
     } else {
@@ -174,31 +178,32 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
       final letters = ['Z', 'X', 'C', 'V', 'B', 'N', 'M'];
       return Row(
         children: [
-          _shiftKey(flex: 12),
-          ...(_shift ? letters : letters.map((l) => l.toLowerCase()))
-              .map((k) => _key(k, flex: 10)),
+          _shiftKey(flex: _shiftDeleteFlex),
+          ...(_shift ? letters : letters.map((l) => l.toLowerCase())).map(
+            (k) => _key(k, flex: 10),
+          ),
           _key('/', flex: 10), // Don't change on shift
-          _key('⌫', flex: 12),
+          _key('⌫', flex: _shiftDeleteFlex),
         ],
       );
     }
   }
 
-  // Row 5: Fn Ctrl Alt 🌐 [Space] Esc ⏎
+  // Row 5: Fn Ctrl Alt [Space] 🌐 Esc ⏎
   Widget _buildBottomRow() {
     return Row(
       children: [
         _fnKey(flex: 7),
         _modKey('Ctrl', widget.ctrl, widget.onToggleCtrl, flex: 7),
         _modKey('Alt', widget.alt, widget.onToggleAlt, flex: 6),
+        _spaceKey(flex: widget.onToggleChineseMode != null ? 22 : 28),
         if (widget.onToggleChineseMode != null)
           _modKey(
             widget.chineseMode ? '中' : 'EN',
             widget.chineseMode,
             widget.onToggleChineseMode!,
-            flex: 5,
+            flex: 6,
           ),
-        _spaceKey(flex: widget.onToggleChineseMode != null ? 23 : 28),
         _key('Esc', flex: 7),
         _key('↵', flex: 10),
       ],
@@ -405,8 +410,12 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
     );
   }
 
-  Widget _modKey(String label, bool active, VoidCallback onTap,
-      {int flex = 1}) {
+  Widget _modKey(
+    String label,
+    bool active,
+    VoidCallback onTap, {
+    int flex = 1,
+  }) {
     return Expanded(
       flex: flex,
       child: Padding(
@@ -455,68 +464,73 @@ class _SpaceKeyState extends State<_SpaceKey> {
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onPanStart: widget.enabled
-          ? (details) {
-              setState(() => _pressed = true);
-              _accumulatedX = 0;
-              _accumulatedY = 0;
-              _hasMoved = false;
-              _verticalTriggered = false;
-              HapticFeedback.lightImpact();
-            }
-          : null,
-      onPanUpdate: widget.enabled
-          ? (details) {
-              _accumulatedX += details.delta.dx;
-              _accumulatedY += details.delta.dy;
+      onPanStart:
+          widget.enabled
+              ? (details) {
+                setState(() => _pressed = true);
+                _accumulatedX = 0;
+                _accumulatedY = 0;
+                _hasMoved = false;
+                _verticalTriggered = false;
+                HapticFeedback.lightImpact();
+              }
+              : null,
+      onPanUpdate:
+          widget.enabled
+              ? (details) {
+                _accumulatedX += details.delta.dx;
+                _accumulatedY += details.delta.dy;
 
-              // Determine primary direction and emit arrow keys
-              if (_accumulatedX.abs() > _accumulatedY.abs()) {
-                // Horizontal movement
-                while (_accumulatedX.abs() >= _stepThreshold) {
-                  if (_accumulatedX > 0) {
-                    widget.onArrow('right');
-                    _accumulatedX -= _stepThreshold;
-                  } else {
-                    widget.onArrow('left');
-                    _accumulatedX += _stepThreshold;
+                // Determine primary direction and emit arrow keys
+                if (_accumulatedX.abs() > _accumulatedY.abs()) {
+                  // Horizontal movement
+                  while (_accumulatedX.abs() >= _stepThreshold) {
+                    if (_accumulatedX > 0) {
+                      widget.onArrow('right');
+                      _accumulatedX -= _stepThreshold;
+                    } else {
+                      widget.onArrow('left');
+                      _accumulatedX += _stepThreshold;
+                    }
+                    _hasMoved = true;
+                    HapticFeedback.selectionClick();
                   }
-                  _hasMoved = true;
-                  HapticFeedback.selectionClick();
-                }
-              } else {
-                // Vertical movement (trigger only once per swipe)
-                if (!_verticalTriggered && _accumulatedY.abs() >= _stepThreshold) {
-                  if (_accumulatedY > 0) {
-                    widget.onArrow('down');
-                  } else {
-                    widget.onArrow('up');
+                } else {
+                  // Vertical movement (trigger only once per swipe)
+                  if (!_verticalTriggered &&
+                      _accumulatedY.abs() >= _stepThreshold) {
+                    if (_accumulatedY > 0) {
+                      widget.onArrow('down');
+                    } else {
+                      widget.onArrow('up');
+                    }
+                    _hasMoved = true;
+                    _verticalTriggered = true;
+                    HapticFeedback.selectionClick();
                   }
-                  _hasMoved = true;
-                  _verticalTriggered = true;
-                  HapticFeedback.selectionClick();
                 }
               }
-            }
-          : null,
-      onPanEnd: widget.enabled
-          ? (details) {
-              setState(() => _pressed = false);
-              // If no movement occurred, treat as space tap
-              if (!_hasMoved) {
-                widget.onSpace();
+              : null,
+      onPanEnd:
+          widget.enabled
+              ? (details) {
+                setState(() => _pressed = false);
+                // If no movement occurred, treat as space tap
+                if (!_hasMoved) {
+                  widget.onSpace();
+                }
+                _accumulatedX = 0;
+                _accumulatedY = 0;
               }
-              _accumulatedX = 0;
-              _accumulatedY = 0;
-            }
-          : null,
-      onPanCancel: widget.enabled
-          ? () {
-              setState(() => _pressed = false);
-              _accumulatedX = 0;
-              _accumulatedY = 0;
-            }
-          : null,
+              : null,
+      onPanCancel:
+          widget.enabled
+              ? () {
+                setState(() => _pressed = false);
+                _accumulatedX = 0;
+                _accumulatedY = 0;
+              }
+              : null,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 100),
         height: 42,
@@ -524,21 +538,22 @@ class _SpaceKeyState extends State<_SpaceKey> {
           color: _pressed ? _keyPressedColor : _keyColor,
           borderRadius: BorderRadius.circular(6),
           border: Border.all(color: _keyBorder, width: 0.5),
-          boxShadow: _pressed
-              ? [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.5),
-                    blurRadius: 1,
-                    offset: const Offset(0, 0),
-                  ),
-                ]
-              : [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.4),
-                    blurRadius: 2,
-                    offset: const Offset(0, 1.5),
-                  ),
-                ],
+          boxShadow:
+              _pressed
+                  ? [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.5),
+                      blurRadius: 1,
+                      offset: const Offset(0, 0),
+                    ),
+                  ]
+                  : [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.4),
+                      blurRadius: 2,
+                      offset: const Offset(0, 1.5),
+                    ),
+                  ],
         ),
         child: const SizedBox.expand(), // Empty space bar, no hint text
       ),

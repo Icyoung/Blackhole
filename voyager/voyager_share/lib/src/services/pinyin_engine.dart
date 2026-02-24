@@ -1,6 +1,5 @@
 import 'dart:convert';
 
-import 'package:characters/characters.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -27,9 +26,14 @@ class PinyinEngine extends ChangeNotifier {
 
   /// Prefix index for predictive suggestions (e.g., "wo" -> "我们").
   final Map<String, List<String>> _prefixIndex = {};
+  // Next-char association index by committed Chinese prefix (e.g., "丽" -> ["江", ...]).
+  final Map<String, List<String>> _hanPrefixNextIndex = {};
+  String _predictionPrefix = '';
 
   static const int _prefixMaxSyllables = 2;
   static const int _prefixMaxCandidates = 36;
+  static const int _hanPrefixMaxChars = 3;
+  static const int _hanPrefixMaxCandidates = 12;
 
   bool _loaded = false;
 
@@ -39,9 +43,15 @@ class PinyinEngine extends ChangeNotifier {
   List<String> get candidates => _candidates;
   bool get loaded => _loaded;
   bool get hasInput => _buffer.isNotEmpty;
+  bool get hasCandidates => _candidates.isNotEmpty;
 
   /// Display text for the candidate bar: syllable-separated pinyin.
   String get displayPinyin {
+    if (_buffer.isEmpty &&
+        _predictionPrefix.isNotEmpty &&
+        _candidates.isNotEmpty) {
+      return _predictionPrefix;
+    }
     if (_syllables.isEmpty && _remainder.isEmpty) return _buffer;
     final parts = [..._syllables];
     if (_remainder.isNotEmpty) parts.add(_remainder);
@@ -52,7 +62,9 @@ class PinyinEngine extends ChangeNotifier {
   Future<void> loadDict() async {
     if (_loaded) return;
     try {
-      final jsonStr = await rootBundle.loadString('packages/voyager_share/assets/pinyin_dict.json');
+      final jsonStr = await rootBundle.loadString(
+        'packages/voyager_share/assets/pinyin_dict.json',
+      );
       final data = json.decode(jsonStr) as Map<String, dynamic>;
 
       _charDict = {};
@@ -70,11 +82,14 @@ class PinyinEngine extends ChangeNotifier {
       }
 
       _buildPrefixIndex();
+      _buildHanPrefixNextIndex();
       _loaded = true;
       // Refresh candidates in case the user started typing before dict load finished.
       _reparse();
       notifyListeners();
-      debugPrint('[PinyinEngine] Dict loaded: ${_charDict.length} syllables, ${_phraseDict.length} phrases');
+      debugPrint(
+        '[PinyinEngine] Dict loaded: ${_charDict.length} syllables, ${_phraseDict.length} phrases',
+      );
     } catch (e) {
       debugPrint('[PinyinEngine] Failed to load dict: $e');
     }
@@ -82,6 +97,7 @@ class PinyinEngine extends ChangeNotifier {
 
   /// Append a character to the buffer.
   void addChar(String c) {
+    _predictionPrefix = '';
     _buffer += c.toLowerCase();
     _reparse();
     notifyListeners();
@@ -101,7 +117,15 @@ class PinyinEngine extends ChangeNotifier {
     if (index < 0 || index >= _candidates.length) return null;
 
     final selected = _candidates[index];
-    final selectedCharCount = selected.characters.length;
+    final selectedCharCount = selected.runes.length;
+
+    // Selecting contextual next-char suggestions (no active pinyin composition).
+    if (_syllables.isEmpty && _remainder.isEmpty && _buffer.isEmpty) {
+      _appendPredictionPrefix(selected);
+      _updateContextCandidates();
+      notifyListeners();
+      return selected;
+    }
 
     // Determine how many syllables this selection consumed
     if (selectedCharCount >= _syllables.length) {
@@ -114,6 +138,12 @@ class PinyinEngine extends ChangeNotifier {
     }
 
     _reparse();
+    if (_buffer.isEmpty && _syllables.isEmpty && _remainder.isEmpty) {
+      _appendPredictionPrefix(selected);
+      _updateContextCandidates();
+    } else {
+      _predictionPrefix = '';
+    }
     notifyListeners();
     return selected;
   }
@@ -121,6 +151,7 @@ class PinyinEngine extends ChangeNotifier {
   /// Commit the raw buffer text as-is (for non-pinyin passthrough).
   String commitRaw() {
     final text = _buffer;
+    _predictionPrefix = '';
     clear();
     return text;
   }
@@ -130,7 +161,17 @@ class PinyinEngine extends ChangeNotifier {
     _buffer = '';
     _syllables = [];
     _remainder = '';
+    _predictionPrefix = '';
     _candidates = [];
+    notifyListeners();
+  }
+
+  void clearPredictions() {
+    if (_predictionPrefix.isEmpty && _candidates.isEmpty) return;
+    _predictionPrefix = '';
+    if (_buffer.isEmpty && _syllables.isEmpty && _remainder.isEmpty) {
+      _candidates = [];
+    }
     notifyListeners();
   }
 
@@ -197,6 +238,65 @@ class PinyinEngine extends ChangeNotifier {
     }
   }
 
+  void _buildHanPrefixNextIndex() {
+    _hanPrefixNextIndex.clear();
+    final counts = <String, Map<String, int>>{};
+    for (final phrases in _phraseDict.values) {
+      for (final phrase in phrases) {
+        final chars = phrase.runes.map((r) => String.fromCharCode(r)).toList();
+        if (chars.length < 2) {
+          continue;
+        }
+        final maxPrefix = (chars.length - 1).clamp(1, _hanPrefixMaxChars);
+        for (var prefixLen = 1; prefixLen <= maxPrefix; prefixLen++) {
+          final prefix = chars.sublist(0, prefixLen).join();
+          final nextChar = chars[prefixLen];
+          final bucket = counts.putIfAbsent(prefix, () => <String, int>{});
+          bucket[nextChar] = (bucket[nextChar] ?? 0) + 1;
+        }
+      }
+    }
+    for (final entry in counts.entries) {
+      final sorted =
+          entry.value.entries.toList()..sort((a, b) {
+            final byCount = b.value.compareTo(a.value);
+            if (byCount != 0) return byCount;
+            return a.key.compareTo(b.key);
+          });
+      _hanPrefixNextIndex[entry.key] =
+          sorted.take(_hanPrefixMaxCandidates).map((e) => e.key).toList();
+    }
+  }
+
+  void _appendPredictionPrefix(String selected) {
+    final merged =
+        (_predictionPrefix + selected).runes
+            .map((r) => String.fromCharCode(r))
+            .toList();
+    final start =
+        merged.length > _hanPrefixMaxChars
+            ? merged.length - _hanPrefixMaxChars
+            : 0;
+    _predictionPrefix = merged.sublist(start).join();
+  }
+
+  void _updateContextCandidates() {
+    if (_predictionPrefix.isEmpty) {
+      _candidates = [];
+      return;
+    }
+    final runes = _predictionPrefix.runes.toList();
+    for (var len = runes.length; len >= 1; len--) {
+      final key = String.fromCharCodes(runes.sublist(runes.length - len));
+      final matches = _hanPrefixNextIndex[key];
+      if (matches != null && matches.isNotEmpty) {
+        _candidates = List<String>.from(matches);
+        return;
+      }
+    }
+    _candidates = [];
+  }
+
   List<String> _leadingPrefixes(String input, int maxSyllables) {
     final prefixes = <String>[];
     final buffer = StringBuffer();
@@ -232,22 +332,36 @@ class PinyinEngine extends ChangeNotifier {
     _candidates = [];
     if (_syllables.isEmpty) return;
 
+    void addUniqueAll(Iterable<String> values) {
+      for (final value in values) {
+        if (!_candidates.contains(value)) {
+          _candidates.add(value);
+        }
+      }
+    }
+
     // 1. Try full phrase match first
     final fullPinyin = _syllables.join();
     final phraseMatches = _phraseDict[fullPinyin];
     if (phraseMatches != null) {
-      _candidates.addAll(phraseMatches);
+      addUniqueAll(phraseMatches);
+    }
+
+    final firstSyllable = _syllables.first;
+    final charMatches = _charDict[firstSyllable];
+
+    // For single-syllable input (e.g. "li"), prioritize single-character candidates.
+    if (_syllables.length == 1 && charMatches != null) {
+      addUniqueAll(charMatches);
     }
 
     // 2. Predictive phrase suggestions based on prefix (联想输入)
-    if (_remainder.isEmpty && _syllables.length <= _prefixMaxSyllables) {
+    if (_remainder.isEmpty &&
+        _syllables.length >= 2 &&
+        _syllables.length <= _prefixMaxSyllables) {
       final prefixMatches = _prefixIndex[fullPinyin];
       if (prefixMatches != null) {
-        for (final p in prefixMatches) {
-          if (!_candidates.contains(p)) {
-            _candidates.add(p);
-          }
-        }
+        addUniqueAll(prefixMatches);
       }
     }
 
@@ -257,24 +371,14 @@ class PinyinEngine extends ChangeNotifier {
         final partialPinyin = _syllables.sublist(0, len).join();
         final partial = _phraseDict[partialPinyin];
         if (partial != null) {
-          for (final p in partial) {
-            if (!_candidates.contains(p)) {
-              _candidates.add(p);
-            }
-          }
+          addUniqueAll(partial);
         }
       }
     }
 
-    // 4. Add single-character candidates for the first syllable
-    final firstSyllable = _syllables.first;
-    final charMatches = _charDict[firstSyllable];
+    // 4. Add single-character candidates for the first syllable (fallback for multi-syllable input)
     if (charMatches != null) {
-      for (final c in charMatches) {
-        if (!_candidates.contains(c)) {
-          _candidates.add(c);
-        }
-      }
+      addUniqueAll(charMatches);
     }
 
     // Limit to a reasonable number

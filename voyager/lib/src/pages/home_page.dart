@@ -8,16 +8,18 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:voyager_share/voyager_share.dart' show buildTerminalStyle;
-import 'package:voyager_share/src/services/pinyin_engine.dart';
-import 'package:voyager_share/src/widgets/keyboard/candidate_bar.dart';
+import 'package:voyager_share/voyager_share.dart'
+    show buildTerminalStyle, PinyinEngine, CandidateBar;
 import 'package:xterm/xterm.dart';
 
 import '../models/terminal_group.dart';
 import '../services/connection_manager.dart';
 import '../services/crypto_service.dart';
 import '../services/group_store.dart';
+import '../services/tailscale_service.dart';
 import '../services/terminal_manager.dart';
+import '../services/transport_models.dart';
+import '../services/transport_rollout.dart';
 import '../widgets/add_terminal_card.dart';
 import '../widgets/chrome/header_chrome.dart';
 import '../widgets/common/status_dot.dart';
@@ -38,7 +40,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final GlobalKey _quickBarKey = GlobalKey();
   final TextEditingController _urlController = TextEditingController(
-    text: 'ws://127.0.0.1:9527',
+    text: 'ws://127.0.0.1:9527/ws',
   );
   final TextEditingController _wormholeController = TextEditingController(
     text: 'ws://127.0.0.1:8080/ws',
@@ -65,7 +67,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   double get _bottomBarHeight =>
       (_showKeyboardTools ? _quickBarHeight : 0) +
       (_showHHKB ? _hhkbKeyboardHeight : 0) +
-      (_showHHKB && _chineseMode && _pinyinEngine.hasInput ? _candidateBarHeight : 0);
+      (_showHHKB && _chineseMode && _pinyinEngine.hasInput
+          ? _candidateBarHeight
+          : 0);
   double _lastMetricsInsetsBottom = 0;
   Size _lastMetricsSize = Size.zero;
 
@@ -96,7 +100,6 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   // E2E encryption
   final CryptoService _crypto = CryptoService();
   String? _publicKey;
-  String? _horizonPublicKey;
 
   List<String> get _visibleSessions => _groupStore.activeGroupSessionIds;
 
@@ -179,7 +182,6 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
           }
           // Setup encryption if Horizon provided public key
           if (horizonPublicKey != null && horizonPublicKey.isNotEmpty) {
-            _horizonPublicKey = horizonPublicKey;
             _setupEncryption(horizonPublicKey);
           }
           if (mounted) {
@@ -239,7 +241,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
 
     setState(() {
       _urlController.text =
-          prefs.getString('lanAddress') ?? 'ws://127.0.0.1:9527';
+          prefs.getString('lanAddress') ?? 'ws://127.0.0.1:9527/ws';
       _wormholeController.text =
           prefs.getString('wormholeAddress') ?? 'ws://127.0.0.1:8080/ws';
       _sessionController.text = prefs.getString('sessionId') ?? '';
@@ -252,7 +254,6 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       _chineseMode = prefs.getBool('chineseMode') ?? false;
       _deviceKey = prefs.getString('deviceKey');
       _deviceName = deviceName;
-      _horizonPublicKey = prefs.getString('horizonPublicKey');
     });
     _connectionManager.updateAutoReconnect(_autoReconnect);
   }
@@ -588,15 +589,198 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     if (_useWormhole) {
       await _ensureDeviceNameReady();
     }
-    final uri =
-        _useWormhole
-            ? _buildWormholeUri()
-            : Uri.parse(_urlController.text.trim());
-    await _connectionManager.connect(
-      uri: uri,
-      waitForPairing: _useWormhole,
+    final candidate = await _buildTransportCandidates();
+    await _connectionManager.connectWithCandidates(
+      candidates: candidate,
       autoReconnect: _autoReconnect,
     );
+  }
+
+  Future<List<TransportCandidate>> _buildTransportCandidates() async {
+    final lanUri = _tryParseUri(_urlController.text.trim());
+    final wormholeUri =
+        _useWormhole
+            ? _buildWormholeUri()
+            : _tryParseUri(_wormholeController.text.trim());
+    Uri? tailnetUri = _tryParseUri(TransportRolloutConfig.tailnetWsUrl.trim());
+    if (TransportRolloutConfig.enableTailnetCandidate && tailnetUri == null) {
+      tailnetUri = await _resolveTailnetUriFromPlatform(
+        template: lanUri ?? _tryParseUri(_urlController.text.trim()),
+      );
+    }
+
+    if (TransportRolloutConfig.forceWormholeRelay && wormholeUri != null) {
+      return [
+        TransportCandidate(
+          id: 'wormhole-forced',
+          kind: TransportKind.wormholeRelay,
+          uri: wormholeUri,
+          waitForPairing: true,
+          priority: 200,
+          probeByConnect: false,
+        ),
+      ];
+    }
+
+    final seed =
+        '${_deviceKey ?? 'anonymous'}:${_sessionController.text.trim()}:${_urlController.text.trim()}';
+    final smartEnabled = TransportRolloutConfig.isSmartRoutingEnabledForSeed(
+      seed,
+    );
+
+    final candidates = <TransportCandidate>[];
+
+    if (_useWormhole && wormholeUri != null) {
+      candidates.add(
+        TransportCandidate(
+          id: 'wormhole-default',
+          kind: TransportKind.wormholeRelay,
+          uri: wormholeUri,
+          waitForPairing: true,
+          priority: TransportRolloutConfig.defaultPriorityFor(
+            TransportKind.wormholeRelay,
+          ),
+          probeByConnect: false,
+        ),
+      );
+    }
+
+    if (lanUri != null && (!TransportRolloutConfig.forceWormholeRelay)) {
+      candidates.add(
+        TransportCandidate(
+          id: 'lan-default',
+          kind: TransportKind.lanDirect,
+          uri: lanUri,
+          waitForPairing: false,
+          priority: TransportRolloutConfig.defaultPriorityFor(
+            TransportKind.lanDirect,
+          ),
+        ),
+      );
+    }
+
+    if (TransportRolloutConfig.enableTailnetCandidate && tailnetUri != null) {
+      candidates.add(
+        TransportCandidate(
+          id: 'tailnet-default',
+          kind: TransportKind.tailnetDirect,
+          uri: tailnetUri,
+          waitForPairing: false,
+          priority: TransportRolloutConfig.defaultPriorityFor(
+            TransportKind.tailnetDirect,
+          ),
+        ),
+      );
+    }
+
+    if (!smartEnabled && candidates.isNotEmpty) {
+      return [_selectLegacyPrimary(candidates)];
+    }
+
+    if (candidates.isEmpty) {
+      final fallbackUri = _useWormhole ? wormholeUri : lanUri;
+      if (fallbackUri == null) {
+        return const [];
+      }
+      return [
+        TransportCandidate(
+          id: _useWormhole ? 'wormhole-fallback' : 'lan-fallback',
+          kind:
+              _useWormhole
+                  ? TransportKind.wormholeRelay
+                  : TransportKind.lanDirect,
+          uri: fallbackUri,
+          waitForPairing: _useWormhole,
+          priority: 1,
+          probeByConnect: !_useWormhole,
+        ),
+      ];
+    }
+    return candidates;
+  }
+
+  Future<Uri?> _resolveTailnetUriFromPlatform({Uri? template}) async {
+    try {
+      final service = TailscaleService.instance;
+      final available = await service.isAvailable().timeout(
+        const Duration(milliseconds: 700),
+        onTimeout: () => false,
+      );
+      if (!available) {
+        return null;
+      }
+
+      final peers = await service.getPeers().timeout(
+        const Duration(milliseconds: 1200),
+        onTimeout: () => const [],
+      );
+      final onlinePeers =
+          peers
+              .where((peer) => peer.online && peer.addresses.isNotEmpty)
+              .toList();
+      if (onlinePeers.isEmpty) {
+        return null;
+      }
+
+      TailscalePeer bestPeer = onlinePeers.first;
+      int? bestRttMs;
+      for (final peer in onlinePeers.take(5)) {
+        final rtt = await service
+            .measurePeerRtt(peer.id)
+            .timeout(const Duration(milliseconds: 300), onTimeout: () => null);
+        final ms = rtt?.inMilliseconds;
+        if (ms == null) {
+          continue;
+        }
+        if (bestRttMs == null || ms < bestRttMs) {
+          bestRttMs = ms;
+          bestPeer = peer;
+        }
+      }
+
+      final rawAddress = bestPeer.addresses.firstWhere(
+        (address) => address.trim().isNotEmpty,
+        orElse: () => '',
+      );
+      if (rawAddress.isEmpty) {
+        return null;
+      }
+      final host = rawAddress.split('/').first.trim();
+      if (host.isEmpty) {
+        return null;
+      }
+
+      final base = template ?? Uri.parse('ws://127.0.0.1:9527/ws');
+      final path = (base.path.isEmpty || base.path == '/') ? '/ws' : base.path;
+      final port = base.hasPort ? base.port : 9527;
+      final scheme = base.scheme.isEmpty ? 'ws' : base.scheme;
+      return Uri(scheme: scheme, host: host, port: port, path: path);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  TransportCandidate _selectLegacyPrimary(List<TransportCandidate> candidates) {
+    for (final candidate in candidates) {
+      if (_useWormhole && candidate.kind == TransportKind.wormholeRelay) {
+        return candidate;
+      }
+      if (!_useWormhole && candidate.kind == TransportKind.lanDirect) {
+        return candidate;
+      }
+    }
+    return candidates.first;
+  }
+
+  Uri? _tryParseUri(String raw) {
+    if (raw.isEmpty) {
+      return null;
+    }
+    try {
+      return Uri.parse(raw);
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> _ensureDeviceNameReady() async {
@@ -642,6 +826,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     if (_publicKey != null && _publicKey!.isNotEmpty) {
       query['public_key'] = _publicKey!;
     }
+    query['transport_id'] = 'wormhole-default';
+    query['path_id'] = 'wormhole_relay:default';
     final uri = base.replace(queryParameters: query);
     debugPrint('[Voyager] Wormhole URI: $uri');
     debugPrint(
@@ -862,7 +1048,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     // Number keys 1-9 -> select candidate
     if (key.length == 1 && key.codeUnitAt(0) >= 49 && key.codeUnitAt(0) <= 57) {
       final index = key.codeUnitAt(0) - 49; // '1' -> 0, '9' -> 8
-      if (_pinyinEngine.hasInput && index < _pinyinEngine.candidates.length) {
+      if (index < _pinyinEngine.candidates.length) {
         final selected = _pinyinEngine.select(index);
         if (selected != null) _sendRaw(selected);
       } else {
@@ -880,13 +1066,16 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       if (_pinyinEngine.hasInput) {
         _pinyinEngine.backspace();
       } else {
+        if (_pinyinEngine.hasCandidates) {
+          _pinyinEngine.clearPredictions();
+        }
         _sendRaw(key);
       }
       return true;
     }
     // Enter -> commit candidate/raw but do not send newline if composing
     if (key == '\r') {
-      if (_pinyinEngine.hasInput) {
+      if (_pinyinEngine.hasInput || _pinyinEngine.hasCandidates) {
         if (_pinyinEngine.candidates.isNotEmpty) {
           final selected = _pinyinEngine.select(0);
           if (selected != null) _sendRaw(selected);
@@ -902,6 +1091,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     if (_pinyinEngine.hasInput) {
       final raw = _pinyinEngine.commitRaw();
       _sendRaw(raw);
+    } else if (_pinyinEngine.hasCandidates) {
+      _pinyinEngine.clearPredictions();
     }
     return false;
   }
@@ -1051,8 +1242,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     final terminal = _activeTerminal ?? _idleTerminal;
     final controller = _activeController ?? _idleController;
     final scrollController = _activeScrollController ?? _idleScrollController;
-    final deleteDetection =
-        !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+    final deleteDetection = !kIsWeb && (Platform.isAndroid || Platform.isIOS);
     // connectionContent: 32 + 16(padding) = 48, tab栏: 36 + 2(padding) = 38
     const terminalTopInset = 48 + 38;
 
@@ -1161,9 +1351,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                                         : TextInputType.text,
                                 backgroundOpacity: 1.0,
                                 padding: const EdgeInsets.all(8),
-                                textStyle: buildTerminalStyle(
-                                  fontSize: 14,
-                                ),
+                                textStyle: buildTerminalStyle(fontSize: 14),
                               ),
                             );
                           }
@@ -1230,9 +1418,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                           8,
                           _bottomBarHeight + 8,
                         ),
-                        textStyle: buildTerminalStyle(
-                          fontSize: 14,
-                        ),
+                        textStyle: buildTerminalStyle(fontSize: 14),
                       ),
                   if (_dragging && !_multiWindow)
                     Positioned.fill(
@@ -1245,25 +1431,25 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
             ),
           ),
           Positioned(
-              top: MediaQuery.of(context).padding.top + 86,
-              left: 0,
-              right: 0,
-              height: 24,
-              child: IgnorePointer(
-                child: Container(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [
-                        Colors.black.withValues(alpha: 0.4),
-                        Colors.transparent,
-                      ],
-                    ),
+            top: MediaQuery.of(context).padding.top + 86,
+            left: 0,
+            right: 0,
+            height: 24,
+            child: IgnorePointer(
+              child: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withValues(alpha: 0.4),
+                      Colors.transparent,
+                    ],
                   ),
                 ),
               ),
             ),
+          ),
           Positioned(
             top: 0,
             left: 0,
@@ -1319,7 +1505,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                             )
                             : const SizedBox.shrink(),
                   ),
-                  if (_showHHKB && _chineseMode && _pinyinEngine.hasInput)
+                  if (_showHHKB &&
+                      _chineseMode &&
+                      (_pinyinEngine.hasInput || _pinyinEngine.hasCandidates))
                     CandidateBar(
                       pinyin: _pinyinEngine.displayPinyin,
                       candidates: _pinyinEngine.candidates,
@@ -1347,8 +1535,10 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                       onScrollToBottom: _scrollToBottom,
                       onKey: (key, {bool isSpecial = false}) {
                         if (_chineseMode && !_ctrl && !_alt) {
-                          final consumed =
-                              _handlePinyinKey(key, isSpecial: isSpecial);
+                          final consumed = _handlePinyinKey(
+                            key,
+                            isSpecial: isSpecial,
+                          );
                           if (consumed) {
                             return;
                           }
@@ -1388,10 +1578,29 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
             ? 'Voyager · $_remoteDeviceName'
             : 'Voyager';
 
-    // Subtitle: "Connected to LAN/Wormhole" or "Disconnected"
+    // Subtitle: transport-aware live state.
     String subtitle;
     if (_connected) {
-      subtitle = _useWormhole ? 'Connected to Wormhole' : 'Connected to LAN';
+      final kind = _connectionManager.activeTransportKind;
+      switch (kind) {
+        case TransportKind.lanDirect:
+          subtitle = 'Connected via LAN';
+          break;
+        case TransportKind.tailnetDirect:
+          subtitle = 'Connected via Tailnet';
+          break;
+        case TransportKind.wormholeRelay:
+          subtitle = 'Connected via Wormhole';
+          break;
+        case TransportKind.unknown:
+          subtitle =
+              _useWormhole ? 'Connected to Wormhole' : 'Connected to LAN';
+          break;
+      }
+      final fallback = _connectionManager.activeFallbackReason;
+      if (fallback != null && fallback.isNotEmpty) {
+        subtitle = '$subtitle · fallback:$fallback';
+      }
     } else {
       subtitle = 'Disconnected';
     }

@@ -53,6 +53,8 @@ struct WsParams {
     device_name: Option<String>,
     device_type: Option<String>,
     public_key: Option<String>,
+    transport_id: Option<String>,
+    path_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +71,8 @@ struct VoyagerInfo {
     device_name: Option<String>,
     device_type: Option<String>,
     public_key: Option<String>,
+    transport_id: Option<String>,
+    path_id: Option<String>,
     pairing_state: PairingState,
 }
 
@@ -178,6 +182,8 @@ async fn ws_handler(
     let device_name = params.device_name.clone();
     let device_type = params.device_type.clone();
     let public_key = params.public_key.clone();
+    let transport_id = params.transport_id.clone();
+    let path_id = params.path_id.clone();
     ws.on_upgrade(move |socket| {
         handle_socket(
             state,
@@ -187,6 +193,8 @@ async fn ws_handler(
             device_name,
             device_type,
             public_key,
+            transport_id,
+            path_id,
             socket,
         )
     })
@@ -268,6 +276,8 @@ async fn handle_socket(
     device_name: Option<String>,
     device_type: Option<String>,
     public_key: Option<String>,
+    transport_id: Option<String>,
+    path_id: Option<String>,
     socket: WebSocket,
 ) {
     let (mut sender, mut receiver) = socket.split();
@@ -326,6 +336,8 @@ async fn handle_socket(
                         device_name: device_name.clone(),
                         device_type: device_type.clone(),
                         public_key: public_key.clone(),
+                        transport_id: transport_id.clone(),
+                        path_id: path_id.clone(),
                         pairing_state: PairingState::Pending,
                     };
                     session.voyagers.push(voyager_info);
@@ -381,6 +393,8 @@ async fn handle_socket(
             "deviceName": device_name.clone().unwrap_or_else(|| "Unknown Device".to_string()),
             "deviceType": device_type,
             "publicKey": public_key,
+            "transportId": transport_id,
+            "pathId": path_id,
         });
         let mut sessions = state.sessions.lock().await;
         if let Some(session) = sessions.get_mut(&session_id) {
@@ -466,10 +480,18 @@ async fn route_message(
             });
         }
         Role::Voyager => {
-            // Check if this voyager is approved
+            // Check if this voyager is approved and capture transport metadata.
+            let mut approved_transport_id: Option<String> = None;
+            let mut approved_path_id: Option<String> = None;
             let is_approved = session.voyagers.iter().any(|v| {
                 if let Some(origin_tx) = origin.as_ref() {
-                    v.tx.same_channel(origin_tx) && v.pairing_state == PairingState::Approved
+                    let same = v.tx.same_channel(origin_tx);
+                    let approved = v.pairing_state == PairingState::Approved;
+                    if same && approved {
+                        approved_transport_id = v.transport_id.clone();
+                        approved_path_id = v.path_id.clone();
+                    }
+                    same && approved
                 } else {
                     false
                 }
@@ -481,7 +503,12 @@ async fn route_message(
             }
 
             if let Some(horizon) = session.horizon.as_ref() {
-                if horizon.send(msg).is_err() {
+                let outbound = inject_transport_metadata(
+                    msg,
+                    approved_transport_id.as_deref(),
+                    approved_path_id.as_deref(),
+                );
+                if horizon.send(outbound).is_err() {
                     session.horizon = None;
                 }
             } else {
@@ -630,10 +657,12 @@ async fn cleanup_connection(
             }
         }
         Role::Voyager => {
-            // Find the disconnecting voyager's device_key before removing
-            let disconnecting_key = session.voyagers.iter()
-                .find(|v| v.tx.same_channel(tx))
-                .and_then(|v| v.device_key.clone());
+            // Find disconnecting voyager metadata before removing.
+            let disconnecting = session.voyagers.iter().find(|v| v.tx.same_channel(tx));
+            let disconnecting_key = disconnecting.and_then(|v| v.device_key.clone());
+            let disconnecting_transport_id =
+                disconnecting.and_then(|v| v.transport_id.clone());
+            let disconnecting_path_id = disconnecting.and_then(|v| v.path_id.clone());
 
             session.voyagers.retain(|v| !v.tx.same_channel(tx));
 
@@ -642,7 +671,9 @@ async fn cleanup_connection(
                 let disconnect_msg = serde_json::json!({
                     "v": 1,
                     "type": "voyager_disconnect",
-                    "deviceKey": disconnecting_key
+                    "deviceKey": disconnecting_key,
+                    "transportId": disconnecting_transport_id,
+                    "pathId": disconnecting_path_id
                 });
                 let _ = horizon.send(Message::Text(disconnect_msg.to_string()));
             }
@@ -695,6 +726,33 @@ fn build_no_horizon_reply(msg: &Message) -> Option<Message> {
         })
         .to_string(),
     ))
+}
+
+fn inject_transport_metadata(
+    msg: Message,
+    transport_id: Option<&str>,
+    path_id: Option<&str>,
+) -> Message {
+    let Message::Text(text) = msg else {
+        return msg;
+    };
+    let Ok(mut value) = serde_json::from_str::<Value>(&text) else {
+        return Message::Text(text);
+    };
+    let Value::Object(map) = &mut value else {
+        return Message::Text(text);
+    };
+
+    if let Some(transport_id) = transport_id {
+        map.entry("transportId".to_string())
+            .or_insert_with(|| Value::String(transport_id.to_string()));
+    }
+    if let Some(path_id) = path_id {
+        map.entry("pathId".to_string())
+            .or_insert_with(|| Value::String(path_id.to_string()));
+    }
+
+    Message::Text(value.to_string())
 }
 
 fn token_valid(state: &AppState, token: Option<&str>) -> bool {

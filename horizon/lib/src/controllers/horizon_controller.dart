@@ -9,7 +9,11 @@ import 'package:uuid/uuid.dart';
 
 import '../services/crypto_service.dart';
 import '../services/group_manager.dart';
+import '../services/session_gateway.dart';
 import '../services/terminal_service.dart';
+import '../services/transport_models.dart';
+import '../services/transport_rollout.dart';
+import '../services/transport_telemetry.dart';
 import '../services/ws_server.dart';
 
 /// Represents a paired device that has been approved to connect
@@ -35,24 +39,24 @@ class PairedDevice {
   String? sharedSecret;
 
   Map<String, dynamic> toJson() => {
-        'deviceKey': deviceKey,
-        'deviceName': deviceName,
-        'firstPairedAt': firstPairedAt.toIso8601String(),
-        'lastSeenAt': lastSeenAt.toIso8601String(),
-        'deviceType': deviceType.name,
-        if (publicKey != null) 'publicKey': publicKey,
-        if (sharedSecret != null) 'sharedSecret': sharedSecret,
-      };
+    'deviceKey': deviceKey,
+    'deviceName': deviceName,
+    'firstPairedAt': firstPairedAt.toIso8601String(),
+    'lastSeenAt': lastSeenAt.toIso8601String(),
+    'deviceType': deviceType.name,
+    if (publicKey != null) 'publicKey': publicKey,
+    if (sharedSecret != null) 'sharedSecret': sharedSecret,
+  };
 
   factory PairedDevice.fromJson(Map<String, dynamic> json) => PairedDevice(
-        deviceKey: json['deviceKey'] as String,
-        deviceName: json['deviceName'] as String,
-        firstPairedAt: DateTime.parse(json['firstPairedAt'] as String),
-        lastSeenAt: DateTime.parse(json['lastSeenAt'] as String),
-        deviceType: _parseDeviceType(json['deviceType'] as String?),
-        publicKey: json['publicKey'] as String?,
-        sharedSecret: json['sharedSecret'] as String?,
-      );
+    deviceKey: json['deviceKey'] as String,
+    deviceName: json['deviceName'] as String,
+    firstPairedAt: DateTime.parse(json['firstPairedAt'] as String),
+    lastSeenAt: DateTime.parse(json['lastSeenAt'] as String),
+    deviceType: _parseDeviceType(json['deviceType'] as String?),
+    publicKey: json['publicKey'] as String?,
+    sharedSecret: json['sharedSecret'] as String?,
+  );
 
   static DeviceType _parseDeviceType(String? type) {
     switch (type) {
@@ -113,26 +117,40 @@ class HorizonController extends ChangeNotifier {
     Duration? pingInterval = const Duration(seconds: 10),
     bool devModeRequested = false,
     bool requireDevModeConfirmation = false,
-  })  : _wsServer = WsServer(port: port, pingInterval: pingInterval),
-        _devModeRequested = devModeRequested,
-        _requireDevModeConfirmation = requireDevModeConfirmation,
-        _wormholeBaseUrl = Platform.environment['WORMHOLE_URL'],
-        _wormholeToken = Platform.environment['WORMHOLE_TOKEN'],
-        _wormholeEnabled =
-            (Platform.environment['WORMHOLE_URL'] ?? '').isNotEmpty,
-        _hostDeviceName = Platform.localHostname;
+  }) : _wsServer = WsServer(port: port, pingInterval: pingInterval),
+       _devModeRequested = devModeRequested,
+       _requireDevModeConfirmation = requireDevModeConfirmation,
+       _wormholeBaseUrl = Platform.environment['WORMHOLE_URL'],
+       _wormholeToken = Platform.environment['WORMHOLE_TOKEN'],
+       _wormholeEnabled =
+           (Platform.environment['WORMHOLE_URL'] ?? '').isNotEmpty,
+       _hostDeviceName = Platform.localHostname;
 
   final TerminalPlugin _terminal = TerminalPlugin();
   final StreamController<TerminalOutput> _localOutputController =
       StreamController<TerminalOutput>.broadcast();
-  final MethodChannel _systemChannel = const MethodChannel('com.blackhole/system');
+  final MethodChannel _systemChannel = const MethodChannel(
+    'com.blackhole/system',
+  );
   final WsServer _wsServer;
+  late final SessionGateway _sessionGateway = SessionGateway(
+    decodeIncoming: _decodeIncoming,
+    onDecoded: _handleGatewayDecodedMessage,
+    onUnsupported: _handleGatewayUnsupported,
+  );
+  final TransportTelemetry _transportTelemetry = TransportTelemetry(
+    source: 'horizon',
+  );
   final GroupManager _groupManager = GroupManager();
   String? _wormholeBaseUrl;
   String? _wormholeToken;
   bool _wormholeEnabled;
   bool _wormholeConnecting = false;
   bool _lanEnabled = true;
+  final bool _tailnetIngressEnabled =
+      TransportRolloutConfig.enableTailnetIngress;
+  final bool _transportSwitchEnabled =
+      TransportRolloutConfig.enableTransportSwitch;
   String? _hostDeviceName;
 
   final Set<String> _sessions = {};
@@ -180,6 +198,7 @@ class HorizonController extends ChangeNotifier {
   bool get wormholeEnabled => _wormholeEnabled;
   bool get wormholeConnecting => _wormholeConnecting;
   bool get wormholeConnected => _wormholeEnabled && _wormholeSocket != null;
+  bool get tailnetIngressEnabled => _tailnetIngressEnabled;
   String get wormholeBaseUrl => _wormholeBaseUrl ?? '';
   String get wormholeToken => _wormholeToken ?? '';
   String? get wormholeSessionId => _wormholeSessionId;
@@ -209,8 +228,7 @@ class HorizonController extends ChangeNotifier {
   List<String> get localSessions => _sessions.toList();
 
   /// Get the local terminal output stream (for direct subscription)
-  Stream<TerminalOutput> get localOutputStream =>
-      _localOutputController.stream;
+  Stream<TerminalOutput> get localOutputStream => _localOutputController.stream;
 
   Future<void> applyLocalGroupCommand(Map<String, dynamic> payload) async {
     final type = payload['type'];
@@ -335,9 +353,10 @@ class HorizonController extends ChangeNotifier {
 
     // For large data, chunk it to prevent PTY buffer overflow
     for (var offset = 0; offset < data.length; offset += _maxChunkSize) {
-      final end = (offset + _maxChunkSize < data.length)
-          ? offset + _maxChunkSize
-          : data.length;
+      final end =
+          (offset + _maxChunkSize < data.length)
+              ? offset + _maxChunkSize
+              : data.length;
       final chunk = data.sublist(offset, end);
       await _terminal.writeStdin(sessionId, chunk);
 
@@ -399,9 +418,8 @@ class HorizonController extends ChangeNotifier {
         {'initialPath': home},
       );
       final granted = _folderAccessGranted(result);
-      _accessMessage = granted
-          ? 'Folder access granted.'
-          : 'Folder access denied.';
+      _accessMessage =
+          granted ? 'Folder access granted.' : 'Folder access denied.';
     } catch (error) {
       _accessMessage = 'Folder access failed: $error';
     }
@@ -458,15 +476,26 @@ class HorizonController extends ChangeNotifier {
       }
       await _createSession();
       _wsServer.onClientCount = (_) => notifyListeners();
-      _wsServer.onClientConnected = _sendSessionList;
+      _wsServer.onClientConnected = (socket) {
+        _transportTelemetry.emit(
+          event: 'connection_opened',
+          kind: TransportKind.lanDirect,
+          transportId: 'lan',
+          pathId: 'lan:${socket.hashCode}',
+          connected: true,
+        );
+        _sendSessionList(socket);
+      };
       if (_lanEnabled) {
-        await _wsServer.start(onMessage: _handleMessage);
+        await _wsServer.start(onMessage: _handleLanIngressMessage);
       }
-      _outputSub = _terminal.outputStream.listen(_handleTerminalOutput,
-          onError: (error) {
-        _error = 'Terminal output error: $error';
-        notifyListeners();
-      });
+      _outputSub = _terminal.outputStream.listen(
+        _handleTerminalOutput,
+        onError: (error) {
+          _error = 'Terminal output error: $error';
+          notifyListeners();
+        },
+      );
       if (_wormholeEnabled) {
         await _connectWormhole();
       }
@@ -480,7 +509,15 @@ class HorizonController extends ChangeNotifier {
       await _killAllSessions();
       await _outputSub?.cancel();
       _outputSub = null;
-      _error = 'Failed to start Horizon: $error';
+      final msg = error.toString();
+      if (msg.contains('Address already in use') ||
+          msg.contains('EADDRINUSE')) {
+        _error =
+            'Port ${_wsServer.port} already in use. '
+            'Another Horizon instance may be running.';
+      } else {
+        _error = 'Failed to start Horizon: $error';
+      }
       _running = false;
       notifyListeners();
     }
@@ -518,7 +555,7 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     if (_lanEnabled) {
-      await _wsServer.start(onMessage: _handleMessage);
+      await _wsServer.start(onMessage: _handleLanIngressMessage);
       _addresses = await _resolveAddresses();
     } else {
       await _wsServer.stop();
@@ -572,49 +609,132 @@ class HorizonController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> _handleMessage(WebSocket socket, dynamic message) async {
-    final decoded = _decodeIncoming(message);
-    if (decoded is! Map) {
+  Future<void> _handleGatewayDecodedMessage(
+    GatewayIngressContext context,
+    Map<String, dynamic> decoded,
+  ) async {
+    switch (context.source) {
+      case GatewayIngressSource.lan:
+      case GatewayIngressSource.tailnet:
+        final socket = context.socket;
+        if (socket == null) {
+          return;
+        }
+        await _handleDecodedLanMessage(socket, decoded);
+        return;
+      case GatewayIngressSource.wormhole:
+        await _handleDecodedWormholeMessage(decoded);
+        return;
+    }
+  }
+
+  void _handleGatewayUnsupported(
+    GatewayIngressContext context,
+    Map<String, dynamic> decoded,
+  ) {
+    if (context.source == GatewayIngressSource.wormhole) {
       return;
     }
-    if (decoded?['type'] == 'unsupported') {
-      _sendError(
+    final socket = context.socket;
+    if (socket == null) {
+      return;
+    }
+    _sendError(socket, 'unsupported_version', 'Unsupported protocol version');
+  }
+
+  Future<void> _handleLanIngressMessage(
+    WebSocket socket,
+    dynamic message,
+  ) async {
+    await _sessionGateway.handle(
+      GatewayIngressContext(
+        source: GatewayIngressSource.lan,
+        transportKind: TransportKind.lanDirect,
+        socket: socket,
+        transportId: 'lan',
+        pathId: 'lan:${socket.hashCode}',
+      ),
+      message,
+    );
+  }
+
+  Future<void> handleTailnetIngressMessage(
+    WebSocket socket,
+    dynamic message,
+  ) async {
+    if (!_tailnetIngressEnabled) {
+      return;
+    }
+    await _sessionGateway.handle(
+      GatewayIngressContext(
+        source: GatewayIngressSource.tailnet,
+        transportKind: TransportKind.tailnetDirect,
+        socket: socket,
+        transportId: 'tailnet',
+        pathId: 'tailnet:${socket.hashCode}',
+      ),
+      message,
+    );
+  }
+
+  Future<void> _handleDecodedLanMessage(
+    WebSocket socket,
+    Map<String, dynamic> decoded,
+  ) async {
+    final type = decoded['type'];
+    final controlType = TransportControlType.fromType(type as String?);
+    if (controlType == TransportControlType.transportProbe) {
+      _transportTelemetry.emit(
+        event: 'probe_result',
+        kind: TransportKind.lanDirect,
+        transportId: 'lan',
+        pathId: 'lan:${socket.hashCode}',
+      );
+      _wsServer.sendTo(
         socket,
-        'unsupported_version',
-        'Unsupported protocol version',
+        _buildTransportProbeResult(TransportKind.lanDirect),
       );
       return;
     }
-    final type = decoded?['type'];
+    if (_handleTransportSwitchControl(
+      controlType,
+      decoded,
+      transportKind: TransportKind.lanDirect,
+      reply: (message) => _wsServer.sendTo(socket, message),
+    )) {
+      return;
+    }
     if (type == 'group_list') {
       _handleGroupList(socket: socket);
       return;
     }
     if (type == 'group_create') {
-      final name = decoded?['name'];
-      unawaited(_handleGroupCreate(name is String ? name : null, socket: socket));
+      final name = decoded['name'];
+      unawaited(
+        _handleGroupCreate(name is String ? name : null, socket: socket),
+      );
       return;
     }
     if (type == 'group_rename') {
-      final groupId = decoded?['groupId'];
-      final name = decoded?['name'];
+      final groupId = decoded['groupId'];
+      final name = decoded['name'];
       if (groupId is String && name is String) {
         _handleGroupRename(groupId, name, socket: socket);
       }
       return;
     }
     if (type == 'group_delete') {
-      final groupId = decoded?['groupId'];
+      final groupId = decoded['groupId'];
       if (groupId is String) {
         _handleGroupDelete(groupId, socket: socket);
       }
       return;
     }
     if (type == 'group_move_session') {
-      final sessionId = decoded?['sessionId'];
-      final groupId = decoded?['groupId'];
-      final oldIndex = decoded?['oldIndex'];
-      final newIndex = decoded?['newIndex'];
+      final sessionId = decoded['sessionId'];
+      final groupId = decoded['groupId'];
+      final oldIndex = decoded['oldIndex'];
+      final newIndex = decoded['newIndex'];
       if (sessionId is String && groupId is String) {
         _handleGroupMoveSession(
           sessionId,
@@ -627,23 +747,23 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     if (type == 'session_rename') {
-      final sessionId = decoded?['sessionId'];
-      final name = decoded?['name'];
+      final sessionId = decoded['sessionId'];
+      final name = decoded['name'];
       if (sessionId is String && name is String) {
         _handleSessionRename(sessionId, name, socket: socket);
       }
       return;
     }
     if (type == 'group_reorder') {
-      final groupId = decoded?['groupId'];
-      final newIndex = decoded?['newIndex'];
+      final groupId = decoded['groupId'];
+      final newIndex = decoded['newIndex'];
       if (groupId is String && newIndex is int) {
         _handleGroupReorder(groupId, newIndex, socket: socket);
       }
       return;
     }
     if (type == 'group_delete_with_sessions') {
-      final groupId = decoded?['groupId'];
+      final groupId = decoded['groupId'];
       if (groupId is String) {
         unawaited(_handleGroupDeleteWithSessions(groupId, socket: socket));
       }
@@ -658,14 +778,14 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     if (type == 'sync') {
-      final sessionId = decoded?['sessionId'];
+      final sessionId = decoded['sessionId'];
       if (sessionId is String) {
         _sendSessionSync(socket, sessionId);
       }
       return;
     }
     if (type == 'create') {
-      final groupId = decoded?['groupId'];
+      final groupId = decoded['groupId'];
       if (groupId is String && groupId.isNotEmpty) {
         final sessionId = await _createSessionInGroup(groupId);
         if (sessionId != null) {
@@ -682,20 +802,20 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     if (type == 'close') {
-      final sessionId = decoded?['sessionId'];
+      final sessionId = decoded['sessionId'];
       if (sessionId is String) {
         await _closeSession(sessionId);
         _notifySessionClosed(sessionId);
       }
       return;
     }
-    final sessionId = decoded?['sessionId'];
+    final sessionId = decoded['sessionId'];
     if (sessionId is! String || !_sessions.contains(sessionId)) {
       return;
     }
     if (type == 'stdin') {
-      final data = decoded?['data'];
-      final raw = decoded?['raw'];
+      final data = decoded['data'];
+      final raw = decoded['raw'];
       if (data is String) {
         _logDeleteProbe('Horizon/LAN data', data.codeUnits);
         _armStdoutProbe(data.codeUnits);
@@ -707,8 +827,8 @@ class HorizonController extends ChangeNotifier {
         await _writeStdinSafe(sessionId, raw);
       }
     } else if (type == 'resize') {
-      final rows = decoded?['rows'];
-      final cols = decoded?['cols'];
+      final rows = decoded['rows'];
+      final cols = decoded['cols'];
       if (rows is int && cols is int) {
         await _terminal.resize(sessionId, rows, cols);
       }
@@ -730,19 +850,25 @@ class HorizonController extends ChangeNotifier {
   }
 
   void _appendToHistory(String sessionId, Uint8List data) {
-    final bytesBuilder =
-        _sessionHistoryBytes.putIfAbsent(sessionId, () => BytesBuilder());
-    final utf8Buffer =
-        _sessionHistoryUtf8Buffer.putIfAbsent(sessionId, () => <int>[]);
+    final bytesBuilder = _sessionHistoryBytes.putIfAbsent(
+      sessionId,
+      () => BytesBuilder(),
+    );
+    final utf8Buffer = _sessionHistoryUtf8Buffer.putIfAbsent(
+      sessionId,
+      () => <int>[],
+    );
 
     // Add incoming data to UTF-8 buffer
     utf8Buffer.addAll(data);
 
     // Find the last complete UTF-8 sequence
     int completeEnd = utf8Buffer.length;
-    for (int i = utf8Buffer.length - 1;
-        i >= 0 && i >= utf8Buffer.length - 4;
-        i--) {
+    for (
+      int i = utf8Buffer.length - 1;
+      i >= 0 && i >= utf8Buffer.length - 4;
+      i--
+    ) {
       final byte = utf8Buffer[i];
       if ((byte & 0xC0) == 0xC0) {
         // Start of multi-byte sequence
@@ -805,10 +931,7 @@ class HorizonController extends ChangeNotifier {
     final changed = _reconcileGroupSessions();
     _wsServer.sendTo(
       socket,
-      _encodeMessage({
-        'type': 'session_list',
-        'sessions': _sessions.toList(),
-      }),
+      _encodeMessage({'type': 'session_list', 'sessions': _sessions.toList()}),
     );
     _wsServer.sendTo(socket, _buildHostInfoMessage());
     if (changed) {
@@ -922,10 +1045,26 @@ class HorizonController extends ChangeNotifier {
       _wormholeSub = socket.listen(
         _handleWormholeMessage,
         onDone: () {
+          _transportTelemetry.emit(
+            event: 'connection_closed',
+            kind: TransportKind.wormholeRelay,
+            transportId: 'wormhole',
+            pathId: 'wormhole:primary',
+            connected: false,
+            extra: {'reason': 'remote_closed'},
+          );
           _wormholeSocket = null;
           _scheduleWormholeReconnect();
         },
         onError: (error) {
+          _transportTelemetry.emit(
+            event: 'connection_closed',
+            kind: TransportKind.wormholeRelay,
+            transportId: 'wormhole',
+            pathId: 'wormhole:primary',
+            connected: false,
+            error: error,
+          );
           _wormholeSocket = null;
           _error = 'Wormhole error: $error';
           notifyListeners();
@@ -933,9 +1072,24 @@ class HorizonController extends ChangeNotifier {
         },
       );
       _wormholeReconnectDelaySeconds = 2;
+      _transportTelemetry.emit(
+        event: 'connection_opened',
+        kind: TransportKind.wormholeRelay,
+        transportId: 'wormhole',
+        pathId: 'wormhole:primary',
+        connected: true,
+      );
       _sendToWormhole(_buildHostInfoMessage());
       notifyListeners();
     } catch (error) {
+      _transportTelemetry.emit(
+        event: 'connection_closed',
+        kind: TransportKind.wormholeRelay,
+        transportId: 'wormhole',
+        pathId: 'wormhole:primary',
+        connected: false,
+        error: error,
+      );
       _wormholeConnecting = false;
       _error = 'Failed to connect Wormhole: $error';
       notifyListeners();
@@ -967,6 +1121,7 @@ class HorizonController extends ChangeNotifier {
   }
 
   Future<void> _disconnectWormhole() async {
+    final wasConnected = _wormholeSocket != null;
     await _wormholeSub?.cancel();
     _wormholeSub = null;
     try {
@@ -976,6 +1131,16 @@ class HorizonController extends ChangeNotifier {
     _wormholeReconnectTimer?.cancel();
     _wormholeReconnectTimer = null;
     _wormholeClientCount = 0;
+    if (wasConnected) {
+      _transportTelemetry.emit(
+        event: 'connection_closed',
+        kind: TransportKind.wormholeRelay,
+        transportId: 'wormhole',
+        pathId: 'wormhole:primary',
+        connected: false,
+        extra: {'reason': 'manual_disconnect'},
+      );
+    }
   }
 
   void _sendToWormhole(Object message) {
@@ -991,43 +1156,71 @@ class HorizonController extends ChangeNotifier {
   }
 
   void _handleWormholeMessage(dynamic message) async {
-    final decoded = _decodeIncoming(message);
-    if (decoded is! Map) {
+    await _sessionGateway.handle(
+      const GatewayIngressContext(
+        source: GatewayIngressSource.wormhole,
+        transportKind: TransportKind.wormholeRelay,
+        transportId: 'wormhole',
+        pathId: 'wormhole:primary',
+      ),
+      message,
+    );
+  }
+
+  Future<void> _handleDecodedWormholeMessage(
+    Map<String, dynamic> decoded,
+  ) async {
+    final type = decoded['type'];
+    final controlType = TransportControlType.fromType(type as String?);
+    if (controlType == TransportControlType.transportProbe) {
+      _transportTelemetry.emit(
+        event: 'probe_result',
+        kind: TransportKind.wormholeRelay,
+        transportId: 'wormhole',
+        pathId: 'wormhole:primary',
+      );
+      _sendToWormhole(_buildTransportProbeResult(TransportKind.wormholeRelay));
       return;
     }
-    if (decoded?['type'] == 'unsupported') {
+    if (_handleTransportSwitchControl(
+      controlType,
+      decoded,
+      transportKind: TransportKind.wormholeRelay,
+      reply: _sendToWormhole,
+    )) {
       return;
     }
-    final type = decoded?['type'];
     if (type == 'group_list') {
       _handleGroupList(fromWormhole: true);
       return;
     }
     if (type == 'group_create') {
-      final name = decoded?['name'];
-      unawaited(_handleGroupCreate(name is String ? name : null, fromWormhole: true));
+      final name = decoded['name'];
+      unawaited(
+        _handleGroupCreate(name is String ? name : null, fromWormhole: true),
+      );
       return;
     }
     if (type == 'group_rename') {
-      final groupId = decoded?['groupId'];
-      final name = decoded?['name'];
+      final groupId = decoded['groupId'];
+      final name = decoded['name'];
       if (groupId is String && name is String) {
         _handleGroupRename(groupId, name, fromWormhole: true);
       }
       return;
     }
     if (type == 'group_delete') {
-      final groupId = decoded?['groupId'];
+      final groupId = decoded['groupId'];
       if (groupId is String) {
         _handleGroupDelete(groupId, fromWormhole: true);
       }
       return;
     }
     if (type == 'group_move_session') {
-      final sessionId = decoded?['sessionId'];
-      final groupId = decoded?['groupId'];
-      final oldIndex = decoded?['oldIndex'];
-      final newIndex = decoded?['newIndex'];
+      final sessionId = decoded['sessionId'];
+      final groupId = decoded['groupId'];
+      final oldIndex = decoded['oldIndex'];
+      final newIndex = decoded['newIndex'];
       if (sessionId is String && groupId is String) {
         _handleGroupMoveSession(
           sessionId,
@@ -1040,23 +1233,23 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     if (type == 'session_rename') {
-      final sessionId = decoded?['sessionId'];
-      final name = decoded?['name'];
+      final sessionId = decoded['sessionId'];
+      final name = decoded['name'];
       if (sessionId is String && name is String) {
         _handleSessionRename(sessionId, name, fromWormhole: true);
       }
       return;
     }
     if (type == 'group_reorder') {
-      final groupId = decoded?['groupId'];
-      final newIndex = decoded?['newIndex'];
+      final groupId = decoded['groupId'];
+      final newIndex = decoded['newIndex'];
       if (groupId is String && newIndex is int) {
         _handleGroupReorder(groupId, newIndex, fromWormhole: true);
       }
       return;
     }
     if (type == 'group_delete_with_sessions') {
-      final groupId = decoded?['groupId'];
+      final groupId = decoded['groupId'];
       if (groupId is String) {
         unawaited(_handleGroupDeleteWithSessions(groupId, fromWormhole: true));
       }
@@ -1067,7 +1260,7 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     if (type == 'session_assigned') {
-      final assignedId = decoded?['sessionId'];
+      final assignedId = decoded['sessionId'];
       if (assignedId is String && assignedId.isNotEmpty) {
         _wormholeSessionId = assignedId;
         debugPrint('[Wormhole] Session assigned: $assignedId');
@@ -1076,17 +1269,23 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     if (type == 'voyager_connect') {
-      final deviceKey = decoded?['deviceKey'] as String?;
-      final deviceName = decoded?['deviceName'] as String? ?? 'Unknown Device';
-      final deviceType =
-          PairedDevice._parseDeviceType(decoded?['deviceType'] as String?);
-      final voyagerPublicKey = decoded?['publicKey'] as String?;
-      await _handleVoyagerConnect(deviceKey, deviceName, deviceType, voyagerPublicKey);
+      final deviceKey = decoded['deviceKey'] as String?;
+      final deviceName = decoded['deviceName'] as String? ?? 'Unknown Device';
+      final deviceType = PairedDevice._parseDeviceType(
+        decoded['deviceType'] as String?,
+      );
+      final voyagerPublicKey = decoded['publicKey'] as String?;
+      await _handleVoyagerConnect(
+        deviceKey,
+        deviceName,
+        deviceType,
+        voyagerPublicKey,
+      );
       _sendToWormhole(_buildHostInfoMessage());
       return;
     }
     if (type == 'voyager_disconnect') {
-      final deviceKey = decoded?['deviceKey'] as String?;
+      final deviceKey = decoded['deviceKey'] as String?;
       debugPrint('[Horizon] Voyager disconnected: $deviceKey');
       if (_wormholeClientCount > 0) {
         _wormholeClientCount--;
@@ -1095,7 +1294,7 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     if (type == 'error') {
-      final code = decoded?['code'] as String?;
+      final code = decoded['code'] as String?;
       if (code == 'session_in_use') {
         _error = 'Custom session ID is already in use';
         notifyListeners();
@@ -1103,9 +1302,9 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     if (type == 'stdin') {
-      final sessionId = decoded?['sessionId'];
-      final data = decoded?['data'];
-      final raw = decoded?['raw'];
+      final sessionId = decoded['sessionId'];
+      final data = decoded['data'];
+      final raw = decoded['raw'];
       if (sessionId is String && _sessions.contains(sessionId)) {
         if (data is String) {
           _logDeleteProbe('Horizon/Wormhole data', data.codeUnits);
@@ -1121,9 +1320,9 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     if (type == 'resize') {
-      final sessionId = decoded?['sessionId'];
-      final rows = decoded?['rows'];
-      final cols = decoded?['cols'];
+      final sessionId = decoded['sessionId'];
+      final rows = decoded['rows'];
+      final cols = decoded['cols'];
       if (sessionId is String &&
           rows is int &&
           cols is int &&
@@ -1140,14 +1339,14 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     if (type == 'sync') {
-      final sessionId = decoded?['sessionId'];
+      final sessionId = decoded['sessionId'];
       if (sessionId is String) {
         _sendSessionSyncToWormhole(sessionId);
       }
       return;
     }
     if (type == 'create') {
-      final groupId = decoded?['groupId'];
+      final groupId = decoded['groupId'];
       if (groupId is String && groupId.isNotEmpty) {
         final sessionId = await _createSessionInGroup(groupId);
         if (sessionId != null) {
@@ -1164,7 +1363,7 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     if (type == 'close') {
-      final sessionId = decoded?['sessionId'];
+      final sessionId = decoded['sessionId'];
       if (sessionId is String) {
         await _closeSession(sessionId);
         _notifySessionClosed(sessionId);
@@ -1214,10 +1413,94 @@ class HorizonController extends ChangeNotifier {
   }
 
   Object _buildHostInfoMessage() {
-    return _encodeMessage({
+    final hints = <String>[TransportKind.lanDirect.wireName];
+    if (_tailnetIngressEnabled) {
+      hints.add(TransportKind.tailnetDirect.wireName);
+    }
+    if (_wormholeEnabled) {
+      hints.add(TransportKind.wormholeRelay.wireName);
+    }
+    final payload = <String, dynamic>{
       'type': 'host_info',
       'hostName': hostDeviceName,
+      'transportHints': hints,
+      'transportVersion': 1,
+    };
+    if (TransportRolloutConfig.tailnetHint.trim().isNotEmpty) {
+      payload['tailnetHint'] = TransportRolloutConfig.tailnetHint.trim();
+    }
+    return _encodeMessage(payload);
+  }
+
+  Object _buildTransportProbeResult(TransportKind kind) {
+    return _encodeMessage({
+      'type': 'transport_probe_result',
+      'transportKind': kind.wireName,
+      'transportId': kind.wireName,
+      'pathId': '${kind.wireName}:primary',
+      'serverTs': DateTime.now().toUtc().toIso8601String(),
     });
+  }
+
+  bool _handleTransportSwitchControl(
+    TransportControlType controlType,
+    Map<String, dynamic> decoded, {
+    required TransportKind transportKind,
+    required void Function(Object message) reply,
+  }) {
+    if (controlType != TransportControlType.transportSwitchPrepare &&
+        controlType != TransportControlType.transportSwitchCommit &&
+        controlType != TransportControlType.transportSwitchAbort) {
+      return false;
+    }
+
+    final metadata = TransportMetadata.fromWire(decoded).copyWith(
+      transportId: decoded['transportId'] as String? ?? transportKind.wireName,
+      pathId:
+          decoded['pathId'] as String? ?? '${transportKind.wireName}:primary',
+    );
+
+    _transportTelemetry.emit(
+      event: controlType.wireName.replaceAll('transport_', ''),
+      kind: transportKind,
+      transportId: metadata.transportId,
+      pathId: metadata.pathId,
+      switchReason: metadata.switchReason,
+      fallbackReason: metadata.fallbackReason,
+      probeRttMs: metadata.probeRttMs,
+    );
+
+    if (controlType == TransportControlType.transportSwitchPrepare) {
+      if (!_transportSwitchEnabled) {
+        _transportTelemetry.emit(
+          event: 'fallback_triggered',
+          kind: transportKind,
+          transportId: metadata.transportId,
+          pathId: metadata.pathId,
+          fallbackReason: metadata.fallbackReason ?? 'switch_disabled',
+        );
+        reply(
+          _encodeMessage({
+            'type': TransportControlType.transportSwitchAbort.wireName,
+            'transportKind': transportKind.wireName,
+            ...metadata
+                .copyWith(
+                  fallbackReason: metadata.fallbackReason ?? 'switch_disabled',
+                )
+                .toWire(),
+          }),
+        );
+      } else {
+        reply(
+          _encodeMessage({
+            'type': TransportControlType.transportSwitchCommit.wireName,
+            'transportKind': transportKind.wireName,
+            ...metadata.toWire(),
+          }),
+        );
+      }
+    }
+    return true;
   }
 
   void _broadcastHostInfo() {
@@ -1229,10 +1512,7 @@ class HorizonController extends ChangeNotifier {
   void _sendSessionListToWormhole() {
     final changed = _reconcileGroupSessions();
     _sendToWormhole(
-      _encodeMessage({
-        'type': 'session_list',
-        'sessions': _sessions.toList(),
-      }),
+      _encodeMessage({'type': 'session_list', 'sessions': _sessions.toList()}),
     );
     if (changed) {
       _broadcastGroupSync();
@@ -1575,14 +1855,12 @@ class HorizonController extends ChangeNotifier {
   }) {
     final sessionBytes = utf8.encode(sessionId);
     final length = 4 + sessionBytes.length + data.length;
-    final buffer = BytesBuilder(copy: false)
-      ..add([1, type.code])
-      ..add([
-        (sessionBytes.length >> 8) & 0xFF,
-        sessionBytes.length & 0xFF,
-      ])
-      ..add(sessionBytes)
-      ..add(data);
+    final buffer =
+        BytesBuilder(copy: false)
+          ..add([1, type.code])
+          ..add([(sessionBytes.length >> 8) & 0xFF, sessionBytes.length & 0xFF])
+          ..add(sessionBytes)
+          ..add(data);
     final result = buffer.toBytes();
     if (result.length != length) {
       return Uint8List.fromList(result);
@@ -1625,7 +1903,9 @@ class HorizonController extends ChangeNotifier {
       return;
     }
     final sample = bytes.length > 64 ? bytes.sublist(0, 64) : bytes;
-    final hex = sample.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+    final hex = sample
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join(' ');
     debugPrint('[Horizon] stdout after delete bytes: $hex');
     _stdoutProbeArmed = false;
   }
@@ -1650,8 +1930,10 @@ class HorizonController extends ChangeNotifier {
         _connectWormhole(isReconnect: true);
       },
     );
-    _wormholeReconnectDelaySeconds =
-        (_wormholeReconnectDelaySeconds * 2).clamp(2, 10);
+    _wormholeReconnectDelaySeconds = (_wormholeReconnectDelaySeconds * 2).clamp(
+      2,
+      10,
+    );
   }
 
   // ============ Pairing Methods ============
@@ -1675,8 +1957,13 @@ class HorizonController extends ChangeNotifier {
       // Update public key if provided and setup encryption
       if (voyagerPublicKey != null) {
         paired.publicKey = voyagerPublicKey;
-        await _setupDeviceEncryption(deviceKey!, voyagerPublicKey, paired.sharedSecret);
-        paired.sharedSecret = await _deviceCrypto[deviceKey]?.getSharedSecretBase64();
+        await _setupDeviceEncryption(
+          deviceKey!,
+          voyagerPublicKey,
+          paired.sharedSecret,
+        );
+        paired.sharedSecret =
+            await _deviceCrypto[deviceKey]?.getSharedSecretBase64();
       }
 
       await _savePairedDevices();
@@ -1695,7 +1982,9 @@ class HorizonController extends ChangeNotifier {
       deviceType: deviceType,
       publicKey: voyagerPublicKey,
     );
-    debugPrint('[Horizon] New device requesting pairing: $deviceName (has public key: ${voyagerPublicKey != null})');
+    debugPrint(
+      '[Horizon] New device requesting pairing: $deviceName (has public key: ${voyagerPublicKey != null})',
+    );
     notifyListeners();
   }
 
@@ -1735,7 +2024,9 @@ class HorizonController extends ChangeNotifier {
       assignedKey: assignedKey,
     );
     _wormholeClientCount++;
-    debugPrint('[Horizon] Approved pairing for: ${_pendingPairing!.deviceName}');
+    debugPrint(
+      '[Horizon] Approved pairing for: ${_pendingPairing!.deviceName}',
+    );
     _pendingPairing = null;
     notifyListeners();
   }
@@ -1746,12 +2037,18 @@ class HorizonController extends ChangeNotifier {
     }
 
     _sendPairingResponse(_pendingPairing!.deviceKey, approved: false);
-    debugPrint('[Horizon] Rejected pairing for: ${_pendingPairing!.deviceName}');
+    debugPrint(
+      '[Horizon] Rejected pairing for: ${_pendingPairing!.deviceName}',
+    );
     _pendingPairing = null;
     notifyListeners();
   }
 
-  void _sendPairingResponse(String? deviceKey, {required bool approved, String? assignedKey}) {
+  void _sendPairingResponse(
+    String? deviceKey, {
+    required bool approved,
+    String? assignedKey,
+  }) {
     final response = {
       'type': 'pairing_response',
       'deviceKey': deviceKey,
@@ -1797,12 +2094,14 @@ class HorizonController extends ChangeNotifier {
       final json = jsonDecode(content) as Map<String, dynamic>;
 
       final devices = json['devices'] as List<dynamic>? ?? [];
-      _pairedDevices = devices
-          .map((d) => PairedDevice.fromJson(d as Map<String, dynamic>))
-          .toList();
+      _pairedDevices =
+          devices
+              .map((d) => PairedDevice.fromJson(d as Map<String, dynamic>))
+              .toList();
 
       final settings = json['settings'] as Map<String, dynamic>? ?? {};
-      _customSessionEnabled = settings['customSessionEnabled'] as bool? ?? false;
+      _customSessionEnabled =
+          settings['customSessionEnabled'] as bool? ?? false;
       _customSessionId = settings['customSessionId'] as String? ?? '';
       final savedBase = settings['wormholeBaseUrl'] as String?;
       if (savedBase != null) {
@@ -1841,7 +2140,9 @@ class HorizonController extends ChangeNotifier {
         },
       };
 
-      await file.writeAsString(const JsonEncoder.withIndent('  ').convert(json));
+      await file.writeAsString(
+        const JsonEncoder.withIndent('  ').convert(json),
+      );
       debugPrint('[Horizon] Saved ${_pairedDevices.length} paired devices');
     } catch (e) {
       debugPrint('[Horizon] Failed to save paired devices: $e');
@@ -1899,7 +2200,9 @@ class HorizonController extends ChangeNotifier {
         'createdAt': DateTime.now().toIso8601String(),
       };
 
-      await file.writeAsString(const JsonEncoder.withIndent('  ').convert(json));
+      await file.writeAsString(
+        const JsonEncoder.withIndent('  ').convert(json),
+      );
       debugPrint('[Horizon] Saved device keys');
     } catch (e) {
       debugPrint('[Horizon] Failed to save device keys: $e');

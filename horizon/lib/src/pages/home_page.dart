@@ -428,7 +428,9 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       _maybeAutoConnectLocal();
     } else {
       // Daemon binary not available — fall back to in-process HorizonController.
-      debugPrint('[Horizon] Daemon unavailable, falling back to in-process host');
+      debugPrint(
+        '[Horizon] Daemon unavailable, falling back to in-process host',
+      );
       _hostController.setHostDeviceName(hostName);
       await _hostController.start();
       if (_hostController.running) {
@@ -689,6 +691,9 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _terminalManager.writeToTerminalBytes(output.sessionId, output.data);
     // Note: No setState needed - TerminalView auto-updates via Terminal's notifyListeners
   }
+
+  bool get _useLocalOutputMirror =>
+      _isHorizonMode && _localOutputSub != null && !_usingDirectLocalPty;
 
   void _logTerminalOutputBytes(String sessionId, Uint8List data) {
     if (!_logTerminalOutput || data.isEmpty) {
@@ -1364,7 +1369,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   void _handleSessionSync(String sessionId, String content) {
-    if (_usingDirectLocalPty) {
+    if (_usingDirectLocalPty || _useLocalOutputMirror) {
       return;
     }
     if (content.isEmpty) {
@@ -1386,7 +1391,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   void _handleStdout(String sessionId, String text) {
-    if (_usingDirectLocalPty) {
+    if (_usingDirectLocalPty || _useLocalOutputMirror) {
       return;
     }
     _terminalManager.writeToTerminal(sessionId, text);
@@ -1479,17 +1484,20 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       if (result.exitCode != 0) {
         return false;
       }
-      final pids = (result.stdout as String)
-          .split('\n')
-          .map((s) => int.tryParse(s.trim()))
-          .whereType<int>()
-          .where((p) => p != _pidSelf)
-          .toSet();
+      final pids =
+          (result.stdout as String)
+              .split('\n')
+              .map((s) => int.tryParse(s.trim()))
+              .whereType<int>()
+              .where((p) => p != _pidSelf)
+              .toSet();
       if (pids.isEmpty) {
         return false;
       }
       for (final pid in pids) {
-        debugPrint('[Horizon] Killing orphaned process on port $port: PID $pid');
+        debugPrint(
+          '[Horizon] Killing orphaned process on port $port: PID $pid',
+        );
         Process.killPid(pid, ProcessSignal.sigterm);
       }
       // Wait for the port to be freed
@@ -1707,7 +1715,9 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     final now = DateTime.now().millisecondsSinceEpoch;
     if (data == _lastInputData && (now - _lastInputTimestamp) < 20) {
       // Skip duplicate input within 20ms
-      debugPrint('[Input] Skipping duplicate: "$data" within ${now - _lastInputTimestamp}ms');
+      debugPrint(
+        '[Input] Skipping duplicate: "$data" within ${now - _lastInputTimestamp}ms',
+      );
       return;
     }
     _lastInputData = data;
@@ -1984,6 +1994,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
 
         const sidebarExpandedWidth = 240.0;
         const sidebarCollapsedWidth = 64.0;
+        const sidebarSwitchWidth = 170.0;
         const topBarHeight = 56.0;
         const animDuration = Duration(milliseconds: 220);
         const animCurve = Curves.easeOutCubic;
@@ -2003,10 +2014,14 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                         _showSidebar
                             ? sidebarExpandedWidth
                             : sidebarCollapsedWidth,
-                    child:
-                        _showSidebar
-                            ? _buildSidebarContent(context)
-                            : _buildSidebarRail(context),
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        if (constraints.maxWidth >= sidebarSwitchWidth) {
+                          return _buildSidebarContent(context);
+                        }
+                        return _buildSidebarRail(context);
+                      },
+                    ),
                   ),
                   Expanded(
                     child: Column(
@@ -2130,7 +2145,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildTopStatusPill() {
+  Widget _buildTopStatusPill({required bool showLabel}) {
     final bool hasError = _error != null && _error!.isNotEmpty;
     final bool pairing = _clientPairingPending;
     final bool active = _isSystemActive;
@@ -2174,8 +2189,8 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
               ],
             ),
           ),
-          if (_showSidebar) const SizedBox(width: 8),
-          if (_showSidebar)
+          if (showLabel) const SizedBox(width: 8),
+          if (showLabel)
             Text(
               label,
               maxLines: 1,
@@ -2566,7 +2581,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
               ),
             ),
             const SizedBox(height: 12),
-            _buildTopStatusPill(),
+            _buildTopStatusPill(showLabel: false),
             const SizedBox(height: 16),
           ],
         ),
@@ -2708,7 +2723,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
               ),
             ),
             const SizedBox(height: 12),
-            _buildTopStatusPill(),
+            _buildTopStatusPill(showLabel: true),
             const SizedBox(height: 16),
           ],
         ),
