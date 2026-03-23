@@ -9,14 +9,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:voyager_share/voyager_share.dart'
-    show buildTerminalStyle, PinyinEngine, CandidateBar;
+    show AppColors, buildTerminalStyle, kTerminalThemeLight, PinyinEngine, CandidateBar;
 import 'package:xterm/xterm.dart';
 
 import '../models/terminal_group.dart';
 import '../services/connection_manager.dart';
 import '../services/crypto_service.dart';
+import '../services/device_name_policy.dart';
 import '../services/group_store.dart';
-import '../services/tailscale_service.dart';
+import '../services/launch_trace_service.dart';
+import '../services/launch_connection_policy.dart';
+import '../services/vpn_transport_handoff.dart';
+import '../services/vpn_service.dart';
 import '../services/terminal_manager.dart';
 import '../services/transport_models.dart';
 import '../services/transport_rollout.dart';
@@ -43,10 +47,12 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     text: 'ws://127.0.0.1:9527/ws',
   );
   final TextEditingController _wormholeController = TextEditingController(
-    text: 'ws://127.0.0.1:8080/ws',
+    text: 'wss://wormhole.blackhole-ai.com/ws',
   );
   final TextEditingController _sessionController = TextEditingController();
-  final TextEditingController _tokenController = TextEditingController();
+  final TextEditingController _tokenController = TextEditingController(
+    text: 'InGodWeTrust@Blackhole2026',
+  );
   Timer? _metricsDebounce;
 
   late final ConnectionManager _connectionManager;
@@ -59,6 +65,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   bool _showHHKB = false;
   bool _hhkbFn = false;
   bool _multiWindow = false;
+  bool _showSidebar = false;
   double _quickBarHeight = 0;
   static const double _hhkbKeyboardHeight = 250; // 5*42 + 4*6 + 16 padding
 
@@ -96,10 +103,39 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   String _deviceName = '';
   String? _remoteDeviceName;
   bool _pairingPending = false;
+  bool _deviceNameRefreshInFlight = false;
 
   // E2E encryption
   final CryptoService _crypto = CryptoService();
   String? _publicKey;
+
+  // VPN
+  final VpnService _vpnService = VpnService();
+  final VpnTransportHandoffCoordinator _vpnHandoff =
+      VpnTransportHandoffCoordinator();
+  EndpointInfo? _vpnEndpointInfo;
+  bool _vpnEnabled = false;
+  bool _vpnUpgradeAttempted = false;
+  bool _vpnNativeStartInFlight = false;
+  String? _vpnPrivateKey;
+  String? _pendingVpnPublicKey;
+  String? _vpnPublicKey;
+  int? _vpnLocalPort;
+  List<DirectCandidate> _vpnDirectCandidates = const <DirectCandidate>[];
+  String? _lastAdvertisedVpnCandidateSignature;
+  Timer? _vpnConfigTimeout;
+
+  bool get _vpnAvailable => VpnService.isSupportedPlatform;
+
+  void _vpnLog(String message) {
+    final timestamp = DateTime.now().toUtc().toIso8601String();
+    debugPrint('[$timestamp] [VPN] $message');
+  }
+
+  void _traceLaunch(String message) {
+    debugPrint('[VoyagerLaunch] $message');
+    unawaited(appendLaunchTrace(message));
+  }
 
   List<String> get _visibleSessions => _groupStore.activeGroupSessionIds;
 
@@ -122,6 +158,15 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       onConnected: ({required waitForPairing}) {
         if (!waitForPairing) {
           _sendListSessions();
+        }
+        final handoffDecision = _vpnHandoff.onPrimaryConnectionOpened(
+          vpnConnected: _vpnService.isConnected,
+          vpnMode: _currentVpnTunnelMode(),
+          activeTransportKind: _connectionManager.activeTransportKind,
+          endpoint: _currentVpnTransportEndpoint(),
+        );
+        if (handoffDecision.shouldSwitch) {
+          _switchToVpnTransport(decision: handoffDecision);
         }
         _terminalManager.activeViewKey?.currentState?.requestKeyboard();
       },
@@ -151,6 +196,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
         });
       },
       onError: (message) {
+        debugPrint('[Connection] error: $message');
         if (!mounted) {
           return;
         }
@@ -179,6 +225,16 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
           if (assignedKey != null && assignedKey.isNotEmpty) {
             _deviceKey = assignedKey;
             _saveSettings();
+            // Rebuild the reconnect URI so auto-reconnects include the
+            // assigned device_key.  Without this, reconnects reuse the
+            // original URI (which lacked device_key) and Horizon treats
+            // every reconnect as a new device.
+            if (_useWormhole) {
+              final refreshed = _buildWormholeUri();
+              if (refreshed != null) {
+                _connectionManager.updateReconnectUri(refreshed);
+              }
+            }
           }
           // Setup encryption if Horizon provided public key
           if (horizonPublicKey != null && horizonPublicKey.isNotEmpty) {
@@ -194,6 +250,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
             '[Voyager] Pairing approved, deviceKey: $_deviceKey, hasHorizonPublicKey: ${horizonPublicKey != null}',
           );
           _sendListSessions();
+          _maybeStartVpnUpgrade(force: true);
         } else {
           if (mounted) {
             setState(() {
@@ -210,6 +267,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       onSessionClosed: _handleSessionClosed,
       onStdout: _handleStdout,
       onSessionSync: _handleSessionSync,
+      onEndpointInfo: _handleVpnEndpointInfo,
+      onVpnConfig: _handleVpnConfig,
     );
     _groupStore = GroupStore(
       onChanged: _handleGroupChange,
@@ -221,21 +280,23 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     _wormholeController.addListener(_handleAddressChange);
     _sessionController.addListener(_saveSettings);
     _tokenController.addListener(_saveSettings);
-    _loadSettings();
+    unawaited(_beginLaunchFlow());
     _pinyinEngine.loadDict();
+    if (_vpnAvailable) {
+      _vpnService.initialize();
+      _vpnService.addListener(_onVpnStatusChanged);
+    }
+  }
+
+  Future<void> _beginLaunchFlow() async {
+    await resetLaunchTrace('initState');
+    await _loadSettings();
   }
 
   Future<void> _loadSettings() async {
+    _traceLaunch('_loadSettings start');
     final prefs = await SharedPreferences.getInstance();
     final savedDeviceName = prefs.getString('deviceName');
-    // Re-fetch device name if saved value is a generic name
-    final needsRefresh = _isGenericDeviceName(savedDeviceName);
-    final deviceName =
-        needsRefresh ? await _getDefaultDeviceName() : savedDeviceName!;
-    if (needsRefresh && savedDeviceName != deviceName) {
-      await prefs.setString('deviceName', deviceName);
-    }
-
     // Load or generate crypto keys
     await _loadOrGenerateKeys(prefs);
 
@@ -243,19 +304,65 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       _urlController.text =
           prefs.getString('lanAddress') ?? 'ws://127.0.0.1:9527/ws';
       _wormholeController.text =
-          prefs.getString('wormholeAddress') ?? 'ws://127.0.0.1:8080/ws';
+          prefs.getString('wormholeAddress') ??
+          'wss://wormhole.blackhole-ai.com/ws';
       _sessionController.text = prefs.getString('sessionId') ?? '';
-      _tokenController.text = prefs.getString('token') ?? '';
+      _tokenController.text =
+          prefs.getString('token') ?? 'InGodWeTrust@Blackhole2026';
       _useWormhole = prefs.getBool('useWormhole') ?? false;
+      _vpnEnabled = prefs.getBool('vpnEnabled') ?? false;
       _autoReconnect = prefs.getBool('autoReconnect') ?? true;
       _multiWindow = prefs.getBool('multiWindow') ?? false;
       _showKeyboardTools = prefs.getBool('showKeyboardTools') ?? true;
       _showHHKB = prefs.getBool('showHHKB') ?? false;
       _chineseMode = prefs.getBool('chineseMode') ?? false;
       _deviceKey = prefs.getString('deviceKey');
-      _deviceName = deviceName;
+      _deviceName = initialDeviceNameForLaunch(savedDeviceName);
     });
+    _traceLaunch(
+      '_loadSettings values '
+      'autoReconnect=$_autoReconnect useWormhole=$_useWormhole '
+      'sessionId=${_sessionController.text.trim().isNotEmpty} '
+      'wormholeAddress=${_wormholeController.text.trim().isNotEmpty} '
+      'lanAddress=${_urlController.text.trim().isNotEmpty} '
+      'deviceName=$_deviceName',
+    );
+    if (shouldRefreshDeviceNameInBackground(savedDeviceName)) {
+      _traceLaunch('_loadSettings scheduling device-name refresh');
+      unawaited(_refreshDeviceNameInBackground());
+    }
     _connectionManager.updateAutoReconnect(_autoReconnect);
+    final autoConnectDecision = evaluateAutoConnectOnLaunch(
+      autoReconnect: _autoReconnect,
+      alreadyConnected: _connected || _connectionManager.connected,
+      useWormhole: _useWormhole,
+      sessionId: _sessionController.text,
+      lanAddress: _urlController.text,
+      wormholeAddress: _wormholeController.text,
+    );
+    _traceLaunch(
+      '_loadSettings auto-connect decision '
+      'shouldConnect=${autoConnectDecision.shouldConnect} '
+      'reason=${autoConnectDecision.reason} '
+      'alreadyConnected=${_connected || _connectionManager.connected}',
+    );
+    if (autoConnectDecision.shouldConnect) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) {
+          _traceLaunch('post-frame auto-connect skipped: unmounted');
+          return;
+        }
+        if (_connected || _connectionManager.connected) {
+          _traceLaunch(
+            'post-frame auto-connect skipped: alreadyConnected='
+            '${_connected || _connectionManager.connected}',
+          );
+          return;
+        }
+        _traceLaunch('post-frame auto-connect firing _connect()');
+        unawaited(_connect());
+      });
+    }
   }
 
   Future<void> _loadOrGenerateKeys(SharedPreferences prefs) async {
@@ -342,11 +449,11 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
           return name;
         }
         final modelName = iosInfo.modelName.trim();
-        if (!_isGenericDeviceName(modelName)) {
+        if (!isGenericDeviceName(modelName)) {
           return modelName; // e.g., "iPhone 15 Pro"
         }
         final machine = iosInfo.utsname.machine.trim();
-        if (!_isGenericDeviceName(machine)) {
+        if (!isGenericDeviceName(machine)) {
           return machine; // e.g., "iPhone16,1"
         }
         return name.isNotEmpty ? name : 'Unknown Device';
@@ -386,35 +493,6 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     return trimmed;
   }
 
-  bool _isGenericDeviceName(String? name) {
-    if (name == null) {
-      return true;
-    }
-    final trimmed = name.trim();
-    if (trimmed.isEmpty) {
-      return true;
-    }
-    const genericNames = {
-      'iPhone',
-      'iPad',
-      'iPod touch',
-      'Android',
-      'Mac',
-      'Windows',
-      'Linux',
-      'Web Browser',
-      'Unknown Device',
-      'Unknown device',
-    };
-    if (genericNames.contains(trimmed)) {
-      return true;
-    }
-    final duplicatedIosName = RegExp(
-      r'^(iPhone|iPad|iPod touch)\\s*\\(\\1\\)$',
-    );
-    return duplicatedIosName.hasMatch(trimmed);
-  }
-
   Future<void> _saveSettings() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('lanAddress', _urlController.text);
@@ -422,6 +500,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     await prefs.setString('sessionId', _sessionController.text);
     await prefs.setString('token', _tokenController.text);
     await prefs.setBool('useWormhole', _useWormhole);
+    await prefs.setBool('vpnEnabled', _vpnEnabled);
     await prefs.setBool('autoReconnect', _autoReconnect);
     await prefs.setBool('multiWindow', _multiWindow);
     await prefs.setBool('showKeyboardTools', _showKeyboardTools);
@@ -435,7 +514,10 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
 
   @override
   void dispose() {
-    _connectionManager.disconnect(shouldReconnect: false);
+    if (_vpnAvailable) {
+      _vpnService.removeListener(_onVpnStatusChanged);
+    }
+    _disconnectMainConnection();
     WidgetsBinding.instance.removeObserver(this);
     _pinyinEngine.removeListener(_onPinyinChanged);
     _pinyinEngine.dispose();
@@ -449,6 +531,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     _tokenController.dispose();
     _metricsDebounce?.cancel();
     _terminalManager.dispose();
+    if (_vpnAvailable) {
+      _vpnService.dispose();
+    }
     super.dispose();
   }
 
@@ -488,6 +573,21 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   }
 
   void _handleDisconnected() {
+    _vpnConfigTimeout?.cancel();
+    if (_vpnAvailable && !_vpnService.isConnected) {
+      _vpnEndpointInfo = null;
+      _vpnPrivateKey = null;
+      _pendingVpnPublicKey = null;
+      _vpnPublicKey = null;
+      _vpnLocalPort = null;
+      _vpnDirectCandidates = const <DirectCandidate>[];
+      _lastAdvertisedVpnCandidateSignature = null;
+      if (_vpnService.isActive) {
+        _vpnService.failNegotiation(
+          'Primary connection closed before VPN upgrade completed.',
+        );
+      }
+    }
     _groupStore.onDisconnected();
     _pinyinEngine.clear();
     _remoteDeviceName = null;
@@ -522,6 +622,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     if (_activeSessionId != null) {
       _restoreScrollOffset(_activeSessionId!);
     }
+    _maybeStartVpnUpgrade();
   }
 
   void _requestSyncIfNeeded(String sessionId) {
@@ -545,6 +646,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     _scheduleActiveResize();
     _restoreScrollOffset(sessionId);
     _updateWindowTitle();
+    _maybeStartVpnUpgrade();
   }
 
   void _handleSessionClosed(String sessionId) {
@@ -579,21 +681,38 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     // Note: No setState needed - TerminalView auto-updates via Terminal's notifyListeners
   }
 
-  Future<void> _connect() async {
+  Future<void> _connect({bool resetVpnUpgrade = true}) async {
+    _traceLaunch(
+      '_connect enter resetVpnUpgrade=$resetVpnUpgrade '
+      'useWormhole=$_useWormhole deviceName=$_deviceName',
+    );
     if (mounted) {
       setState(() {
         _error = null;
         _pairingPending = false;
       });
     }
-    if (_useWormhole) {
-      await _ensureDeviceNameReady();
+    _vpnHandoff.clearFallbackSuppression();
+    if (resetVpnUpgrade) {
+      _vpnUpgradeAttempted = false;
     }
-    final candidate = await _buildTransportCandidates();
-    await _connectionManager.connectWithCandidates(
-      candidates: candidate,
-      autoReconnect: _autoReconnect,
-    );
+    if (_useWormhole) {
+      unawaited(_refreshDeviceNameInBackground());
+    }
+    try {
+      final candidate = await _buildTransportCandidates();
+      _traceLaunch(
+        '_connect candidates=${candidate.map((entry) => '${entry.kind.name}:${entry.uri}').join(',')}',
+      );
+      await _connectionManager.connectWithCandidates(
+        candidates: candidate,
+        autoReconnect: _autoReconnect,
+      );
+      _traceLaunch('_connect connectWithCandidates returned');
+    } catch (error) {
+      _traceLaunch('_connect error=$error');
+      rethrow;
+    }
   }
 
   Future<List<TransportCandidate>> _buildTransportCandidates() async {
@@ -602,12 +721,6 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
         _useWormhole
             ? _buildWormholeUri()
             : _tryParseUri(_wormholeController.text.trim());
-    Uri? tailnetUri = _tryParseUri(TransportRolloutConfig.tailnetWsUrl.trim());
-    if (TransportRolloutConfig.enableTailnetCandidate && tailnetUri == null) {
-      tailnetUri = await _resolveTailnetUriFromPlatform(
-        template: lanUri ?? _tryParseUri(_urlController.text.trim()),
-      );
-    }
 
     if (TransportRolloutConfig.forceWormholeRelay && wormholeUri != null) {
       return [
@@ -659,20 +772,6 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       );
     }
 
-    if (TransportRolloutConfig.enableTailnetCandidate && tailnetUri != null) {
-      candidates.add(
-        TransportCandidate(
-          id: 'tailnet-default',
-          kind: TransportKind.tailnetDirect,
-          uri: tailnetUri,
-          waitForPairing: false,
-          priority: TransportRolloutConfig.defaultPriorityFor(
-            TransportKind.tailnetDirect,
-          ),
-        ),
-      );
-    }
-
     if (!smartEnabled && candidates.isNotEmpty) {
       return [_selectLegacyPrimary(candidates)];
     }
@@ -699,67 +798,6 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     return candidates;
   }
 
-  Future<Uri?> _resolveTailnetUriFromPlatform({Uri? template}) async {
-    try {
-      final service = TailscaleService.instance;
-      final available = await service.isAvailable().timeout(
-        const Duration(milliseconds: 700),
-        onTimeout: () => false,
-      );
-      if (!available) {
-        return null;
-      }
-
-      final peers = await service.getPeers().timeout(
-        const Duration(milliseconds: 1200),
-        onTimeout: () => const [],
-      );
-      final onlinePeers =
-          peers
-              .where((peer) => peer.online && peer.addresses.isNotEmpty)
-              .toList();
-      if (onlinePeers.isEmpty) {
-        return null;
-      }
-
-      TailscalePeer bestPeer = onlinePeers.first;
-      int? bestRttMs;
-      for (final peer in onlinePeers.take(5)) {
-        final rtt = await service
-            .measurePeerRtt(peer.id)
-            .timeout(const Duration(milliseconds: 300), onTimeout: () => null);
-        final ms = rtt?.inMilliseconds;
-        if (ms == null) {
-          continue;
-        }
-        if (bestRttMs == null || ms < bestRttMs) {
-          bestRttMs = ms;
-          bestPeer = peer;
-        }
-      }
-
-      final rawAddress = bestPeer.addresses.firstWhere(
-        (address) => address.trim().isNotEmpty,
-        orElse: () => '',
-      );
-      if (rawAddress.isEmpty) {
-        return null;
-      }
-      final host = rawAddress.split('/').first.trim();
-      if (host.isEmpty) {
-        return null;
-      }
-
-      final base = template ?? Uri.parse('ws://127.0.0.1:9527/ws');
-      final path = (base.path.isEmpty || base.path == '/') ? '/ws' : base.path;
-      final port = base.hasPort ? base.port : 9527;
-      final scheme = base.scheme.isEmpty ? 'ws' : base.scheme;
-      return Uri(scheme: scheme, host: host, port: port, path: path);
-    } catch (_) {
-      return null;
-    }
-  }
-
   TransportCandidate _selectLegacyPrimary(List<TransportCandidate> candidates) {
     for (final candidate in candidates) {
       if (_useWormhole && candidate.kind == TransportKind.wormholeRelay) {
@@ -783,23 +821,32 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _ensureDeviceNameReady() async {
-    if (!_isGenericDeviceName(_deviceName)) {
+  Future<void> _refreshDeviceNameInBackground() async {
+    if (_deviceNameRefreshInFlight ||
+        !shouldRefreshDeviceNameInBackground(_deviceName)) {
       return;
     }
-    final refreshed = await _getDefaultDeviceName();
-    final trimmed = refreshed.trim();
-    if (trimmed.isEmpty || trimmed == _deviceName) {
-      return;
-    }
-    if (mounted) {
-      setState(() {
+    _deviceNameRefreshInFlight = true;
+    try {
+      _traceLaunch('_refreshDeviceNameInBackground start');
+      final refreshed = await _getDefaultDeviceName();
+      final trimmed = refreshed.trim();
+      if (trimmed.isEmpty || trimmed == _deviceName) {
+        _traceLaunch('_refreshDeviceNameInBackground unchanged=$trimmed');
+        return;
+      }
+      if (mounted) {
+        setState(() {
+          _deviceName = trimmed;
+        });
+      } else {
         _deviceName = trimmed;
-      });
-    } else {
-      _deviceName = trimmed;
+      }
+      await _saveSettings();
+      _traceLaunch('_refreshDeviceNameInBackground updated=$trimmed');
+    } finally {
+      _deviceNameRefreshInFlight = false;
     }
-    await _saveSettings();
   }
 
   Uri _buildWormholeUri() {
@@ -918,6 +965,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   ScrollController get _idleScrollController =>
       _terminalManager.idleScrollController;
 
+  bool get _useHardwareKeyboardOnly =>
+      !kIsWeb && (Platform.isMacOS || Platform.isLinux || Platform.isWindows);
+
   void _setActiveSession(String sessionId, {bool requestKeyboard = false}) {
     if (_activeSessionId == sessionId) {
       if (requestKeyboard && !_multiWindow) {
@@ -965,14 +1015,43 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
         title = terminalTitle;
       }
     }
-    windowManager.setTitle(title);
+    try {
+      windowManager.setTitle(title);
+    } catch (_) {}
+  }
+
+  String _lastInputData = '';
+  int _lastInputTimestamp = 0;
+
+  String _normalizeTerminalInput(String data) {
+    return data.replaceAll('\r\n', '\r').replaceAll('\n', '\r');
   }
 
   void _handleTerminalInput(String sessionId, String data) {
+    // When HHKB keyboard is shown, TerminalView is read-only
+    // and input is handled by the keyboard widget instead.
+    if (_showHHKB) return;
+
     if (_activeSessionId == null || _activeSessionId != sessionId) {
       return;
     }
-    var output = data.replaceAll('\n', '\r');
+    final normalizedData = _normalizeTerminalInput(data);
+    // On mobile (hardwareKeyboardOnly=false), Flutter dispatches both a
+    // hardware KeyDownEvent and an IME text-input change for the same
+    // keystroke.  Both paths call terminal.keyInput() → onOutput, producing
+    // duplicate characters.  A 50ms debounce window filters out the second
+    // event reliably across device speeds.
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (normalizedData == _lastInputData && (now - _lastInputTimestamp) < 50) {
+      debugPrint(
+        '[Input] Skipping duplicate: "$normalizedData" within ${now - _lastInputTimestamp}ms',
+      );
+      return;
+    }
+    _lastInputData = normalizedData;
+    _lastInputTimestamp = now;
+
+    var output = normalizedData;
     if (_ctrl) {
       output = _applyCtrl(output);
       _ctrl = false;
@@ -1199,7 +1278,39 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   }
 
   void _sendKey(TerminalKey key) {
+    if (key == TerminalKey.enter || key == TerminalKey.numpadEnter) {
+      _sendRaw('\r');
+      return;
+    }
+    // When HHKB is active the terminal is read-only, so keyInput() is a no-op.
+    // Send raw escape sequences instead.
+    if (_showHHKB) {
+      final raw = _terminalKeyToRaw(key);
+      if (raw != null) {
+        _sendRaw(raw);
+      }
+      return;
+    }
     _activeTerminal?.keyInput(key);
+  }
+
+  static String? _terminalKeyToRaw(TerminalKey key) {
+    switch (key) {
+      case TerminalKey.tab:
+        return '\t';
+      case TerminalKey.escape:
+        return '\x1b';
+      case TerminalKey.arrowUp:
+        return '\x1b[A';
+      case TerminalKey.arrowDown:
+        return '\x1b[B';
+      case TerminalKey.arrowRight:
+        return '\x1b[C';
+      case TerminalKey.arrowLeft:
+        return '\x1b[D';
+      default:
+        return null;
+    }
   }
 
   Future<void> _pasteClipboard() async {
@@ -1235,16 +1346,16 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    const barColor = Color(0xFF111620);
-    const activeColor = Color(0xFF1E2D3D); // Slightly lighter for contrast
+    const barColor = AppColors.surface;
+    const activeColor = AppColors.border; // Slightly darker for contrast
     const overlayColor =
         Colors.transparent; // No longer need overlay with solid background
     final terminal = _activeTerminal ?? _idleTerminal;
     final controller = _activeController ?? _idleController;
     final scrollController = _activeScrollController ?? _idleScrollController;
     final deleteDetection = !kIsWeb && (Platform.isAndroid || Platform.isIOS);
-    // connectionContent: 32 + 16(padding) = 48, tab栏: 36 + 2(padding) = 38
-    const terminalTopInset = 48 + 38;
+    // connectionContent: 32 + 16(padding) = 48, tab栏: 28 + 6(padding) = 34
+    const terminalTopInset = 48 + 34;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -1252,17 +1363,13 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       }
     });
 
-    return Scaffold(
+    final scaffold = Scaffold(
       key: _scaffoldKey,
-      backgroundColor: Colors.black,
-      drawer: _buildGroupDrawer(context),
+      backgroundColor: AppColors.surfaceVariant,
       endDrawer: _buildSettingsDrawer(context),
-      onDrawerChanged: (isOpened) {
-        _groupStore.setDeferredSync(isOpened);
-      },
       body: Stack(
         children: [
-          Positioned.fill(child: Container(color: Colors.black)),
+          Positioned.fill(child: Container(color: AppColors.surfaceVariant)),
           Positioned.fill(
             top: terminalTopInset.toDouble(),
             child: DropTarget(
@@ -1341,16 +1448,18 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                                 key: _idleTerminalViewKey,
                                 controller: _idleController,
                                 scrollController: _idleScrollController,
+                                theme: kTerminalThemeLight,
                                 autoResize: true,
                                 autofocus: true,
                                 deleteDetection: deleteDetection,
+                                hardwareKeyboardOnly: _useHardwareKeyboardOnly,
                                 readOnly: _showHHKB,
                                 keyboardType:
                                     _showHHKB
                                         ? TextInputType.none
                                         : TextInputType.text,
                                 backgroundOpacity: 1.0,
-                                padding: const EdgeInsets.all(8),
+                                padding: const EdgeInsets.all(10),
                                 textStyle: buildTerminalStyle(fontSize: 14),
                               ),
                             );
@@ -1386,6 +1495,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                                 label: 'TERM ${index + 1}',
                                 isActive: sessionId == _activeSessionId,
                                 showHHKB: _showHHKB,
+                                hardwareKeyboardOnly: _useHardwareKeyboardOnly,
                                 isDragTarget:
                                     _dragging &&
                                     _dragTargetSessionId == sessionId,
@@ -1405,25 +1515,27 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                         key: _activeViewKey ?? _idleTerminalViewKey,
                         controller: controller,
                         scrollController: scrollController,
+                        theme: kTerminalThemeLight,
                         autoResize: false,
                         autofocus: true,
                         deleteDetection: deleteDetection,
+                        hardwareKeyboardOnly: _useHardwareKeyboardOnly,
                         readOnly: _showHHKB,
                         keyboardType:
                             _showHHKB ? TextInputType.none : TextInputType.text,
                         backgroundOpacity: 1.0,
                         padding: EdgeInsets.fromLTRB(
-                          8,
+                          10,
                           4,
-                          8,
-                          _bottomBarHeight + 8,
+                          10,
+                          _bottomBarHeight + 10,
                         ),
                         textStyle: buildTerminalStyle(fontSize: 14),
                       ),
                   if (_dragging && !_multiWindow)
                     Positioned.fill(
                       child: Container(
-                        color: Colors.blue.withValues(alpha: 0.15),
+                        color: AppColors.accent.withValues(alpha: 0.12),
                       ),
                     ),
                 ],
@@ -1431,7 +1543,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
             ),
           ),
           Positioned(
-            top: MediaQuery.of(context).padding.top + 86,
+            top: MediaQuery.of(context).padding.top + terminalTopInset,
             left: 0,
             right: 0,
             height: 24,
@@ -1442,7 +1554,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
                     colors: [
-                      Colors.black.withValues(alpha: 0.4),
+                      Colors.black.withValues(alpha: 0.06),
                       Colors.transparent,
                     ],
                   ),
@@ -1569,6 +1681,24 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
         ],
       ),
     );
+
+    return Row(
+      children: [
+        AnimatedContainer(
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOutCubic,
+          width: _showSidebar ? 240.0 : 0.0,
+          clipBehavior: Clip.hardEdge,
+          decoration: const BoxDecoration(),
+          child: OverflowBox(
+            alignment: Alignment.centerLeft,
+            maxWidth: 240,
+            child: _buildGroupDrawer(context),
+          ),
+        ),
+        Expanded(child: scaffold),
+      ],
+    );
   }
 
   Widget _buildConnectionContent(BuildContext context) {
@@ -1586,11 +1716,11 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
         case TransportKind.lanDirect:
           subtitle = 'Connected via LAN';
           break;
-        case TransportKind.tailnetDirect:
-          subtitle = 'Connected via Tailnet';
-          break;
         case TransportKind.wormholeRelay:
           subtitle = 'Connected via Wormhole';
+          break;
+        case TransportKind.wireguardDirect:
+          subtitle = 'Connected via WireGuard Direct';
           break;
         case TransportKind.unknown:
           subtitle =
@@ -1612,12 +1742,32 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
         child: Row(
           children: [
             IconButton(
-              icon: const Icon(Icons.menu, color: Colors.white70, size: 20),
-              onPressed: () => _scaffoldKey.currentState?.openDrawer(),
+              icon: const Icon(Icons.menu, color: AppColors.textSecondary, size: 20),
+              onPressed: () {
+                setState(() => _showSidebar = !_showSidebar);
+                _groupStore.setDeferredSync(_showSidebar);
+              },
               tooltip: 'Groups',
             ),
             const SizedBox(width: 4),
             StatusDot(connected: _connected, size: 8),
+            if (_vpnAvailable && _vpnService.isActive) ...[
+              const SizedBox(width: 8),
+              ListenableBuilder(
+                listenable: _vpnService,
+                builder: (context, _) {
+                  if (!_vpnService.isActive) return const SizedBox.shrink();
+                  return Icon(
+                    Icons.shield,
+                    size: 14,
+                    color:
+                        _vpnService.isConnected
+                            ? AppColors.statusGreen
+                            : AppColors.statusYellow,
+                  );
+                },
+              ),
+            ],
             const SizedBox(width: 14),
             Expanded(
               child: Column(
@@ -1629,7 +1779,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                      color: Colors.white,
+                      color: AppColors.textPrimary,
                       fontSize: 14,
                       height: 1.1,
                       fontWeight: FontWeight.w500,
@@ -1641,7 +1791,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                      color: Color(0xFF4B7AA6),
+                      color: AppColors.accent,
                       fontSize: 10,
                       height: 1.1,
                       fontWeight: FontWeight.bold,
@@ -1654,11 +1804,20 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
             const SizedBox(width: 16),
             Switch(
               value: _connected,
-              onChanged: (value) {
+              onChanged: (value) async {
                 if (value) {
-                  _connect();
+                  try {
+                    await _connect();
+                  } catch (e) {
+                    if (mounted) {
+                      setState(() {
+                        _error = e.toString();
+                        _connected = false;
+                      });
+                    }
+                  }
                 } else {
-                  _connectionManager.disconnect(shouldReconnect: false);
+                  _disconnectMainConnection();
                 }
               },
             ),
@@ -1666,7 +1825,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
             IconButton(
               icon: const Icon(
                 Icons.settings_outlined,
-                color: Colors.white70,
+                color: AppColors.textSecondary,
                 size: 20,
               ),
               onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
@@ -1680,6 +1839,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
 
   Widget _buildGroupDrawer(BuildContext context) {
     return GroupDrawer(
+      embedded: true,
       manager: _groupStore,
       activeSessionId: _activeSessionId,
       onSelectSession:
@@ -1738,7 +1898,579 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
           _scheduleActiveResize();
         });
       },
+      vpnEnabled: _vpnEnabled,
+      vpnService: _vpnAvailable ? _vpnService : null,
+      onVpnEnabledChanged: _vpnAvailable ? _setVpnEnabled : null,
     );
+  }
+
+  void _setVpnEnabled(bool value) {
+    if (_vpnEnabled == value) {
+      return;
+    }
+    setState(() {
+      _vpnEnabled = value;
+    });
+    unawaited(_saveSettings());
+
+    if (!value) {
+      _vpnUpgradeAttempted = false;
+      _vpnNativeStartInFlight = false;
+      _vpnConfigTimeout?.cancel();
+      _vpnEndpointInfo = null;
+      _vpnHandoff.reset();
+      _vpnPrivateKey = null;
+      _pendingVpnPublicKey = null;
+      _vpnPublicKey = null;
+      _vpnLocalPort = null;
+      _vpnDirectCandidates = const <DirectCandidate>[];
+      _lastAdvertisedVpnCandidateSignature = null;
+      if (_vpnService.isConnected) {
+        unawaited(_vpnService.stop());
+      } else {
+        _vpnService.cancelPendingStart();
+      }
+      return;
+    }
+
+    _vpnUpgradeAttempted = false;
+    _vpnNativeStartInFlight = false;
+    _maybeStartVpnUpgrade(force: true);
+  }
+
+  void _maybeStartVpnUpgrade({bool force = false}) {
+    if (!_vpnAvailable || !_vpnEnabled) {
+      return;
+    }
+    if (!_connected || _pairingPending) {
+      return;
+    }
+    if (_connectionManager.activeTransportKind ==
+        TransportKind.wireguardDirect) {
+      return;
+    }
+    if (_vpnService.isActive ||
+        _pendingVpnPublicKey != null ||
+        _vpnPrivateKey != null) {
+      return;
+    }
+    if (!force && _vpnUpgradeAttempted) {
+      return;
+    }
+    _vpnUpgradeAttempted = true;
+    unawaited(_requestVpnUpgrade());
+  }
+
+  Future<void> _requestVpnUpgrade() async {
+    if (!_connected) {
+      return;
+    }
+
+    _vpnService.beginNegotiation();
+    _vpnNativeStartInFlight = false;
+
+    // Generate keypair and send public key to Horizon for peer registration.
+    // When the live path is Wormhole relay we first request endpoint_info so
+    // we can use Horizon's observed UDP address instead of the tunnel's
+    // internal server IP.
+    Map<String, String> keypair;
+    try {
+      keypair = await _vpnService.generateKeypair();
+    } on PlatformException catch (error) {
+      _vpnService.failNegotiation(
+        error.message ?? 'Native VPN plugin is unavailable.',
+      );
+      return;
+    } catch (error) {
+      _vpnService.failNegotiation('Failed to initialize native VPN: $error');
+      return;
+    }
+    final privateKey = keypair['privateKey'] ?? '';
+    final publicKey = keypair['publicKey'] ?? '';
+
+    if (privateKey.isEmpty || publicKey.isEmpty) {
+      _vpnService.failNegotiation('Failed to generate VPN keypair.');
+      return;
+    }
+
+    _vpnPrivateKey = privateKey;
+    _pendingVpnPublicKey = publicKey;
+    _vpnPublicKey = publicKey;
+    _lastAdvertisedVpnCandidateSignature = null;
+    final localPort = _vpnLocalPort ??= _selectVpnLocalPort();
+    _vpnDirectCandidates = await _buildVoyagerDirectCandidates(
+      port: localPort,
+      previous: _vpnEndpointInfo?.voyagerCandidates,
+    );
+    _vpnConfigTimeout?.cancel();
+    _vpnConfigTimeout = Timer(const Duration(seconds: 12), () {
+      if (!mounted || !_vpnService.isActive || _vpnService.isConnected) {
+        return;
+      }
+      _pendingVpnPublicKey = null;
+      _vpnPrivateKey = null;
+      _vpnPublicKey = null;
+      _vpnNativeStartInFlight = false;
+      _vpnLocalPort = null;
+      _vpnDirectCandidates = const <DirectCandidate>[];
+      _lastAdvertisedVpnCandidateSignature = null;
+      _vpnService.failNegotiation(
+        'Timed out waiting for Horizon VPN config. Verify VPN is enabled on Horizon and restart the host if needed.',
+      );
+    });
+    final activeTransport = _connectionManager.activeTransportKind;
+    if (activeTransport == TransportKind.wormholeRelay) {
+      _vpnLog('Requesting endpoint_info with local WG public key');
+      _connectionManager.sendEndpointRequest(
+        deviceKey: _deviceKey,
+        wgPublicKey: publicKey,
+        wgUdpPort: localPort,
+        voyagerCandidates: _currentVoyagerDirectCandidates(),
+      );
+    } else {
+      _vpnLog('Sending peer_endpoint directly over active transport');
+      _sendVpnPeerEndpoint(publicKey, force: true);
+      _pendingVpnPublicKey = null;
+    }
+  }
+
+  void _handleVpnEndpointInfo(EndpointInfo info) async {
+    if (!_vpnAvailable || !_vpnEnabled) {
+      return;
+    }
+    _vpnEndpointInfo = _mergeVpnEndpointInfo(info);
+    _vpnLog(
+      'endpoint_info received: horizonAddr=${info.horizonAddr} wgUdpPort=${info.wgUdpPort} netcheck=${info.netcheckHost ?? "-"}:${info.netcheckPort ?? -1} hasWgPublicKey=${info.wgPublicKey != null}',
+    );
+    final pendingPublicKey = _pendingVpnPublicKey;
+    if (pendingPublicKey != null && pendingPublicKey.isNotEmpty) {
+      final localPort = _vpnLocalPort ??= _selectVpnLocalPort();
+      _vpnDirectCandidates = await _buildVoyagerDirectCandidates(
+        port: localPort,
+        previous: _vpnEndpointInfo?.voyagerCandidates,
+      );
+      _vpnLog('Sending peer_endpoint after endpoint_info');
+      _sendVpnPeerEndpoint(pendingPublicKey, force: true);
+    }
+  }
+
+  void _handleVpnConfig(EndpointInfo info) {
+    if (!_vpnAvailable || !_vpnEnabled) {
+      return;
+    }
+    _vpnConfigTimeout?.cancel();
+    final privateKey = _vpnPrivateKey;
+    if (privateKey == null || privateKey.isEmpty) {
+      _vpnService.failNegotiation(
+        'Received vpn_config without a local keypair.',
+      );
+      return;
+    }
+    if (_vpnNativeStartInFlight || _vpnService.isConnected) {
+      _vpnLog(
+        'vpn_config received after native VPN start was already requested, ignoring duplicate',
+      );
+      return;
+    }
+    final mergedInfo = _mergeVpnEndpointInfo(info);
+    _vpnEndpointInfo = mergedInfo;
+    _pendingVpnPublicKey = null;
+    _vpnLog(
+      'vpn_config received: clientIp=${mergedInfo.clientIp} serverIp=${mergedInfo.serverIp} horizonAddr=${mergedInfo.horizonAddr} wgUdpPort=${mergedInfo.wgUdpPort} netcheck=${mergedInfo.netcheckHost ?? "-"}:${mergedInfo.netcheckPort ?? -1}',
+    );
+    if (mergedInfo.wgPublicKey == null) {
+      _vpnService.failNegotiation(
+        'vpn_config is missing Horizon WG public key.',
+      );
+      return;
+    }
+    final (netcheckHost, netcheckPort) = _deriveVpnNetcheckConfig(mergedInfo);
+    _vpnLog(
+      'netcheck target host=${netcheckHost ?? "-"} port=${netcheckPort ?? -1}',
+    );
+    _vpnNativeStartInFlight = true;
+    unawaited(
+      _vpnService
+          .start(
+            VpnConfig(
+              privateKey: privateKey,
+              peerPublicKey: mergedInfo.wgPublicKey!,
+              serverAddr: _resolveVpnServerHost(mergedInfo),
+              serverPort: mergedInfo.wgUdpPort ?? 51820,
+              clientIp: mergedInfo.clientIp ?? '10.13.37.2',
+              serverIp: mergedInfo.serverIp ?? '10.13.37.1',
+              localPort: _vpnLocalPort,
+              netcheckHost: netcheckHost,
+              netcheckPort: netcheckPort,
+              lanPort: mergedInfo.lanPort ?? 9527,
+              subnet: mergedInfo.subnet ?? '10.13.37.0/24',
+              dns: mergedInfo.dns ?? const ['10.13.37.1'],
+              internalRoutes: mergedInfo.internalRoutes ?? [],
+              mtu: mergedInfo.mtu ?? 1280,
+              directCandidates:
+                  (mergedInfo.horizonCandidates ?? const <DirectCandidate>[])
+                      .map(
+                        (candidate) => <String, dynamic>{
+                          'addr': candidate.addr,
+                          'port': candidate.port,
+                          'scope': candidate.scope,
+                          'priority': candidate.priority,
+                          'source': candidate.source,
+                        },
+                      )
+                      .toList(),
+            ),
+          )
+          .catchError((Object error, StackTrace stackTrace) {
+            _vpnNativeStartInFlight = false;
+            _vpnPublicKey = null;
+            _vpnLocalPort = null;
+            _vpnDirectCandidates = const <DirectCandidate>[];
+            _lastAdvertisedVpnCandidateSignature = null;
+            _vpnLog('Failed to start native VPN: $error');
+            debugPrintStack(stackTrace: stackTrace);
+            _vpnService.failNegotiation('Failed to start native VPN: $error');
+          }),
+    );
+  }
+
+  int _selectVpnLocalPort() {
+    final nowBits = DateTime.now().microsecondsSinceEpoch & 0x7fffffff;
+    final seed = nowBits ^ (_deviceKey?.hashCode ?? _deviceName.hashCode);
+    return 20000 + (seed % 20000);
+  }
+
+  (String?, int?) _deriveVpnNetcheckConfig(EndpointInfo info) {
+    final explicitHost = info.netcheckHost?.trim();
+    final explicitPort = info.netcheckPort;
+    if (explicitHost != null &&
+        explicitHost.isNotEmpty &&
+        explicitPort != null &&
+        explicitPort > 0) {
+      return (explicitHost, explicitPort);
+    }
+
+    final rawUrl =
+        _connectionManager.activeTransportKind == TransportKind.wormholeRelay
+            ? _wormholeController.text.trim()
+            : '';
+    final uri = Uri.tryParse(rawUrl);
+    if (uri == null || uri.host.isEmpty) {
+      return (null, null);
+    }
+    final port =
+        uri.hasPort
+            ? uri.port
+            : switch (uri.scheme) {
+              'wss' || 'https' => 443,
+              _ => 80,
+            };
+    return (uri.host, port);
+  }
+
+  Future<List<DirectCandidate>> _buildVoyagerDirectCandidates({
+    required int port,
+    List<DirectCandidate>? previous,
+  }) async {
+    final candidates = <DirectCandidate>[];
+
+    void addCandidate(DirectCandidate candidate) {
+      if (candidate.addr.isEmpty || candidate.port <= 0) {
+        return;
+      }
+      final duplicate = candidates.any(
+        (existing) =>
+            existing.addr == candidate.addr &&
+            existing.port == candidate.port &&
+            existing.scope == candidate.scope,
+      );
+      if (!duplicate) {
+        candidates.add(candidate);
+      }
+    }
+
+    for (final candidate in previous ?? const <DirectCandidate>[]) {
+      addCandidate(candidate);
+    }
+
+    try {
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+        includeLoopback: false,
+      );
+      for (final interface in interfaces) {
+        for (final address in interface.addresses) {
+          final host = address.address.trim();
+          if (!_isUsableVpnDirectAddress(host)) {
+            continue;
+          }
+          addCandidate(
+            DirectCandidate(
+              addr: host,
+              port: port,
+              scope: 'lan',
+              priority: 250,
+              source: 'local_interface:${interface.name}',
+            ),
+          );
+        }
+      }
+    } catch (error) {
+      _vpnLog('Failed to enumerate local interfaces: $error');
+    }
+
+    candidates.sort((a, b) => b.priority.compareTo(a.priority));
+    return candidates;
+  }
+
+  List<DirectCandidate> _currentVoyagerDirectCandidates() {
+    final candidates = <DirectCandidate>[];
+
+    void addCandidate(DirectCandidate candidate) {
+      if (candidate.addr.isEmpty || candidate.port <= 0) {
+        return;
+      }
+      final duplicate = candidates.any(
+        (existing) =>
+            existing.addr == candidate.addr &&
+            existing.port == candidate.port &&
+            existing.scope == candidate.scope,
+      );
+      if (!duplicate) {
+        candidates.add(candidate);
+      }
+    }
+
+    for (final candidate in _vpnDirectCandidates) {
+      addCandidate(candidate);
+    }
+    for (final raw in _vpnService.observedCandidates) {
+      addCandidate(DirectCandidate.fromMap(raw));
+    }
+    candidates.sort((a, b) => b.priority.compareTo(a.priority));
+    return candidates;
+  }
+
+  String _candidateSignature(List<DirectCandidate> candidates) {
+    return candidates
+        .map(
+          (candidate) =>
+              '${candidate.addr}:${candidate.port}/${candidate.scope}/${candidate.source}',
+        )
+        .join('|');
+  }
+
+  void _sendVpnPeerEndpoint(String publicKey, {bool force = false}) {
+    final candidates = _currentVoyagerDirectCandidates();
+    final signature = _candidateSignature(candidates);
+    if (!force && signature == _lastAdvertisedVpnCandidateSignature) {
+      return;
+    }
+    _lastAdvertisedVpnCandidateSignature = signature;
+    _vpnLog(
+      'Advertising peer_endpoint with ${candidates.length} direct candidate(s): '
+      '${candidates.map((candidate) => '${candidate.addr}:${candidate.port}/${candidate.scope}/${candidate.source}').join(', ')}',
+    );
+    _connectionManager.sendPeerEndpoint(
+      publicKey,
+      deviceKey: _deviceKey,
+      wgUdpPort: _vpnLocalPort,
+      voyagerCandidates: candidates,
+    );
+  }
+
+  bool _isUsableVpnDirectAddress(String host) {
+    final address = InternetAddress.tryParse(host);
+    if (address == null || address.type != InternetAddressType.IPv4) {
+      return false;
+    }
+    final octets = address.rawAddress;
+    if (octets.length != 4) {
+      return false;
+    }
+    final a = octets[0];
+    final b = octets[1];
+    if (a == 0 || a == 127 || a == 169 && b == 254) {
+      return false;
+    }
+    return a == 10 ||
+        (a == 172 && b >= 16 && b <= 31) ||
+        (a == 192 && b == 168) ||
+        (a == 100 && b >= 64 && b <= 127);
+  }
+
+  EndpointInfo _mergeVpnEndpointInfo(EndpointInfo info) {
+    return info.mergeWith(_vpnEndpointInfo);
+  }
+
+  String _resolveVpnServerHost(EndpointInfo info) {
+    final horizonAddr = info.horizonAddr;
+    if (horizonAddr != null && horizonAddr.isNotEmpty) {
+      return horizonAddr;
+    }
+
+    if (_connectionManager.activeTransportKind != TransportKind.wormholeRelay) {
+      final lanUri = Uri.tryParse(_urlController.text.trim());
+      final host = lanUri?.host;
+      if (host != null && host.isNotEmpty) {
+        return host;
+      }
+    }
+
+    return info.serverIp ?? '10.13.37.1';
+  }
+
+  int _defaultVpnLanPort() {
+    return _useWormhole ? 9529 : 9527;
+  }
+
+  VpnTunnelMode _currentVpnTunnelMode() {
+    return switch (_vpnService.connectionMode) {
+      VpnConnectionMode.direct => VpnTunnelMode.direct,
+      VpnConnectionMode.unknown => VpnTunnelMode.unknown,
+    };
+  }
+
+  VpnTransportEndpoint? _currentVpnTransportEndpoint() {
+    final info = _vpnEndpointInfo;
+    final serverIp = info?.serverIp;
+    if (serverIp == null || serverIp.isEmpty) {
+      return null;
+    }
+    return VpnTransportEndpoint(
+      serverIp: serverIp,
+      lanPort: info?.lanPort ?? _defaultVpnLanPort(),
+    );
+  }
+
+  void _onVpnStatusChanged() {
+    if (!_vpnAvailable) return;
+    if (!mounted) return;
+    final snapshot = VpnTunnelSnapshot(
+      isActive: _vpnService.isActive,
+      isConnected: _vpnService.isConnected,
+      mode: _currentVpnTunnelMode(),
+      clientIp: _vpnService.clientIp,
+      serverIp: _vpnService.serverIp,
+      lanPort: _vpnService.lanPort,
+      tunPacketsIn: _vpnService.tunPacketsIn,
+      udpPacketsIn: _vpnService.udpPacketsIn,
+      wgRxBytes: _vpnService.wgRxBytes,
+      error: _vpnService.error,
+    );
+    final restoredEndpoint = _vpnHandoff.restoreEndpointFromNativeStatus(
+      currentEndpoint: _currentVpnTransportEndpoint(),
+      snapshot: snapshot,
+      defaultLanPort: _defaultVpnLanPort(),
+    );
+    if (restoredEndpoint != null) {
+      _vpnEndpointInfo = EndpointInfo(
+        clientIp: _vpnService.clientIp,
+        serverIp: _vpnService.serverIp,
+        lanPort: restoredEndpoint.lanPort,
+      );
+      _vpnLog(
+        'restored endpoint from native status: '
+        'serverIp=${_vpnService.serverIp ?? "-"} '
+        'lanPort=${restoredEndpoint.lanPort}',
+      );
+    }
+    _vpnLog(
+      'status=${_vpnService.status.name} mode=${_vpnService.connectionMode.name} '
+      'active=${_vpnService.isActive} connected=${_vpnService.isConnected} '
+      'clientIp=${_vpnService.clientIp ?? "-"} serverIp=${_vpnService.serverIp ?? "-"} '
+      'lanPort=${_vpnService.lanPort ?? -1} '
+      'tunOut=${_vpnService.tunPacketsOut ?? -1} tunIn=${_vpnService.tunPacketsIn ?? -1} '
+      'udpOut=${_vpnService.udpPacketsOut ?? -1} udpIn=${_vpnService.udpPacketsIn ?? -1} '
+      'wgTx=${_vpnService.wgTxBytes ?? -1} wgRx=${_vpnService.wgRxBytes ?? -1} '
+      'error=${_vpnService.error ?? "-"}',
+    );
+    final activeVpnPublicKey = _vpnPublicKey;
+    final activeTransport = _connectionManager.activeTransportKind;
+    if (activeVpnPublicKey != null &&
+        _connectionManager.connected &&
+        activeTransport != TransportKind.wireguardDirect) {
+      _sendVpnPeerEndpoint(activeVpnPublicKey);
+    }
+    final isConnected = _vpnService.isConnected;
+    if (!_vpnService.isActive) {
+      _vpnNativeStartInFlight = false;
+    }
+    if (isConnected) {
+      _vpnConfigTimeout?.cancel();
+    }
+    final handoffDecision = _vpnHandoff.onVpnStatusChanged(
+      snapshot: snapshot,
+      primaryConnectionConnected: _connectionManager.connected,
+      activeTransportKind: _connectionManager.activeTransportKind,
+      endpoint: _currentVpnTransportEndpoint(),
+    );
+    if (handoffDecision.shouldSwitch) {
+      _switchToVpnTransport(decision: handoffDecision);
+    } else if (handoffDecision.shouldFallback) {
+      _vpnConfigTimeout?.cancel();
+      _fallbackToPrimaryTransport();
+    }
+    setState(() {});
+  }
+
+  void _disconnectMainConnection() {
+    _vpnHandoff.suppressNextFallback();
+    _vpnConfigTimeout?.cancel();
+    _vpnEndpointInfo = null;
+    _vpnNativeStartInFlight = false;
+    _vpnHandoff.cancelPendingSwitch();
+    _vpnPrivateKey = null;
+    _pendingVpnPublicKey = null;
+    _vpnPublicKey = null;
+    _vpnLocalPort = null;
+    _vpnDirectCandidates = const <DirectCandidate>[];
+    _lastAdvertisedVpnCandidateSignature = null;
+    _connectionManager.disconnect(shouldReconnect: false);
+    if (_vpnService.isConnected) {
+      unawaited(_vpnService.stop());
+    } else {
+      _vpnService.cancelPendingStart();
+    }
+  }
+
+  void _switchToVpnTransport({VpnTransportDecision? decision}) {
+    final endpoint = decision?.endpoint ?? _currentVpnTransportEndpoint();
+    if (endpoint == null) return;
+    final vpnUri = endpoint.websocketUri;
+    _vpnLog('Switching transport to $vpnUri');
+    final vpnTransportKind =
+        decision?.transportKind ??
+        VpnTransportHandoffCoordinator.transportKindForMode(
+          _currentVpnTunnelMode(),
+        );
+    Future<void>.delayed(const Duration(milliseconds: 750), () {
+      if (!mounted || !_vpnService.isConnected) {
+        return;
+      }
+      unawaited(
+        _connectionManager.connect(
+          uri: vpnUri,
+          waitForPairing: false,
+          autoReconnect: _autoReconnect,
+          transportKind: vpnTransportKind,
+          readyTimeout: const Duration(seconds: 5),
+          handoffExisting: true,
+        ),
+      );
+    });
+  }
+
+  void _fallbackToPrimaryTransport() {
+    _vpnConfigTimeout?.cancel();
+    _vpnNativeStartInFlight = false;
+    _vpnPublicKey = null;
+    _vpnLocalPort = null;
+    _vpnDirectCandidates = const <DirectCandidate>[];
+    _lastAdvertisedVpnCandidateSignature = null;
+    _vpnLog('VPN disconnected, falling back to primary transport');
+    _connectionManager.disconnect(silent: true);
+    _connect(resetVpnUpgrade: false);
   }
 
   String _getDeviceType() {

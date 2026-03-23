@@ -1,7 +1,7 @@
 enum TransportKind {
   lanDirect('lan_direct'),
-  tailnetDirect('tailnet_direct'),
   wormholeRelay('wormhole_relay'),
+  wireguardDirect('wireguard_direct'),
   unknown('unknown');
 
   const TransportKind(this.wireName);

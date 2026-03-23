@@ -13,19 +13,10 @@ class TransportRolloutConfig {
     'BH_PREFER_DIRECT_BY_DEFAULT',
     defaultValue: false,
   );
-  static const bool enableTailnetCandidate = bool.fromEnvironment(
-    'BH_ENABLE_TAILNET_INGRESS',
-    defaultValue: false,
-  );
   static const int _canaryPercentRaw = int.fromEnvironment(
     'BH_TRANSPORT_CANARY_PERCENT',
     defaultValue: 0,
   );
-  static const String tailnetWsUrl = String.fromEnvironment(
-    'BH_TAILNET_WS_URL',
-    defaultValue: '',
-  );
-
   static int get canaryPercent {
     if (_canaryPercentRaw < 0) {
       return 0;
@@ -53,8 +44,8 @@ class TransportRolloutConfig {
   static int defaultPriorityFor(TransportKind kind) {
     final prefersDirect = preferDirectByDefault;
     switch (kind) {
-      case TransportKind.tailnetDirect:
-        return prefersDirect ? 120 : 100;
+      case TransportKind.wireguardDirect:
+        return 130;
       case TransportKind.lanDirect:
         return prefersDirect ? 110 : 90;
       case TransportKind.wormholeRelay:
