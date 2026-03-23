@@ -1,4 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:math' as math;
+
+import 'package:crypto/crypto.dart';
 
 import 'transport_models.dart';
 import 'canary_deployment.dart';
@@ -28,14 +32,13 @@ class DefaultPolicyManager {
         return [
           TransportKind.wormholeRelay,
           TransportKind.lanDirect,
-          TransportKind.tailnetDirect,
         ];
 
       case RolloutPhase.phase2:
         // Phase 2: Canary users get direct preference
         if (isCanary) {
           return [
-            TransportKind.tailnetDirect,
+            TransportKind.wireguardDirect,
             TransportKind.lanDirect,
             TransportKind.wormholeRelay,
           ];
@@ -43,7 +46,6 @@ class DefaultPolicyManager {
           return [
             TransportKind.wormholeRelay,
             TransportKind.lanDirect,
-            TransportKind.tailnetDirect,
           ];
         }
 
@@ -52,7 +54,7 @@ class DefaultPolicyManager {
         final useDirectFirst = _shouldUseDirectFirst(userId);
         if (useDirectFirst) {
           return [
-            TransportKind.tailnetDirect,
+            TransportKind.wireguardDirect,
             TransportKind.lanDirect,
             TransportKind.wormholeRelay,
           ];
@@ -60,14 +62,13 @@ class DefaultPolicyManager {
           return [
             TransportKind.wormholeRelay,
             TransportKind.lanDirect,
-            TransportKind.tailnetDirect,
           ];
         }
 
       case RolloutPhase.phase4:
         // Phase 4: Direct first for everyone (final state)
         return [
-          TransportKind.tailnetDirect,
+          TransportKind.wireguardDirect,
           TransportKind.lanDirect,
           TransportKind.wormholeRelay,
         ];
@@ -154,11 +155,18 @@ class DefaultPolicyManager {
   bool _shouldUseDirectFirst(String userId) {
     final percentage = getPhase3DirectPercentage();
 
-    // Use same hashing as canary for consistency
-    final hash = userId.hashCode.abs();
+    // Use SHA-256 for stable cross-platform hashing (same as CanaryDeployment)
+    final bytes = utf8.encode('direct-first:$userId');
+    final digest = sha256.convert(bytes);
+    final hashBytes = digest.bytes.take(4).toList();
+    int hash = 0;
+    for (int i = 0; i < 4; i++) {
+      hash = (hash << 8) | hashBytes[i];
+    }
+    hash = hash.abs();
     final threshold = (percentage / 100.0 * 0x7FFFFFFF).floor();
 
-    return hash <= threshold;
+    return hash < threshold;
   }
 
   /// Get reconnection strategy based on phase
@@ -201,7 +209,7 @@ class DefaultPolicyManager {
     switch (phase) {
       case RolloutPhase.phase1:
         return {
-          'enable_tailnet': false,
+          'enable_wireguard': false,
           'enable_transport_switch': false,
           'enable_proactive_probing': false,
           'enable_happy_eyeballs': false,
@@ -210,14 +218,14 @@ class DefaultPolicyManager {
       case RolloutPhase.phase2:
         if (isCanary) {
           return {
-            'enable_tailnet': true,
+            'enable_wireguard': true,
             'enable_transport_switch': true,
             'enable_proactive_probing': false,
             'enable_happy_eyeballs': false,
           };
         } else {
           return {
-            'enable_tailnet': false,
+            'enable_wireguard': false,
             'enable_transport_switch': false,
             'enable_proactive_probing': false,
             'enable_happy_eyeballs': false,
@@ -229,7 +237,7 @@ class DefaultPolicyManager {
         final enableAdvanced = directPercentage >= 50;
 
         return {
-          'enable_tailnet': true,
+          'enable_wireguard': true,
           'enable_transport_switch': true,
           'enable_proactive_probing': enableAdvanced,
           'enable_happy_eyeballs': enableAdvanced,
@@ -237,7 +245,7 @@ class DefaultPolicyManager {
 
       case RolloutPhase.phase4:
         return {
-          'enable_tailnet': true,
+          'enable_wireguard': true,
           'enable_transport_switch': true,
           'enable_proactive_probing': true,
           'enable_happy_eyeballs': true,
@@ -336,8 +344,8 @@ class ReconnectionStrategy {
   int getDelayForAttempt(int attemptNumber) {
     if (attemptNumber <= 0) return baseDelayMs;
 
-    final delay = (baseDelayMs * pow(backoffFactor, attemptNumber - 1)).round();
-    return min(delay, maxDelayMs);
+    final delay = (baseDelayMs * math.pow(backoffFactor, attemptNumber - 1)).round();
+    return math.min(delay, maxDelayMs);
   }
 }
 
@@ -376,17 +384,3 @@ class DefaultPolicyFactory {
     );
   }
 }
-
-// Helper imports
-int pow(num x, num y) {
-  if (y == 0) return 1;
-  if (y == 1) return x.toInt();
-
-  int result = x.toInt();
-  for (int i = 1; i < y; i++) {
-    result *= x.toInt();
-  }
-  return result;
-}
-
-int min(int a, int b) => a < b ? a : b;

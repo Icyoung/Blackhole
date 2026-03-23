@@ -49,7 +49,7 @@ class CanaryDeployment {
     final hash = _hashUserId(userId);
     final threshold = (canaryPercentage / 100.0 * _maxHashValue).floor();
 
-    return hash <= threshold;
+    return hash < threshold;
   }
 
   /// Get canary deployment label for metrics
@@ -138,22 +138,6 @@ class CanaryFeatureFlags {
 
   bool get isInCanary => canaryDeployment.isUserInCanary(userId);
 
-  /// Enable Tailnet ingress for canary users
-  bool get enableTailnetIngress {
-    if (!isInCanary) {
-      return const bool.fromEnvironment(
-        'BH_ENABLE_TAILNET_INGRESS',
-        defaultValue: false,
-      );
-    }
-
-    // Canary users get the feature unless explicitly disabled
-    return const bool.fromEnvironment(
-      'BH_CANARY_ENABLE_TAILNET_INGRESS',
-      defaultValue: true,
-    );
-  }
-
   /// Enable transport switching for canary users
   bool get enableTransportSwitch {
     if (!isInCanary) {
@@ -214,7 +198,6 @@ class CanaryFeatureFlags {
     return {
       'deployment': canaryDeployment.getDeploymentLabel(userId),
       'is_canary': isInCanary,
-      'enable_tailnet_ingress': enableTailnetIngress,
       'enable_transport_switch': enableTransportSwitch,
       'rtt_weight': rttWeight,
       'switch_threshold_score': switchThresholdScore,
