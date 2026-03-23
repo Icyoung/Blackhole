@@ -1,9 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'transport_models.dart';
 
-enum GatewayIngressSource { lan, wormhole, tailnet }
+enum GatewayIngressSource { lan, wormhole }
 
 class GatewayIngressContext {
   const GatewayIngressContext({
@@ -50,6 +51,15 @@ class SessionGateway {
     }
     if (decoded['type'] == 'unsupported') {
       _onUnsupported(context, decoded);
+      return;
+    }
+
+    // Respond to health checks directly so monitors get a 200-equivalent ack.
+    if (decoded['type'] == 'health') {
+      final socket = context.socket;
+      if (socket != null) {
+        socket.add(jsonEncode({'type': 'health', 'status': 'ok'}));
+      }
       return;
     }
 

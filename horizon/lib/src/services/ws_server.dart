@@ -20,6 +20,15 @@ class WsServer {
     }
     _server = await HttpServer.bind(InternetAddress.anyIPv4, port);
     _server!.listen((request) async {
+      // Health check endpoint — returns 200 so load balancers / monitors
+      // can verify the session gateway is alive.
+      if (request.uri.path == '/health') {
+        request.response.statusCode = HttpStatus.ok;
+        request.response.headers.contentType = ContentType.text;
+        request.response.write('ok');
+        await request.response.close();
+        return;
+      }
       // Only accept WebSocket upgrades on /ws path
       if (request.uri.path != '/ws') {
         request.response.statusCode = HttpStatus.notFound;
