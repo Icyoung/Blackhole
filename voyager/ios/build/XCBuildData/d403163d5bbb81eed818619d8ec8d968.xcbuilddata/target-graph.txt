@@ -1,6 +1,0 @@
-Target dependency graph (3 targets)
-Target 'RunnerTests' in project 'Runner'
-➜ Explicit dependency on target 'Runner' in project 'Runner'
-Target 'Runner' in project 'Runner'
-➜ Explicit dependency on target 'VoyagerTunnel' in project 'Runner'
-Target 'VoyagerTunnel' in project 'Runner' (no dependencies)
