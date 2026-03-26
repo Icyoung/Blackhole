@@ -1,109 +1,103 @@
-# Repository Guidelines
+# AGENTS.md
 
 ## Architecture
 ```
-Voyager (Client) ←→ [WebSocket] ←→ Wormhole (Relay) ←→ [WebSocket] ←→ Horizon (Host) ←→ PTY/Shell
+Voyager (Client) <-> [WebSocket] <-> Wormhole (Relay) <-> [WebSocket] <-> Horizon (Host) <-> PTY/Shell
 ```
 
+### Network Modes
+1. **LAN Mode**: Direct WebSocket (lowest latency)
+2. **WAN Mode**: Through Wormhole relay (NAT traversal)
+3. **WireGuard Direct**: UDP hole-punched (bypasses relay)
+
 ## Project Structure
-Blackhole is a multi-component system with three main modules:
-- `horizon/` is the host terminal server (Flutter). Core Dart code lives in `horizon/lib/`, with platform PTY integrations under `horizon/macos/`, `horizon/linux/`, and `horizon/windows/`.
-- `voyager/` is the remote terminal client (Flutter). UI and app logic are in `voyager/lib/`, with platform shells under `voyager/ios/`, `voyager/macos/`, `voyager/android/`, `voyager/web/`, `voyager/linux/`, `voyager/windows/`.
-- `wormhole/` is the Rust relay server. The entrypoint is `wormhole/src/main.rs` with config in `wormhole/Cargo.toml`.
-Supporting docs live in `docs/`; assets and screenshots are in `screenshot/` when present.
+```
+Blackhole/
+├── horizon/                 # Host terminal server (Flutter)
+│   ├── lib/src/             # Dart app logic
+│   ├── daemon/src/          # Rust daemon (WG, TUN, NAT, DNS)
+│   ├── macos/Runner/        # macOS native (PTY, VPN helper)
+│   ├── linux/runner/        # Linux native (PTY)
+│   └── windows/runner/      # Windows native (ConPTY)
+├── voyager/                 # Remote terminal client (Flutter)
+│   ├── lib/src/             # Dart app logic
+│   ├── ios/VoyagerTunnel/   # iOS Network Extension
+│   ├── macos/VoyagerTunnel/ # macOS Network Extension
+│   └── voyager_share/       # Shared widgets (HHKB, UI)
+├── wormhole/                # Relay server (Rust)
+├── tunnel/                  # WireGuard tunnel lib (Rust, iOS/macOS)
+├── internal/                # CI/CD (GitHub Actions, Dockerfiles)
+└── xterm/                   # Forked xterm terminal widget
+```
 
-## Build, Test, and Development Commands
-- `cd horizon && flutter run -d macos` (or `linux`, `windows`) to run the host locally.
-- `cd voyager && flutter run -d ios` (or `macos`, `android`, `chrome`, `linux`, `windows`) to run the client.
-- `cd wormhole && WORMHOLE_TOKEN=your-secret-token cargo run` to start the relay server.
-- `cd horizon && flutter build macos` or `cd voyager && flutter build apk` for release builds.
-- `cd wormhole && cargo build --release` for a production relay binary.
+## Development Commands
+```bash
+cd horizon && flutter run -d macos        # Horizon
+cd voyager && flutter run -d ios          # Voyager
+cd wormhole && WORMHOLE_TOKEN=xxx cargo run  # Wormhole
+flutter test                              # Tests
+dart format . && flutter analyze          # Lint
+cargo fmt && cargo clippy                 # Rust lint
+```
 
-## Coding Style & Naming Conventions
-- Dart/Flutter: 2-space indentation; format with `dart format .` and lint with `flutter analyze` (see `analysis_options.yaml`).
-- Rust: use `cargo fmt` and keep naming idiomatic (`snake_case` for functions, `CamelCase` for types).
-- Keep platform-specific logic isolated in the platform runner directories and avoid duplicating shared Dart logic.
+## CI/CD and Deployment
 
-## Testing Guidelines
-There are no committed test suites yet. If you add tests:
-- Flutter: place tests under `horizon/test/` or `voyager/test/` with `*_test.dart`, run with `flutter test`.
-- Rust: add unit tests in `wormhole/src/` or integration tests in `wormhole/tests/`, run with `cargo test`.
-Add tests for protocol handling and reconnection flows where possible.
+### Build Pipeline
+The **internal** repo (`internal/`) contains GitHub Actions workflow.
+**Trigger**: Push to `main` of `Blackhole-internal`.
 
-## Commit & Pull Request Guidelines
-- Commit messages follow a component prefix pattern, e.g. `Voyager: fix tab reorder` or `Wormhole: add token auth`.
-- PRs should include a short problem/solution description, relevant issue links, and platform(s) tested.
-- Include screenshots or short recordings for UI or terminal behavior changes.
+```bash
+cd internal && git add -A && git commit -m "trigger build" && git push origin main
+```
 
-## Configuration & Security
-- `WORMHOLE_TOKEN` is required for the relay server; `PORT` defaults to `6666`.
-- Do not commit secrets or host addresses; use env vars and local config where needed.
+| Artifact | Destination |
+|----------|-------------|
+| `ghcr.io/icyoung/blackhole-landing:latest` | GHCR |
+| `ghcr.io/icyoung/blackhole-voyager:latest` | GHCR |
+| `ghcr.io/icyoung/blackhole-wormhole:latest` | GHCR |
+| `horizon-macos.dmg` (signed + notarized) | R2 |
+| `horizon-linux.tar.gz`, `horizon-windows.zip` | R2 |
+| `voyager-macos.dmg` (signed + notarized) | R2 |
+| `voyager-linux.tar.gz`, `voyager-windows.zip` | R2 |
+| `voyager-android.apk` | R2 |
 
-## WebSocket Protocol
+Downloads: `https://download.blackhole-ai.com/<artifact>`
 
-Communication uses a binary WebSocket protocol:
+### Production Server (lightnode)
+**Host**: `38.60.162.209` (SSH: `lightnode`)
+**Compose**: `/opt/blackhole/deploy/docker-compose.yml`
 
-| Byte | Description |
-|------|-------------|
-| 0 | Version (1) |
-| 1 | Message type |
-| 2-3 | Session ID length (big-endian) |
-| 4-N | Session ID |
-| N+1... | Payload |
+| Service | Domain | Image |
+|---------|--------|-------|
+| Traefik | — | `traefik:v2.10` (reverse proxy + TLS) |
+| Landing | `blackhole-ai.com` | `ghcr.io/icyoung/blackhole-landing:latest` |
+| Voyager Web | `app.blackhole-ai.com` | `ghcr.io/icyoung/blackhole-voyager:latest` |
+| Wormhole | `wormhole.blackhole-ai.com` | `blackhole-wormhole:local` |
 
-### Binary Message Types
+Wormhole built from `/opt/blackhole/deploy/wormhole-src/`. UDP 6666 for netcheck.
 
-| Type | Value | Description |
-|------|-------|-------------|
-| Stdin | 0x01 | Terminal input from client |
-| Stdout | 0x02 | Terminal output to client |
-| Resize | 0x03 | Terminal resize (cols, rows) |
-| Ping | 0x04 | Heartbeat ping |
-| Pong | 0x05 | Heartbeat pong |
+**Deploy**:
+```bash
+# Landing + Voyager Web (pull GHCR images)
+ssh lightnode "cd /opt/blackhole/deploy && docker compose pull landing voyager-web && docker compose up -d landing voyager-web"
 
-### JSON Control Messages
+# Wormhole (rebuild from source)
+ssh lightnode "cd /opt/blackhole/deploy && docker compose build --no-cache wormhole && docker compose up -d wormhole"
+```
 
-Control messages use JSON format with `type` field:
+### Repos
+| Repo | URL |
+|------|-----|
+| Blackhole (public) | `git@github.com:Icyoung/Blackhole.git` |
+| Blackhole-internal | `git@github.com:Icyoung/Blackhole-internal.git` |
 
-| Type | Direction | Description |
-|------|-----------|-------------|
-| `session_assigned` | Wormhole → Horizon | Assigns 6-char session ID |
-| `voyager_connect` | Wormhole → Horizon | Client connected |
-| `voyager_disconnect` | Wormhole → Horizon | Client disconnected |
-| `pairing_request` | Voyager → Horizon | Device pairing request |
-| `pairing_response` | Horizon → Voyager | Accept/reject pairing |
-| `pairing_result` | Horizon → Voyager | Pairing outcome |
-| `list` | Voyager → Horizon | List terminal sessions |
-| `create` | Voyager → Horizon | Create new terminal |
-| `close` | Voyager → Horizon | Close terminal session |
-| `group_*` | Both | Terminal group operations |
+## Commit Convention
+Conventional commits: `feat(horizon):`, `fix(voyager):`, `chore:`, etc.
 
-## Platform Channels (Flutter ↔ Native)
-
-**MethodChannel:** `com.blackhole/pty`
-- `create` - Create new PTY session
-- `write` - Write to PTY stdin
-- `resize` - Resize PTY
-- `close` - Close PTY session
-
-**EventChannel:** `com.blackhole/pty/output`
-- Streams PTY stdout data to Dart
-
-## Key Implementation Files
-
-### Horizon
-- `horizon_controller.dart` - Main state management
-- `terminal_service.dart` - PTY interface
-- `ws_server.dart` - LAN WebSocket server
-- `PtyManager.swift/cc/cpp` - Native PTY per platform
-
-### Voyager
-- `connection_manager.dart` - WebSocket client
-- `terminal_manager.dart` - Session state
-- `hhkb_keyboard.dart` - Mobile keyboard
-
-### Wormhole
-- `main.rs` - Single-file Axum server
+## Environment Variables
+- `WORMHOLE_TOKEN` - Auth token (required)
+- `PORT` - Server port (default: 6666)
+- `WORMHOLE_NETCHECK_HOST` / `WORMHOLE_NETCHECK_PORT` - UDP netcheck
 
 <!-- ufoo -->
 ## ufoo Protocol
