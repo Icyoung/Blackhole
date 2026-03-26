@@ -2452,10 +2452,12 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
             borderRadius: BorderRadius.circular(10),
             border: Border.all(color: HorizonColors.borderSubtle),
           ),
-          child: CustomPaint(
-            size: const Size(18, 14),
-            painter: _SidebarIconPainter(
-              color: HorizonColors.textSecondary,
+          child: Center(
+            child: CustomPaint(
+              size: const Size(16, 12),
+              painter: _SidebarIconPainter(
+                color: HorizonColors.textSecondary,
+              ),
             ),
           ),
         ),

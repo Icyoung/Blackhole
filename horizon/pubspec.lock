@@ -743,9 +743,11 @@ packages:
   xterm:
     dependency: "direct main"
     description:
-      path: "../xterm"
-      relative: true
-    source: path
+      path: "."
+      ref: "7afd5c9"
+      resolved-ref: "7afd5c9e4c9045f8eaf00032126f7c27e6f51f6c"
+      url: "https://github.com/Icyoung/xterm.dart.git"
+    source: git
     version: "4.0.0"
   yaml:
     dependency: transitive
