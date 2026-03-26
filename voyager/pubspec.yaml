@@ -40,7 +40,9 @@ dependencies:
   cupertino_icons: ^1.0.8
   web_socket_channel: ^2.4.0
   xterm:
-    path: ../xterm
+    git:
+      url: https://github.com/Icyoung/xterm.dart.git
+      ref: 7afd5c9
   desktop_drop: ^0.5.0
   shared_preferences: ^2.3.3
   google_fonts: ^6.2.1

@@ -43,7 +43,9 @@ dependencies:
   shared_preferences: ^2.3.3
   web_socket_channel: ^2.4.0
   xterm:
-    path: ../xterm
+    git:
+      url: https://github.com/Icyoung/xterm.dart.git
+      ref: 7afd5c9
   uuid: ^4.0.0
   desktop_drop: ^0.6.0
   cryptography: ^2.7.0

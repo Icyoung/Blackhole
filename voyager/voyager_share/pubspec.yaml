@@ -11,7 +11,9 @@ dependencies:
   flutter:
     sdk: flutter
   xterm:
-    path: ../../xterm
+    git:
+      url: https://github.com/Icyoung/xterm.dart.git
+      ref: 7afd5c9
   shared_preferences: ^2.3.3
   cryptography: ^2.7.0
   google_fonts: ^6.2.1
