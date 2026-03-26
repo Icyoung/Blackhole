@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../app.dart';
 import '../../controllers/horizon_controller.dart';
 
 class DevModeCard extends StatelessWidget {
@@ -14,7 +15,7 @@ class DevModeCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final warningColor = const Color(0xFFFF5C5C);
+    const warningColor = HorizonColors.warning;
     final contentPadding = flat
         ? const EdgeInsets.symmetric(vertical: 20)
         : const EdgeInsets.all(20);
@@ -46,7 +47,7 @@ class DevModeCard extends StatelessWidget {
             controller.requiresDevModeConfirmation
                 ? 'Development mode is requested for this release build. This disables authentication on the LAN.'
                 : 'Authentication is disabled. Any device on the same network can control this terminal.',
-            style: const TextStyle(color: Colors.white70, fontSize: 13),
+            style: const TextStyle(color: HorizonColors.textSecondary, fontSize: 13),
           ),
           if (controller.requiresDevModeConfirmation) ...[
             const SizedBox(height: 16),

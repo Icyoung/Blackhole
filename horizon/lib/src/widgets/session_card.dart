@@ -15,6 +15,7 @@ class HorizonSessionCard extends StatefulWidget {
     required this.isActive,
     required this.showHHKB,
     required this.deleteDetection,
+    this.hardwareKeyboardOnly = false,
     this.isDragTarget = false,
     required this.terminalStyle,
     this.onTap,
@@ -30,6 +31,7 @@ class HorizonSessionCard extends StatefulWidget {
   final bool isActive;
   final bool showHHKB;
   final bool deleteDetection;
+  final bool hardwareKeyboardOnly;
   final bool isDragTarget;
   final TerminalStyle terminalStyle;
   final VoidCallback? onTap;
@@ -66,13 +68,9 @@ class _HorizonSessionCardState extends State<HorizonSessionCard>
   Widget build(BuildContext context) {
     super.build(context);
     final borderColor =
-        widget.isActive
-            ? HorizonColors.accent.withValues(alpha: 0.65)
-            : HorizonColors.borderSubtle;
+        widget.isActive ? HorizonColors.border : HorizonColors.borderSubtle;
     final headerColor =
-        widget.isActive
-            ? HorizonColors.surfaceBright
-            : HorizonColors.surface;
+        widget.isActive ? HorizonColors.surfaceBright : HorizonColors.surface;
     return GestureDetector(
       onTapDown: (_) => widget.onTap?.call(),
       child: AnimatedContainer(
@@ -120,8 +118,10 @@ class _HorizonSessionCardState extends State<HorizonSessionCard>
                       IconButton(
                         onPressed: widget.onClose,
                         padding: EdgeInsets.zero,
-                        constraints:
-                            const BoxConstraints.tightFor(width: 24, height: 24),
+                        constraints: const BoxConstraints.tightFor(
+                          width: 24,
+                          height: 24,
+                        ),
                         splashRadius: 12,
                         icon: const Icon(
                           Icons.close_rounded,
@@ -143,10 +143,11 @@ class _HorizonSessionCardState extends State<HorizonSessionCard>
                       key: widget.viewKey,
                       controller: widget.controller,
                       scrollController: widget.scrollController,
-                      theme: HorizonTerminalTheme.dark,
+                      theme: HorizonTerminalTheme.light,
                       autoResize: true,
                       autofocus: false,
                       deleteDetection: widget.deleteDetection,
+                      hardwareKeyboardOnly: widget.hardwareKeyboardOnly,
                       readOnly: widget.showHHKB,
                       keyboardType:
                           widget.showHHKB

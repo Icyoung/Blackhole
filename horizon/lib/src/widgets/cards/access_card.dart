@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../app.dart';
 import '../../controllers/horizon_controller.dart';
 import '../common/section_title.dart';
 
@@ -30,7 +31,7 @@ class AccessCard extends StatelessWidget {
           ],
           const Text(
             'Grant access to your home folder so Voyager can browse and manage files.',
-            style: TextStyle(color: Color(0xFF9AA6B2), fontSize: 13),
+            style: TextStyle(color: HorizonColors.textTertiary, fontSize: 13),
           ),
           const SizedBox(height: 16),
           Row(
@@ -40,7 +41,7 @@ class AccessCard extends StatelessWidget {
                 icon: const Icon(Icons.add_moderator_outlined, size: 18),
                 label: const Text('Grant Access'),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF284058),
+                  backgroundColor: HorizonColors.accent,
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(
                       horizontal: 16, vertical: 12),
@@ -54,7 +55,7 @@ class AccessCard extends StatelessWidget {
                   child: Text(
                     controller.accessMessage!,
                     style: const TextStyle(
-                        color: Color(0xFF41C87A), fontSize: 13),
+                        color: HorizonColors.success, fontSize: 13),
                   ),
                 ),
               ],

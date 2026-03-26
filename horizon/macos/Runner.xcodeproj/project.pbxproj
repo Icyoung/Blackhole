@@ -243,6 +243,7 @@
 				33CC110E2044A8840003C045 /* Bundle Framework */,
 				3399D490228B24CF009A79C7 /* ShellScript */,
 				C9EF581F37145C72326407A7 /* [CP] Embed Pods Frameworks */,
+				E1DA0001DAEMON00BUNDLE001 /* Bundle Daemon */,
 			);
 			buildRules = (
 			);
@@ -423,6 +424,25 @@
 			shellPath = /bin/sh;
 			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-frameworks.sh\"\n";
 			showEnvVarsInLog = 0;
+		};
+		E1DA0001DAEMON00BUNDLE001 /* Bundle Daemon */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Bundle Daemon";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+				shellScript = "set -eu\n\n# Build and bundle Horizon helper binaries into the app\nDAEMON_DIR=\"${PROJECT_DIR}/../daemon\"\nAPP_ROOT=\"${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents\"\nMACOS_DEST_DIR=\"${APP_ROOT}/MacOS\"\nRESOURCES_DEST_DIR=\"${APP_ROOT}/Resources\"\n\nif [ -x \"/opt/homebrew/opt/rustup/bin/cargo\" ] && [ -x \"/opt/homebrew/opt/rustup/bin/rustc\" ]; then\n  export PATH=\"/opt/homebrew/opt/rustup/bin:${PATH}\"\n  CARGO_BIN=\"/opt/homebrew/opt/rustup/bin/cargo\"\n  RUSTC_BIN=\"/opt/homebrew/opt/rustup/bin/rustc\"\nelif [ -x \"${HOME}/.cargo/bin/cargo\" ] && [ -x \"${HOME}/.cargo/bin/rustc\" ]; then\n  export PATH=\"${HOME}/.cargo/bin:${PATH}\"\n  CARGO_BIN=\"${HOME}/.cargo/bin/cargo\"\n  RUSTC_BIN=\"${HOME}/.cargo/bin/rustc\"\nelse\n  CARGO_BIN=\"cargo\"\n  RUSTC_BIN=\"rustc\"\nfi\nexport RUSTC=\"$RUSTC_BIN\"\n\nbundle_binary() {\n  binary_name=\"$1\"\n  source_path=\"$2\"\n  dest_dir=\"$3\"\n  dest_path=\"${dest_dir}/${binary_name}\"\n  if [ -f \"$source_path\" ]; then\n    mkdir -p \"$dest_dir\"\n    cp -f \"$source_path\" \"$dest_path\"\n    chmod 755 \"$dest_path\"\n    echo \"Bundled ${binary_name} -> ${dest_path}\"\n  else\n    echo \"warning: ${binary_name} not found at ${source_path}\"\n  fi\n}\n\nif [ -d \"$DAEMON_DIR\" ]; then\n  echo \"Building Horizon daemon/helper binaries (${CONFIGURATION})...\"\n  if [ \"${CONFIGURATION}\" = \"Release\" ]; then\n    cd \"$DAEMON_DIR\" && \"$CARGO_BIN\" build --release --bin horizon-daemon --bin horizon-vpn-helper 2>&1\n    BUILD_OUTPUT_DIR=\"${DAEMON_DIR}/target/release\"\n  else\n    cd \"$DAEMON_DIR\" && \"$CARGO_BIN\" build --bin horizon-daemon --bin horizon-vpn-helper 2>&1\n    BUILD_OUTPUT_DIR=\"${DAEMON_DIR}/target/debug\"\n  fi\n\n  bundle_binary \"horizon-daemon\" \"${BUILD_OUTPUT_DIR}/horizon-daemon\" \"$MACOS_DEST_DIR\"\n  bundle_binary \"horizon-vpn-helper\" \"${BUILD_OUTPUT_DIR}/horizon-vpn-helper\" \"$RESOURCES_DEST_DIR\"\nelse\n  echo \"warning: daemon directory not found at ${DAEMON_DIR}\"\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

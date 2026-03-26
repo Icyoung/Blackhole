@@ -31,8 +31,8 @@ class _StyledTextFieldState extends State<StyledTextField> {
   @override
   Widget build(BuildContext context) {
     final fillColor = _hovered || _focused
-        ? Colors.white.withValues(alpha: 0.08)
-        : Colors.white.withValues(alpha: 0.05);
+        ? HorizonColors.surfaceVariant
+        : HorizonColors.surface;
 
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
@@ -51,12 +51,12 @@ class _StyledTextFieldState extends State<StyledTextField> {
             maxLength: widget.maxLength,
             textCapitalization: widget.textCapitalization,
             cursorColor: HorizonColors.accent,
-            style: const TextStyle(color: Colors.white, fontSize: 14),
+            style: const TextStyle(color: HorizonColors.textPrimary, fontSize: 14),
             decoration: InputDecoration(
               labelText: widget.label,
               hintText: widget.hint,
               hintStyle:
-                  const TextStyle(color: Colors.white24, fontSize: 13),
+                  const TextStyle(color: HorizonColors.textMuted, fontSize: 13),
               labelStyle: const TextStyle(
                   color: HorizonColors.textTertiary, fontSize: 13),
               filled: true,
@@ -67,20 +67,21 @@ class _StyledTextFieldState extends State<StyledTextField> {
                   horizontal: 16, vertical: 14),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(8),
-                borderSide: const BorderSide(color: HorizonColors.border),
+                borderSide: const BorderSide(color: HorizonColors.borderSubtle, width: 0.5),
               ),
               enabledBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(8),
                 borderSide: BorderSide(
                   color: _hovered
-                      ? Colors.white.withValues(alpha: 0.15)
-                      : HorizonColors.border,
+                      ? HorizonColors.border
+                      : HorizonColors.borderSubtle,
+                  width: _hovered ? 1 : 0.5,
                 ),
               ),
               focusedBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(8),
                 borderSide: const BorderSide(
-                    color: HorizonColors.borderFocus, width: 1.5),
+                    color: HorizonColors.border, width: 1),
               ),
             ),
           ),

@@ -54,7 +54,7 @@ class PairedDevicesCard extends StatelessWidget {
                       ),
                       child: Divider(
                         height: 1,
-                        color: Colors.white.withValues(alpha: 0.08),
+                        color: HorizonColors.border,
                       ),
                     ),
                 ],
@@ -141,9 +141,9 @@ class _DeviceListTileState extends State<DeviceListTile> {
     };
 
     final iconColor = switch (widget.device.deviceType) {
-      DeviceType.mobile => const Color(0xFF5B9FE4),
+      DeviceType.mobile => HorizonColors.textTertiary,
       DeviceType.desktop => HorizonColors.accent,
-      DeviceType.web => const Color(0xFFE4A55B),
+      DeviceType.web => HorizonColors.textMuted,
       DeviceType.unknown => HorizonColors.textMuted,
     };
 
@@ -151,7 +151,7 @@ class _DeviceListTileState extends State<DeviceListTile> {
       onEnter: (_) => setState(() => _hovered = true),
       onExit: (_) => setState(() => _hovered = false),
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
+        duration: const Duration(milliseconds: 180),
         padding: widget.flat
             ? EdgeInsets.zero
             : const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -159,8 +159,8 @@ class _DeviceListTileState extends State<DeviceListTile> {
             ? null
             : BoxDecoration(
                 color: _hovered
-                    ? Colors.white.withValues(alpha: 0.04)
-                    : Colors.black.withValues(alpha: 0.2),
+                    ? HorizonColors.surfaceBright
+                    : HorizonColors.surfaceVariant,
                 borderRadius: BorderRadius.circular(6),
                 border:
                     Border.all(color: HorizonColors.borderSubtle),
@@ -183,8 +183,10 @@ class _DeviceListTileState extends State<DeviceListTile> {
                 children: [
                   Text(
                     widget.device.deviceName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                      color: Colors.white,
+                      color: HorizonColors.textPrimary,
                       fontSize: 14,
                       fontWeight: FontWeight.w500,
                     ),
@@ -202,7 +204,7 @@ class _DeviceListTileState extends State<DeviceListTile> {
             ),
             AnimatedOpacity(
               opacity: _hovered || widget.flat ? 1.0 : 0.0,
-              duration: const Duration(milliseconds: 150),
+              duration: const Duration(milliseconds: 180),
               child: IconButton(
                 icon: const Icon(Icons.delete_outline,
                     size: 18, color: HorizonColors.error),

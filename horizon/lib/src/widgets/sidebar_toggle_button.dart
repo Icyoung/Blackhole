@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../app.dart';
+
 /// Icon-only button with circular hover/press feedback (matches HeaderChrome add-tab button).
 class SidebarToggleButton extends StatefulWidget {
   const SidebarToggleButton({
@@ -7,8 +9,8 @@ class SidebarToggleButton extends StatefulWidget {
     required this.icon,
     required this.onTap,
     this.diameter = 24,
-    this.hoverBg = const Color(0x14FFFFFF), // white @ ~0.08
-    this.pressedBg = const Color(0x26FFFFFF), // white @ ~0.15
+    this.hoverBg,
+    this.pressedBg,
     this.tooltip,
   });
 
@@ -16,8 +18,8 @@ class SidebarToggleButton extends StatefulWidget {
   final VoidCallback onTap;
 
   final double diameter;
-  final Color hoverBg;
-  final Color pressedBg;
+  final Color? hoverBg;
+  final Color? pressedBg;
   final String? tooltip;
 
   @override
@@ -32,9 +34,9 @@ class _SidebarToggleButtonState extends State<SidebarToggleButton> {
   Widget build(BuildContext context) {
     final Color bg;
     if (_pressed) {
-      bg = widget.pressedBg;
+      bg = widget.pressedBg ?? HorizonColors.surfaceBright;
     } else if (_hovered) {
-      bg = widget.hoverBg;
+      bg = widget.hoverBg ?? HorizonColors.surfaceVariant;
     } else {
       bg = Colors.transparent;
     }

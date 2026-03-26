@@ -38,6 +38,8 @@ class HorizonHome extends StatefulWidget {
 }
 
 class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
+  static const _defaultWormholeUrl = 'wss://wormhole.blackhole-ai.com/ws';
+  static const _buildTimeToken = String.fromEnvironment('WORMHOLE_TOKEN');
   static const _systemChannel = MethodChannel('com.blackhole/system');
   static const _settingsChannel = WindowMethodChannel(
     'com.blackhole/settings',
@@ -107,6 +109,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   bool _meta = false;
   bool _dragging = false;
   String? _dragTargetSessionId;
+  final Set<int> _topBarInteractivePointers = <int>{};
 
   // GlobalKeys for terminal cards in multi-window mode (for hit testing)
   final Map<String, GlobalKey> _terminalCardKeys = {};
@@ -115,6 +118,8 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   static WindowController? _settingsWindowController;
 
   String? _error;
+  bool _createSessionInFlight = false;
+  int _createSessionRequestId = 0;
 
   // Device pairing related state
   String? _deviceKey;
@@ -126,9 +131,14 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   StreamSubscription<TerminalOutput>? _localOutputSub;
   static const bool _logTerminalOutput = bool.fromEnvironment(
     'BH_LOG_TERMINAL_OUTPUT',
+    defaultValue: true,
   );
-  IOSink? _terminalOutputSink;
+  static const Duration _enterProbeWindow = Duration(milliseconds: 1200);
   String? _terminalOutputLogPath;
+  String? _terminalInputLogPath;
+  DateTime? _enterProbeUntil;
+  String? _enterProbeSessionId;
+  String? _enterProbeInput;
 
   // CWD polling for local sessions (Horizon mode)
   Timer? _cwdPollTimer;
@@ -244,6 +254,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       onSessionCreated: _handleRemoteSessionCreated,
       onSessionClosed: _handleRemoteSessionClosed,
       onStdout: _handleStdout,
+      onStdoutBytes: _handleStdoutBytes,
       onCwd: _handleCwd,
       onSessionSync: _handleSessionSync,
     );
@@ -373,20 +384,46 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     return trimmed.isEmpty ? null : trimmed;
   }
 
+  String _resolveDefaultWormholeUrl() {
+    final envUrl = _readString(Platform.environment['WORMHOLE_URL']);
+    return envUrl ?? _defaultWormholeUrl;
+  }
+
+  String? _resolveDefaultWormholeToken() {
+    final envToken = _readString(Platform.environment['WORMHOLE_TOKEN']);
+    if (envToken != null) {
+      return envToken;
+    }
+    final trimmed = _buildTimeToken.trim();
+    return trimmed.isEmpty ? null : trimmed;
+  }
+
   Future<void> _ensureLocalDaemonFromNativeSettings() async {
     final nativeSettings = await _readNativeSettings();
+    // Fire-and-forget: don't block startup on VPN helper (may show password dialog)
+    unawaited(_ensureNativeVpnHelper());
     final lanEnabled = _readBool(nativeSettings['lanEnabled'], fallback: true);
     final lanPort = _readInt(nativeSettings['lanPort']) ?? 9527;
     final hostName = _readString(nativeSettings['hostName']) ?? _deviceName;
+    final vpnEnabled = _readBool(nativeSettings['vpnEnabled'], fallback: false);
 
     final wormholeEnabled = _readBool(
       nativeSettings['wormholeEnabled'],
       fallback: false,
     );
+    final defaultWormholeUrl = _resolveDefaultWormholeUrl();
+    final defaultWormholeToken = _resolveDefaultWormholeToken();
+    final savedWormholeUrl = _readString(nativeSettings['wormholeBaseUrl']);
     final wormholeUrl =
-        wormholeEnabled ? _readString(nativeSettings['wormholeBaseUrl']) : null;
+        wormholeEnabled ? (savedWormholeUrl ?? defaultWormholeUrl) : null;
+    final savedWormholeToken = _readString(nativeSettings['wormholeToken']);
+    final useDefaultWormholeToken =
+        savedWormholeToken == null && wormholeUrl == defaultWormholeUrl;
     final wormholeToken =
-        wormholeEnabled ? _readString(nativeSettings['wormholeToken']) : null;
+        wormholeEnabled
+            ? (savedWormholeToken ??
+                (useDefaultWormholeToken ? defaultWormholeToken : null))
+            : null;
 
     final customSessionEnabled = _readBool(
       nativeSettings['customSessionEnabled'],
@@ -412,11 +449,12 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     // Ensure local PTY host isn't accidentally running (would conflict on port).
     await _hostController.stop();
 
-    final bindHost = lanEnabled ? '0.0.0.0' : '127.0.0.1';
+    final bindHost = _desiredDaemonBindHost(lanEnabled: lanEnabled);
     final started = await _daemonManager.ensureRunning(
       wsUri: wsUri,
       hostName: hostName,
       devMode: widget.devModeConfig.requested,
+      vpnRequired: vpnEnabled,
       wormholeUrl: wormholeUrl,
       wormholeToken: wormholeToken,
       wormholeSession: wormholeSession,
@@ -561,6 +599,24 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     return settings['appMode'] as String? ?? 'server';
   }
 
+  Future<void> _ensureNativeVpnHelper() async {
+    if (!Platform.isMacOS) {
+      return;
+    }
+    try {
+      final status = await _systemChannel.invokeMapMethod<String, dynamic>(
+        'ensureVpnHelper',
+      );
+      if (status != null) {
+        debugPrint('[VPN Helper] ${jsonEncode(status)}');
+      }
+    } on PlatformException catch (error) {
+      debugPrint('[VPN Helper] Failed to ensure helper: ${error.message}');
+    } catch (error) {
+      debugPrint('[VPN Helper] Failed to ensure helper: $error');
+    }
+  }
+
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
     final savedDeviceName = prefs.getString('deviceName');
@@ -687,7 +743,11 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     if (!_isHorizonMode) {
       return;
     }
-    _logTerminalOutputBytes(output.sessionId, output.data);
+    _logTerminalOutputBytes(
+      output.sessionId,
+      output.data,
+      note: _currentEnterProbeNote(output.sessionId),
+    );
     _terminalManager.writeToTerminalBytes(output.sessionId, output.data);
     // Note: No setState needed - TerminalView auto-updates via Terminal's notifyListeners
   }
@@ -695,50 +755,146 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   bool get _useLocalOutputMirror =>
       _isHorizonMode && _localOutputSub != null && !_usingDirectLocalPty;
 
-  void _logTerminalOutputBytes(String sessionId, Uint8List data) {
+  bool _containsEnterInput(String data) {
+    return data.contains('\r') || data.contains('\n');
+  }
+
+  String _armEnterProbeIfNeeded(String sessionId, String data) {
+    if (!_containsEnterInput(data)) {
+      return '';
+    }
+    final escaped = _escapeControlCharacters(data);
+    _enterProbeSessionId = sessionId;
+    _enterProbeInput = escaped;
+    _enterProbeUntil = DateTime.now().add(_enterProbeWindow);
+    return 'probe=enter input=$escaped';
+  }
+
+  String _currentEnterProbeNote(String sessionId) {
+    final until = _enterProbeUntil;
+    if (until == null || DateTime.now().isAfter(until)) {
+      _enterProbeUntil = null;
+      _enterProbeSessionId = null;
+      _enterProbeInput = null;
+      return '';
+    }
+    if (_enterProbeSessionId != sessionId) {
+      return '';
+    }
+    final input = _enterProbeInput;
+    return input == null || input.isEmpty
+        ? 'probe=enter'
+        : 'probe=enter input=$input';
+  }
+
+  bool _isTransientCreateError(String? value) {
+    if (value == null || value.isEmpty) {
+      return false;
+    }
+    return value.startsWith('Connection is offline') ||
+        value.startsWith('Create session failed');
+  }
+
+  void _logTerminalOutputBytes(
+    String sessionId,
+    Uint8List data, {
+    String note = '',
+  }) {
     if (!_logTerminalOutput || data.isEmpty) {
       return;
     }
-    _terminalOutputSink ??= _openTerminalOutputLog();
-    final sink = _terminalOutputSink;
-    if (sink == null) {
+    final path =
+        _terminalOutputLogPath ??= _terminalLogPath(
+          'blackhole_terminal_output.log',
+        );
+    final timestamp = DateTime.now().toIso8601String();
+    final noteSuffix = note.isNotEmpty ? ' note=$note' : '';
+    final decoded = utf8.decode(data, allowMalformed: true);
+    final buffer =
+        StringBuffer()..writeln(
+          '[$timestamp] session=$sessionId bytes=${data.length}$noteSuffix',
+        );
+    _writeHexLines(buffer, data);
+    buffer
+      ..writeln('text: ${_escapeControlCharacters(decoded)}')
+      ..writeln('---');
+    _appendTerminalLog(path, buffer.toString(), label: 'output');
+  }
+
+  void _logTerminalInputEvent(
+    String stage,
+    String sessionId,
+    String data, {
+    String note = '',
+  }) {
+    if (data.isEmpty) {
       return;
     }
+    final path =
+        _terminalInputLogPath ??= _terminalLogPath(
+          'blackhole_terminal_input.log',
+        );
+    final bytes = Uint8List.fromList(utf8.encode(data));
     final timestamp = DateTime.now().toIso8601String();
-    sink.writeln('[$timestamp] session=$sessionId bytes=${data.length}');
-    _writeHexLines(sink, data);
-    final decoded = utf8.decode(data, allowMalformed: true);
-    sink.writeln('text: ${_escapeControlCharacters(decoded)}');
-    sink.writeln('---');
+    final buffer =
+        StringBuffer()..writeln(
+          '[$timestamp] stage=$stage session=$sessionId bytes=${bytes.length} ctrl=$_ctrl alt=$_alt meta=$_meta note=$note',
+        );
+    _writeHexLines(buffer, bytes);
+    buffer
+      ..writeln('text: ${_escapeControlCharacters(data)}')
+      ..writeln('---');
+    _appendTerminalLog(path, buffer.toString(), label: 'input');
   }
 
-  IOSink? _openTerminalOutputLog() {
-    final path =
-        Directory.systemTemp.uri
-            .resolve('blackhole_terminal_output.log')
-            .toFilePath();
-    _terminalOutputLogPath ??= path;
-    debugPrint('[Horizon] Logging terminal output to $path');
+  String _terminalLogPath(String fileName) {
+    final path = Directory.systemTemp.uri.resolve(fileName).toFilePath();
+    debugPrint('[Horizon] Logging terminal to $path');
+    return path;
+  }
+
+  void _appendTerminalLog(
+    String path,
+    String content, {
+    required String label,
+  }) {
     try {
-      return File(path).openWrite(mode: FileMode.writeOnlyAppend);
+      File(
+        path,
+      ).writeAsStringSync(content, mode: FileMode.writeOnlyAppend, flush: true);
     } catch (error) {
-      debugPrint('[Horizon] Failed to open terminal log: $error');
-      return null;
+      debugPrint('[Horizon] Failed to append terminal $label log: $error');
     }
   }
 
-  void _writeHexLines(IOSink sink, Uint8List data) {
+  void _appendTerminalTrace(String line) {
+    final path =
+        Directory.systemTemp.uri
+            .resolve('blackhole_terminal_trace.log')
+            .toFilePath();
+    try {
+      File(path).writeAsStringSync(
+        '[${DateTime.now().toIso8601String()}] $line\n',
+        mode: FileMode.writeOnlyAppend,
+        flush: true,
+      );
+    } catch (_) {
+      // Best-effort tracing only.
+    }
+  }
+
+  void _writeHexLines(StringBuffer buffer, Uint8List data) {
     const bytesPerLine = 32;
     for (int i = 0; i < data.length; i += bytesPerLine) {
       final end = (i + bytesPerLine).clamp(0, data.length);
-      final buffer = StringBuffer();
+      final lineBuffer = StringBuffer();
       for (int j = i; j < end; j++) {
-        buffer.write(data[j].toRadixString(16).padLeft(2, '0'));
+        lineBuffer.write(data[j].toRadixString(16).padLeft(2, '0'));
         if (j + 1 < end) {
-          buffer.write(' ');
+          lineBuffer.write(' ');
         }
       }
-      sink.writeln(buffer.toString());
+      buffer.writeln(lineBuffer.toString());
     }
   }
 
@@ -929,18 +1085,28 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     unawaited(_ensureDaemonHostConfig());
   }
 
+  String _desiredDaemonBindHost({required bool lanEnabled}) {
+    return lanEnabled ? '0.0.0.0' : '127.0.0.1';
+  }
+
   Future<void> _ensureDaemonHostConfig() async {
     final wsUri = Uri.tryParse(_urlController.text.trim());
     if (wsUri == null || !DaemonManager.isLocalWs(wsUri)) {
       return;
     }
+    final nativeSettings = await _readNativeSettings();
+    final lanEnabled = _readBool(nativeSettings['lanEnabled'], fallback: true);
+    final vpnEnabled = _readBool(nativeSettings['vpnEnabled'], fallback: false);
+    await _ensureNativeVpnHelper();
     await _daemonManager.ensureRunning(
       wsUri: wsUri,
       hostName: _deviceName,
       devMode: widget.devModeConfig.requested,
+      vpnRequired: vpnEnabled,
       wormholeUrl: _hostWormholeUrlController.text.trim(),
       wormholeToken: _hostWormholeTokenController.text.trim(),
       wormholeSession: _hostCustomSessionController.text.trim(),
+      bindHost: _desiredDaemonBindHost(lanEnabled: lanEnabled),
     );
   }
 
@@ -1117,8 +1283,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _settingsDebounce?.cancel();
     _terminalManager.dispose();
     _hostController.dispose();
-    _terminalOutputSink?.close();
-    _terminalOutputSink = null;
     _tabScrollController.dispose();
     _groupScrollController.dispose();
     super.dispose();
@@ -1183,6 +1347,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
           _daemonStatus?.wormholeConnected != status.wormholeConnected ||
           _daemonStatus?.wormholeSessionId != status.wormholeSessionId ||
           _daemonStatus?.wormholeUrl != status.wormholeUrl ||
+          _daemonStatus?.vpnRunning != status.vpnRunning ||
           _daemonStatus?.sessionCount != status.sessionCount;
       if (shouldUpdate) {
         setState(() => _daemonStatus = status);
@@ -1298,7 +1463,12 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _terminalManager.activeSessionId = sessionId;
     _terminalFor(sessionId);
     if (mounted) {
-      setState(() {});
+      setState(() {
+        _createSessionInFlight = false;
+        if (_isTransientCreateError(_error)) {
+          _error = null;
+        }
+      });
     }
     _scheduleActiveResize();
     _restoreScrollOffset(sessionId);
@@ -1316,8 +1486,14 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _activeSessionId = sessionId;
     _terminalManager.activeSessionId = sessionId;
     _terminalFor(sessionId);
+    _groupStore.requestGroupList();
     if (mounted) {
-      setState(() {});
+      setState(() {
+        _createSessionInFlight = false;
+        if (_isTransientCreateError(_error)) {
+          _error = null;
+        }
+      });
     }
     _scheduleActiveResize();
     _restoreScrollOffset(sessionId);
@@ -1394,8 +1570,25 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     if (_usingDirectLocalPty || _useLocalOutputMirror) {
       return;
     }
+    _logTerminalOutputBytes(
+      sessionId,
+      Uint8List.fromList(utf8.encode(text)),
+      note: _currentEnterProbeNote(sessionId),
+    );
     _terminalManager.writeToTerminal(sessionId, text);
     // Note: No setState needed - TerminalView auto-updates via Terminal's notifyListeners
+  }
+
+  void _handleStdoutBytes(String sessionId, Uint8List bytes) {
+    if (_usingDirectLocalPty || _useLocalOutputMirror) {
+      return;
+    }
+    _logTerminalOutputBytes(
+      sessionId,
+      bytes,
+      note: _currentEnterProbeNote(sessionId),
+    );
+    _terminalManager.writeToTerminalBytes(sessionId, bytes);
   }
 
   Future<void> _connect() async {
@@ -1663,6 +1856,8 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   ScrollController get _idleScrollController =>
       _terminalManager.idleScrollController;
 
+  bool get _useHardwareKeyboardOnly => false;
+
   void _setActiveSession(String sessionId, {bool requestKeyboard = false}) {
     if (_activeSessionId == sessionId) {
       if (requestKeyboard && !_multiWindow) {
@@ -1704,6 +1899,10 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   String _lastInputData = '';
   int _lastInputTimestamp = 0;
 
+  String _normalizeTerminalInput(String data) {
+    return data.replaceAll('\r\n', '\r').replaceAll('\n', '\r');
+  }
+
   void _handleTerminalInput(String sessionId, String data) {
     // When HHKB keyboard is shown, TerminalView is read-only
     // and input is handled by the keyboard widget instead
@@ -1711,38 +1910,78 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       return;
     }
 
-    // Detect duplicate input within a short time window
-    final now = DateTime.now().millisecondsSinceEpoch;
-    if (data == _lastInputData && (now - _lastInputTimestamp) < 20) {
-      // Skip duplicate input within 20ms
-      debugPrint(
-        '[Input] Skipping duplicate: "$data" within ${now - _lastInputTimestamp}ms',
+    try {
+      final normalizedData = _normalizeTerminalInput(data);
+      _appendTerminalTrace(
+        'handleInput:start session=$sessionId raw=${_escapeControlCharacters(data)} normalized=${_escapeControlCharacters(normalizedData)}',
       );
-      return;
-    }
-    _lastInputData = data;
-    _lastInputTimestamp = now;
+      _logTerminalInputEvent(
+        'onInput',
+        sessionId,
+        normalizedData,
+        note: 'raw=${_escapeControlCharacters(data)}',
+      );
 
-    if (_activeSessionId != sessionId) {
-      _activeSessionId = sessionId;
-      _terminalManager.activeSessionId = sessionId;
-      if (mounted) {
-        setState(() {});
+      // Detect duplicate input within a short time window
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (normalizedData == _lastInputData &&
+          (now - _lastInputTimestamp) < 20) {
+        // Skip duplicate input within 20ms
+        debugPrint(
+          '[Input] Skipping duplicate: "$normalizedData" within ${now - _lastInputTimestamp}ms',
+        );
+        return;
       }
-      _updateWindowTitle();
-    }
+      _lastInputData = normalizedData;
+      _lastInputTimestamp = now;
 
-    var output = data.replaceAll('\n', '\r');
-    if (_ctrl) {
-      output = _applyCtrl(output);
-      _ctrl = false;
+      if (_activeSessionId != sessionId) {
+        _activeSessionId = sessionId;
+        _terminalManager.activeSessionId = sessionId;
+        if (mounted) {
+          setState(() {});
+        }
+        _updateWindowTitle();
+      }
+
+      var output = normalizedData;
+      if (_ctrl) {
+        output = _applyCtrl(output);
+        _ctrl = false;
+      }
+      if (_alt || _meta) {
+        output = _applyAlt(output);
+        _alt = false;
+        _meta = false;
+      }
+      _appendTerminalTrace(
+        'handleInput:beforeSend session=$sessionId output=${_escapeControlCharacters(output)} connected=$_connected direct=$_usingDirectLocalPty',
+      );
+      _logTerminalInputEvent(
+        'prepareSendRaw',
+        sessionId,
+        output,
+        note:
+            'connected=$_connected active=${_activeSessionId ?? ""} direct=$_usingDirectLocalPty',
+      );
+      _sendRawFor(sessionId, output);
+      _appendTerminalTrace(
+        'handleInput:afterSend session=$sessionId output=${_escapeControlCharacters(output)}',
+      );
+    } catch (error, stackTrace) {
+      final details =
+          '$error | ${stackTrace.toString().split('\n').take(3).join(' | ')}';
+      _appendTerminalTrace(
+        'handleInput:error session=$sessionId details=$details',
+      );
+      _logTerminalInputEvent(
+        'handleInputError',
+        sessionId,
+        _normalizeTerminalInput(data),
+        note: details,
+      );
+      debugPrint('[Horizon] _handleTerminalInput failed: $error\n$stackTrace');
     }
-    if (_alt || _meta) {
-      output = _applyAlt(output);
-      _alt = false;
-      _meta = false;
-    }
-    _sendRawFor(sessionId, output);
   }
 
   String _applyCtrl(String data) {
@@ -1797,11 +2036,33 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   void _sendRawFor(String sessionId, String data) {
-    if (_usingDirectLocalPty) {
-      final bytes = Uint8List.fromList(utf8.encode(data));
-      _hostController.writeLocalStdin(sessionId, bytes);
-    } else {
-      _connectionManager.sendRaw(sessionId, data);
+    try {
+      _appendTerminalTrace(
+        'sendRaw:start session=$sessionId data=${_escapeControlCharacters(data)} connected=$_connected direct=$_usingDirectLocalPty',
+      );
+      final note = _armEnterProbeIfNeeded(sessionId, data);
+      _logTerminalInputEvent('sendRaw', sessionId, data, note: note);
+      if (_usingDirectLocalPty) {
+        final bytes = Uint8List.fromList(utf8.encode(data));
+        _hostController.writeLocalStdin(sessionId, bytes);
+      } else {
+        _connectionManager.sendRaw(sessionId, data);
+      }
+      _appendTerminalTrace(
+        'sendRaw:done session=$sessionId data=${_escapeControlCharacters(data)}',
+      );
+      _logTerminalInputEvent(
+        'sentRaw',
+        sessionId,
+        data,
+        note: 'connected=$_connected direct=$_usingDirectLocalPty',
+      );
+    } catch (error, stackTrace) {
+      final details =
+          '$error | ${stackTrace.toString().split('\n').take(3).join(' | ')}';
+      _appendTerminalTrace('sendRaw:error session=$sessionId details=$details');
+      _logTerminalInputEvent('sendRawError', sessionId, data, note: details);
+      debugPrint('[Horizon] _sendRawFor failed: $error\n$stackTrace');
     }
   }
 
@@ -1822,15 +2083,47 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _groupStore.requestGroupList();
   }
 
-  void _sendCreateSession() {
-    if (_usingDirectLocalPty) {
-      _createLocalSession();
+  Future<void> _sendCreateSession() async {
+    if (_createSessionInFlight) {
       return;
     }
+    if (_usingDirectLocalPty) {
+      _createSessionInFlight = true;
+      await _createLocalSession();
+      _createSessionInFlight = false;
+      return;
+    }
+    if (!_connected) {
+      if (mounted) {
+        setState(() {
+          _error = 'Connection is offline. Reconnecting...';
+        });
+      }
+      unawaited(_connect());
+      return;
+    }
+    final beforeCount = _sessions.length;
+    _createSessionInFlight = true;
+    final requestId = ++_createSessionRequestId;
     final groupId = _groupStore.activeGroupId;
     _sendCommand({
       'type': 'create',
       if (groupId != TerminalGroup.defaultGroupId) 'groupId': groupId,
+    });
+    Future.delayed(const Duration(milliseconds: 900), () {
+      if (!mounted || _usingDirectLocalPty) {
+        return;
+      }
+      if (requestId != _createSessionRequestId) {
+        return;
+      }
+      _createSessionInFlight = false;
+      _sendListSessions();
+      if (_sessions.length <= beforeCount && mounted) {
+        setState(() {
+          _error = 'Create session failed. Check daemon shell/path settings.';
+        });
+      }
     });
   }
 
@@ -1869,7 +2162,39 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   void _sendKey(TerminalKey key) {
+    if (key == TerminalKey.enter || key == TerminalKey.numpadEnter) {
+      _sendRaw('\r');
+      return;
+    }
+    // When HHKB is active the terminal is read-only, so keyInput() is a no-op.
+    // Send raw escape sequences instead.
+    if (_showHHKB) {
+      final raw = _terminalKeyToRaw(key);
+      if (raw != null) {
+        _sendRaw(raw);
+      }
+      return;
+    }
     _activeTerminal?.keyInput(key);
+  }
+
+  static String? _terminalKeyToRaw(TerminalKey key) {
+    switch (key) {
+      case TerminalKey.tab:
+        return '\t';
+      case TerminalKey.escape:
+        return '\x1b';
+      case TerminalKey.arrowUp:
+        return '\x1b[A';
+      case TerminalKey.arrowDown:
+        return '\x1b[B';
+      case TerminalKey.arrowRight:
+        return '\x1b[C';
+      case TerminalKey.arrowLeft:
+        return '\x1b[D';
+      default:
+        return null;
+    }
   }
 
   Future<void> _pasteClipboard() async {
@@ -2061,32 +2386,54 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   Widget _buildBackground() {
-    return Container(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          colors: [Color(0xFF0B0F14), Color(0xFF121925)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-      ),
+    return const ColoredBox(color: HorizonColors.surface);
+  }
+
+  void _handleTopBarPanStart(DragStartDetails details) {
+    if (kIsWeb || !Platform.isMacOS || _topBarInteractivePointers.isNotEmpty) {
+      return;
+    }
+    _systemChannel.invokeMethod('startWindowDrag');
+  }
+
+  Widget _markTopBarInteractive({required Widget child}) {
+    return Listener(
+      behavior: HitTestBehavior.deferToChild,
+      onPointerDown: (event) {
+        _topBarInteractivePointers.add(event.pointer);
+      },
+      onPointerUp: (event) {
+        _topBarInteractivePointers.remove(event.pointer);
+      },
+      onPointerCancel: (event) {
+        _topBarInteractivePointers.remove(event.pointer);
+      },
+      child: child,
     );
   }
 
   Widget _buildTopBar(BuildContext context, double height) {
     final leftPad = _showSidebar ? 0.0 : 32.0;
-    final group = _groupStore.activeGroup;
     final tabs = _visibleSessions;
 
-    return Container(
-      height: height,
-      padding: EdgeInsets.fromLTRB(leftPad, 8, 12, 8),
-      decoration: const BoxDecoration(color: HorizonColors.surface),
-      child: Row(
-        children: [
-          Expanded(child: _buildTabStrip(tabs)),
-          const SizedBox(width: 12),
-          _buildViewModeToggleButton(),
-        ],
+    return GestureDetector(
+      // Keep the immersive titlebar draggable, but never steal drags that
+      // started on interactive controls such as tab buttons or window toggles.
+      onPanStart: _handleTopBarPanStart,
+      behavior: HitTestBehavior.translucent,
+      child: Container(
+        height: height,
+        padding: EdgeInsets.fromLTRB(leftPad, 8, 12, 8),
+        decoration: const BoxDecoration(color: HorizonColors.surface),
+        child: Row(
+          children: [
+            Expanded(
+              child: _markTopBarInteractive(child: _buildTabStrip(tabs)),
+            ),
+            const SizedBox(width: 12),
+            _markTopBarInteractive(child: _buildViewModeToggleButton()),
+          ],
+        ),
       ),
     );
   }
@@ -2156,7 +2503,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       color = HorizonColors.error;
     } else if (pairing) {
       label = 'Pairing pending';
-      color = const Color(0xFFF59E0B);
+      color = HorizonColors.statusAmber;
     } else {
       label = active ? 'Connected' : 'Offline';
       color = active ? HorizonColors.success : HorizonColors.textMuted;
@@ -3158,8 +3505,9 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
               isActive: sessionId == _activeSessionId,
               showHHKB: _showHHKB,
               deleteDetection: deleteDetection,
+              hardwareKeyboardOnly: _useHardwareKeyboardOnly,
               isDragTarget: _dragging && _dragTargetSessionId == sessionId,
-              terminalStyle: buildTerminalStyle(fontSize: 12),
+              terminalStyle: buildTerminalStyle(fontSize: 8),
               onTap: () => _setActiveSession(sessionId, requestKeyboard: false),
               onClose: () => _sendCloseSession(sessionId),
             );
@@ -3186,15 +3534,16 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
         key: _activeViewKey ?? _idleTerminalViewKey,
         controller: controller,
         scrollController: scrollController,
-        theme: HorizonTerminalTheme.dark,
+        theme: HorizonTerminalTheme.light,
         autoResize: false,
         autofocus: true,
         deleteDetection: deleteDetection,
+        hardwareKeyboardOnly: _useHardwareKeyboardOnly,
         readOnly: _showHHKB,
         keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
         backgroundOpacity: 1.0,
         padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-        textStyle: buildTerminalStyle(fontSize: 14),
+        textStyle: buildTerminalStyle(fontSize: 9),
       ),
     );
   }

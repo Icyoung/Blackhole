@@ -1,71 +1,80 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:voyager_share/voyager_share.dart';
 import 'package:xterm/xterm.dart';
 
 import 'models/dev_mode_config.dart';
 import 'pages/home_page.dart';
 
-/// Centralized semantic color tokens for the Horizon dark theme.
+/// Centralized semantic color tokens for the Horizon light neutral theme.
+///
+/// Delegates to the shared [AppColors] from voyager_share for visual consistency
+/// across Horizon and Voyager.
 class HorizonColors {
   HorizonColors._();
 
   // Backgrounds
-  static const background = Color(0xFF0B0F14);
-  static const surface = Color(0xFF11161F);
-  static const surfaceVariant = Color(0xFF151C28);
-  static const surfaceBright = Color(0xFF1C2533);
+  static const background = AppColors.background;
+  static const surface = AppColors.surface;
+  static const surfaceVariant = AppColors.surfaceVariant;
+  static const surfaceBright = AppColors.surfaceBright;
 
   // Accent
-  static const accent = Color(0xFF47D7A1);
-  static const accentDim = Color(0xFF2FA678);
+  static const accent = AppColors.accent;
+  static const accentDim = AppColors.accentDim;
 
   // Status
-  static const success = Color(0xFF4CCB8F);
-  static const error = Color(0xFFFF6B6B);
+  static const success = AppColors.success;
+  static const error = AppColors.error;
+  static const warning = AppColors.warning;
+  static const statusAmber = AppColors.statusAmber;
 
   // Text
-  static const textPrimary = Color(0xFFE7EDF5);
-  static const textSecondary = Color(0xFFC5D0DE);
-  static const textTertiary = Color(0xFF95A3B6);
-  static const textMuted = Color(0xFF6E7A8C);
+  static const textPrimary = AppColors.textPrimary;
+  static const textSecondary = AppColors.textSecondary;
+  static const textTertiary = AppColors.textTertiary;
+  static const textMuted = AppColors.textMuted;
 
   // Borders
-  static const border = Color(0x20FFFFFF); // white ~12%
-  static const borderSubtle = Color(0x12FFFFFF); // white ~7%
-  static const borderFocus = Color(0x9947D7A1); // accent 60%
+  static const border = AppColors.border;
+  static const borderSubtle = AppColors.borderSubtle;
+  static const borderFocus = AppColors.borderFocus;
 
   // Cards
-  static const cardBackground = Color(0xFF151C28);
-  static const cardBorder = Color(0x12FFFFFF); // white ~7%
+  static const cardBackground = AppColors.cardBackground;
+  static const cardBorder = AppColors.cardBorder;
 }
 
 class HorizonTerminalTheme {
   HorizonTerminalTheme._();
 
-  static final TerminalTheme dark = TerminalTheme(
+  @Deprecated('Use light instead — this is a light theme despite the name')
+  static final TerminalTheme dark = light;
+
+  static final TerminalTheme light = TerminalTheme(
     cursor: HorizonColors.accent,
-    selection: const Color(0x3347D7A1),
+    selection: const Color(0x336B7280),
     foreground: HorizonColors.textSecondary,
     background: HorizonColors.surfaceVariant,
-    black: HorizonColors.background,
+    black: const Color(0xFF1F2937),
     red: HorizonColors.error,
-    green: HorizonColors.accent,
-    yellow: const Color(0xFFF4D17A),
-    blue: const Color(0xFF6CA0FF),
-    magenta: const Color(0xFFFF6FB1),
-    cyan: const Color(0xFF4FD6FF),
-    white: HorizonColors.textSecondary,
-    brightBlack: const Color(0xFF3B4452),
-    brightRed: const Color(0xFFFF8C8C),
-    brightGreen: const Color(0xFF6EE7B7),
-    brightYellow: const Color(0xFFFFE3A1),
-    brightBlue: const Color(0xFF8AB4FF),
-    brightMagenta: const Color(0xFFFF9AD1),
-    brightCyan: const Color(0xFF88E6FF),
+    green: HorizonColors.success,
+    yellow: const Color(0xFF8A8266),
+    blue: const Color(0xFF6A7489),
+    magenta: const Color(0xFF8A7281),
+    cyan: const Color(0xFF6D8086),
+    white: const Color(0xFFD1D5DB),
+    brightBlack: const Color(0xFF6B7280),
+    brightRed: const Color(0xFFB08A8A),
+    brightGreen: const Color(0xFF7D9584),
+    brightYellow: const Color(0xFF9A9072),
+    brightBlue: const Color(0xFF7E889D),
+    brightMagenta: const Color(0xFF9C8393),
+    brightCyan: const Color(0xFF81969C),
     brightWhite: HorizonColors.textPrimary,
-    searchHitBackground: const Color(0xFF324B3F),
+    searchHitBackground: const Color(0xFFD6D9DE),
     searchHitBackgroundCurrent: HorizonColors.accent,
-    searchHitForeground: HorizonColors.background,
+    searchHitForeground: Colors.white,
   );
 }
 
@@ -76,114 +85,111 @@ class HorizonApp extends StatelessWidget {
 
   static ThemeData buildTheme() {
     final baseTextTheme = GoogleFonts.firaSansTextTheme(
-      ThemeData.dark().textTheme,
+      ThemeData.light().textTheme,
     );
     return ThemeData(
-        brightness: Brightness.dark,
-        fontFamily: GoogleFonts.firaSans().fontFamily,
-        scaffoldBackgroundColor: HorizonColors.background,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: HorizonColors.accent,
-          brightness: Brightness.dark,
-          surface: HorizonColors.surface,
-          primary: HorizonColors.accent,
+      brightness: Brightness.light,
+      fontFamily: GoogleFonts.firaSans().fontFamily,
+      scaffoldBackgroundColor: HorizonColors.background,
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: HorizonColors.accent,
+        brightness: Brightness.light,
+        surface: HorizonColors.surface,
+        primary: HorizonColors.accent,
+      ),
+      textTheme: baseTextTheme.apply(
+        bodyColor: HorizonColors.textPrimary,
+        displayColor: HorizonColors.textPrimary,
+      ),
+      cardTheme: CardThemeData(
+        color: HorizonColors.cardBackground,
+        elevation: 0,
+        shadowColor: Colors.black.withValues(alpha: 0.06),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          side: const BorderSide(color: HorizonColors.cardBorder, width: 0.5),
         ),
-        textTheme: baseTextTheme.apply(
-          bodyColor: HorizonColors.textSecondary,
-          displayColor: HorizonColors.textPrimary,
+      ),
+      switchTheme: SwitchThemeData(
+        thumbColor: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.selected)) {
+            return HorizonColors.accent;
+          }
+          return HorizonColors.textMuted;
+        }),
+        trackColor: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.selected)) {
+            return HorizonColors.accent.withValues(alpha: 0.24);
+          }
+          return Colors.black.withValues(alpha: 0.08);
+        }),
+        trackOutlineColor: WidgetStateProperty.resolveWith((states) {
+          return Colors.transparent;
+        }),
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: HorizonColors.surfaceVariant,
+        isDense: true,
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 16,
+          vertical: 14,
         ),
-        cardTheme: CardThemeData(
-          color: HorizonColors.cardBackground,
-          elevation: 0,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-            side: const BorderSide(
-              color: HorizonColors.cardBorder,
-              width: 1,
-            ),
-          ),
+        hintStyle: const TextStyle(
+          color: HorizonColors.textMuted,
+          fontSize: 12,
         ),
-        switchTheme: SwitchThemeData(
-          thumbColor: WidgetStateProperty.resolveWith((states) {
-            if (states.contains(WidgetState.selected)) {
-              return HorizonColors.accent;
-            }
-            return const Color(0xFF9AA0A6);
-          }),
-          trackColor: WidgetStateProperty.resolveWith((states) {
-            if (states.contains(WidgetState.selected)) {
-              return HorizonColors.accent.withValues(alpha: 0.35);
-            }
-            return Colors.white.withValues(alpha: 0.1);
-          }),
-          trackOutlineColor: WidgetStateProperty.resolveWith((states) {
-            return Colors.transparent;
-          }),
+        labelStyle: const TextStyle(
+          color: HorizonColors.textTertiary,
+          fontSize: 12,
         ),
-        inputDecorationTheme: InputDecorationTheme(
-          filled: true,
-          fillColor: HorizonColors.surfaceVariant,
-          isDense: true,
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          hintStyle: const TextStyle(
-            color: HorizonColors.textMuted,
-            fontSize: 12,
-          ),
-          labelStyle: const TextStyle(
-            color: HorizonColors.textTertiary,
-            fontSize: 12,
-          ),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(8),
-            borderSide: const BorderSide(color: HorizonColors.border),
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(8),
-            borderSide: const BorderSide(color: HorizonColors.border),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(8),
-            borderSide:
-                const BorderSide(color: HorizonColors.borderFocus, width: 1.5),
-          ),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: HorizonColors.borderSubtle, width: 0.5),
         ),
-        elevatedButtonTheme: ElevatedButtonThemeData(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: HorizonColors.accent,
-            foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(8),
-            ),
-            textStyle: const TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-            ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: HorizonColors.borderSubtle, width: 0.5),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(
+            color: HorizonColors.border,
+            width: 1,
           ),
         ),
-        outlinedButtonTheme: OutlinedButtonThemeData(
-          style: OutlinedButton.styleFrom(
-            foregroundColor: Colors.white70,
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-            side: const BorderSide(color: HorizonColors.border),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(8),
-            ),
-            textStyle:
-                const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-          ),
+      ),
+      elevatedButtonTheme: ElevatedButtonThemeData(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: HorizonColors.accent,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
         ),
-        snackBarTheme: SnackBarThemeData(
-          backgroundColor: HorizonColors.surfaceVariant,
-          contentTextStyle: const TextStyle(color: Colors.white70, fontSize: 13),
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
-            side: const BorderSide(color: HorizonColors.border),
-          ),
+      ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          foregroundColor: HorizonColors.textSecondary,
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          side: const BorderSide(color: HorizonColors.border),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
         ),
-        useMaterial3: true,
+      ),
+      snackBarTheme: SnackBarThemeData(
+        backgroundColor: HorizonColors.surfaceVariant,
+        contentTextStyle: const TextStyle(
+          color: HorizonColors.textPrimary,
+          fontSize: 13,
+        ),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+          side: const BorderSide(color: HorizonColors.border),
+        ),
+      ),
+      useMaterial3: true,
     );
   }
 

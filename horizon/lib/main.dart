@@ -21,13 +21,13 @@ Future<void> main(List<String> args) async {
     const windowOptions = WindowOptions(
       size: Size(760, 580),
       center: true,
-      backgroundColor: Color(0xFF202124),
+      backgroundColor: Color(0xFFFFFFFF),
       skipTaskbar: false,
       titleBarStyle: TitleBarStyle.hidden,
       title: 'Settings',
     );
     await windowManager.waitUntilReadyToShow(windowOptions, () async {
-      await windowManager.setBackgroundColor(const Color(0xFF202124));
+      await windowManager.setBackgroundColor(const Color(0xFFFFFFFF));
       await windowManager.show();
       await windowManager.focus();
     });
@@ -37,11 +37,11 @@ Future<void> main(List<String> args) async {
 
   // Main window — immersive (no titlebar border)
   const mainWindowOptions = WindowOptions(
-    backgroundColor: Color(0xFF202124),
+    backgroundColor: Color(0xFFFFFFFF),
     titleBarStyle: TitleBarStyle.hidden,
   );
   await windowManager.waitUntilReadyToShow(mainWindowOptions, () async {
-    await windowManager.setBackgroundColor(const Color(0xFF202124));
+    await windowManager.setBackgroundColor(const Color(0xFFFFFFFF));
     await windowManager.show();
     await windowManager.focus();
   });

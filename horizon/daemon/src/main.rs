@@ -1,4 +1,15 @@
+mod dns_forwarder;
+mod nat;
+mod tun_device;
+mod upnp;
+mod vpn_config;
+mod vpn_helper_client;
+mod vpn_helper_protocol;
+mod wg_server;
+
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::ffi::CStr;
 use std::fs;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -18,9 +29,11 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{broadcast, mpsc, Mutex};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+const VPN_SERVER_IP_STR: &str = "10.13.37.1";
+const RELAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[derive(Clone)]
 enum BroadcastMsg {
@@ -30,6 +43,7 @@ enum BroadcastMsg {
 
 struct AppState {
     sessions: Arc<Mutex<HashMap<String, Arc<PtySession>>>>,
+    inject_tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     lan_broadcast: broadcast::Sender<BroadcastMsg>,
     wormhole_broadcast: broadcast::Sender<BroadcastMsg>,
     config_id: Option<String>,
@@ -37,8 +51,10 @@ struct AppState {
     shell: String,
     dev_mode: bool,
     bind: IpAddr,
+    ws_bind_addrs: Vec<IpAddr>,
     port: u16,
     wormhole_url: Option<String>,
+    wormhole_token: Option<String>,
     wormhole_requested_session: Option<String>,
     wormhole_has_token: bool,
     lan_client_count: AtomicUsize,
@@ -49,6 +65,39 @@ struct AppState {
     wormhole_sender: Mutex<Option<mpsc::UnboundedSender<tokio_tungstenite::tungstenite::Message>>>,
     groups: Mutex<Vec<TerminalGroup>>,
     session_names: Mutex<HashMap<String, String>>,
+    /// WireGuard public key for VPN (base64-encoded).
+    wg_public_key: Mutex<Option<String>>,
+    /// WireGuard UDP listen port for VPN.
+    wg_udp_port: Mutex<Option<u16>>,
+    /// Our observed public address as reported by Wormhole.
+    wg_observed_addr: Mutex<Option<String>>,
+    /// Recently observed public endpoints as reported by Wormhole.
+    wg_observed_endpoints: Mutex<Vec<DirectCandidate>>,
+    /// Internal routes advertised to VPN clients.
+    wg_internal_routes: Mutex<Vec<String>>,
+    /// Channel to send peer add/remove commands to the WgServer event loop.
+    wg_peer_tx: Mutex<Option<mpsc::UnboundedSender<WgPeerCommand>>>,
+}
+
+/// Commands sent to the WgServer event loop for adding/removing peers.
+enum WgPeerCommand {
+    AddPeer {
+        public_key: String,
+        device_key: Option<String>,
+        endpoint: Option<SocketAddr>,
+        candidate_endpoints: Vec<SocketAddr>,
+        reply_tx: tokio::sync::oneshot::Sender<Result<wg_server::VpnAssignment, String>>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DirectCandidate {
+    addr: String,
+    port: u16,
+    scope: String,
+    priority: i32,
+    source: String,
 }
 
 #[derive(Default, Clone)]
@@ -162,7 +211,7 @@ struct GroupStorage {
 async fn main() {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let config = match parse_args(std::env::args().skip(1).collect()) {
+    let mut config = match parse_args(std::env::args().skip(1).collect()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");
@@ -173,10 +222,49 @@ async fn main() {
     let (lan_tx, _) = broadcast::channel::<BroadcastMsg>(512);
     let (wormhole_tx, _) = broadcast::channel::<BroadcastMsg>(512);
     let data_dir = resolve_data_dir();
+
+    // I-9: Apply VPN settings from settings.json (CLI args override)
+    {
+        let (file_vpn, file_subnet, file_port, file_routes) =
+            load_vpn_settings_from_file(&data_dir);
+        // Only apply file settings if the CLI did NOT explicitly set --vpn
+        let cli_args: Vec<String> = std::env::args().collect();
+        let has_cli_vpn = cli_args.iter().any(|a| a == "--vpn");
+        if !has_cli_vpn {
+            if let Some(true) = file_vpn {
+                config.vpn = true;
+            }
+        }
+        let has_cli_subnet = cli_args.iter().any(|a| a.starts_with("--vpn-subnet"));
+        if !has_cli_subnet {
+            if let Some(subnet) = file_subnet {
+                config.vpn_subnet = subnet;
+            }
+        }
+        let has_cli_port = cli_args.iter().any(|a| a.starts_with("--vpn-port"));
+        if !has_cli_port {
+            if let Some(port) = file_port {
+                config.vpn_port = port;
+            }
+        }
+        let has_cli_routes = cli_args.iter().any(|a| a.starts_with("--vpn-routes"));
+        if !has_cli_routes {
+            if let Some(routes) = file_routes {
+                if !routes.is_empty() {
+                    config.vpn_routes = routes;
+                }
+            }
+        }
+    }
+    if config.vpn && config.vpn_ws_bind.is_none() {
+        config.vpn_ws_bind = Some(default_vpn_ws_bind());
+    }
+
     let paired_devices = load_paired_devices(&data_dir).unwrap_or_default();
     let (groups, session_names) = load_groups(&data_dir);
     let state = Arc::new(AppState {
         sessions: Arc::new(Mutex::new(HashMap::new())),
+        inject_tasks: Mutex::new(HashMap::new()),
         lan_broadcast: lan_tx,
         wormhole_broadcast: wormhole_tx,
         config_id: config.config_id.clone(),
@@ -184,8 +272,10 @@ async fn main() {
         shell: config.shell.clone(),
         dev_mode: config.dev_mode,
         bind: config.bind,
+        ws_bind_addrs: websocket_bind_ips(config.bind, config.vpn_ws_bind),
         port: config.port,
         wormhole_url: config.wormhole_url.clone(),
+        wormhole_token: config.wormhole_token.clone(),
         wormhole_requested_session: config.custom_session.clone(),
         wormhole_has_token: config
             .wormhole_token
@@ -199,6 +289,12 @@ async fn main() {
         wormhole_sender: Mutex::new(None),
         groups: Mutex::new(groups),
         session_names: Mutex::new(session_names),
+        wg_public_key: Mutex::new(None),
+        wg_udp_port: Mutex::new(None),
+        wg_observed_addr: Mutex::new(None),
+        wg_observed_endpoints: Mutex::new(Vec::new()),
+        wg_internal_routes: Mutex::new(config.vpn_routes.clone()),
+        wg_peer_tx: Mutex::new(None),
     });
 
     let pid_path = daemon_pid_path(&state.data_dir);
@@ -230,6 +326,28 @@ async fn main() {
         });
     }
 
+    // Start VPN server if enabled
+    if config.vpn {
+        let vpn_state = state.clone();
+        let vpn_port = config.vpn_port;
+        let vpn_subnet = config.vpn_subnet.clone();
+        let vpn_routes = config.vpn_routes.clone();
+        tokio::spawn(async move {
+            if let Err(e) = start_vpn_server(vpn_state, vpn_port, &vpn_subnet, &vpn_routes).await {
+                warn!("VPN server failed to start: {}", e);
+            }
+        });
+    }
+
+    // Start ufoo Terminal Host daemon management socket
+    #[cfg(unix)]
+    {
+        let mgmt_state = state.clone();
+        tokio::spawn(async move {
+            start_daemon_mgmt_socket(mgmt_state).await;
+        });
+    }
+
     #[cfg(unix)]
     install_signal_handlers();
 
@@ -242,11 +360,64 @@ async fn main() {
         .route("/pairing/reject", post(pairing_reject))
         .route("/paired-devices", get(paired_devices_list))
         .route("/paired-devices/:key", delete(paired_devices_delete))
+        .route("/vpn/status", get(vpn_status_handler))
         .route("/ws", get(ws_handler))
         .with_state(state.clone());
 
+    if let Some(vpn_ws_addr) = secondary_vpn_ws_addr(config.bind, config.port, config.vpn_ws_bind) {
+        let vpn_app = app.clone();
+        tokio::spawn(async move {
+            let mut waiting_logged = false;
+            loop {
+                if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                    return;
+                }
+                match tokio::net::TcpListener::bind(vpn_ws_addr).await {
+                    Ok(listener) => {
+                        info!("horizon-daemon VPN websocket listener on {vpn_ws_addr}");
+                        let result = axum::serve(
+                            listener,
+                            vpn_app.into_make_service_with_connect_info::<SocketAddr>(),
+                        )
+                        .with_graceful_shutdown(shutdown_signal())
+                        .await;
+                        if let Err(err) = result {
+                            warn!(
+                                "VPN websocket listener ended with error on {vpn_ws_addr}: {err}"
+                            );
+                        }
+                        return;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::AddrNotAvailable => {
+                        if !waiting_logged {
+                            info!(
+                                "waiting for VPN websocket bind address {vpn_ws_addr} to become available"
+                            );
+                            waiting_logged = true;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
+                    Err(err) => {
+                        warn!("failed to bind VPN websocket listener on {vpn_ws_addr}: {err}");
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
     let addr = SocketAddr::new(config.bind, config.port);
     info!("horizon-daemon listening on {addr}");
+
+    // UPnP: map WebSocket TCP port for external access
+    let ws_port = config.port;
+    tokio::spawn(async move {
+        match upnp::add_tcp_port_mapping(ws_port).await {
+            Ok(ip) => info!("UPnP: external TCP endpoint {ip}:{ws_port}"),
+            Err(e) => warn!("UPnP TCP: {e}"),
+        }
+    });
+
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(err) => {
@@ -267,36 +438,93 @@ async fn main() {
     }
 
     let _ = fs::remove_file(&pid_path);
+    let _ = fs::remove_file(state.data_dir.join("daemon.sock"));
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_lan_socket(state, socket))
+async fn ws_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let vpn_peer = matches!(addr.ip(), IpAddr::V4(ip) if ip.octets()[0..3] == [10, 13, 37]);
+    info!(
+        remote_addr = %addr,
+        vpn_peer = vpn_peer,
+        "websocket upgrade requested"
+    );
+    ws.on_upgrade(move |socket| handle_lan_socket(state, socket, addr))
 }
 
-async fn handle_lan_socket(state: Arc<AppState>, socket: WebSocket) {
+async fn handle_lan_socket(state: Arc<AppState>, socket: WebSocket, remote_addr: SocketAddr) {
     state.lan_client_count.fetch_add(1, Ordering::SeqCst);
     let (mut sink, mut stream) = socket.split();
     let mut broadcast_rx = state.lan_broadcast.subscribe();
+    let vpn_peer = matches!(remote_addr.ip(), IpAddr::V4(ip) if ip.octets()[0..3] == [10, 13, 37]);
+    let mut first_vpn_stdout_logged = false;
+
+    info!(
+        remote_addr = %remote_addr,
+        vpn_peer = vpn_peer,
+        "websocket accepted"
+    );
 
     // Initial info.
     let host_info = encode_json(json!({"type": "host_info", "hostName": state.host_name}));
     if sink.send(AxumMessage::Text(host_info)).await.is_err() {
+        warn!(
+            remote_addr = %remote_addr,
+            vpn_peer = vpn_peer,
+            "failed sending initial host_info on websocket"
+        );
         return;
     }
-    if send_session_list(&state, &mut sink).await.is_err() {
+    info!(
+        remote_addr = %remote_addr,
+        vpn_peer = vpn_peer,
+        "initial host_info sent on websocket"
+    );
+    if send_session_list(&state, &mut sink, remote_addr)
+        .await
+        .is_err()
+    {
+        warn!(
+            remote_addr = %remote_addr,
+            vpn_peer = vpn_peer,
+            "failed sending initial session bootstrap on websocket"
+        );
         return;
     }
+    info!(
+        remote_addr = %remote_addr,
+        vpn_peer = vpn_peer,
+        "initial session bootstrap sent on websocket"
+    );
 
     loop {
         tokio::select! {
             msg = stream.next() => {
                 let Some(Ok(msg)) = msg else { break };
-                if handle_lan_incoming(&state, msg, &mut sink).await.is_err() {
+                if handle_lan_incoming(&state, msg, &mut sink, remote_addr).await.is_err() {
                     break;
                 }
             }
             out = broadcast_rx.recv() => {
                 let Ok(out) = out else { break };
+                if vpn_peer && !first_vpn_stdout_logged {
+                    if let BroadcastMsg::Binary(bytes) = &out {
+                        if let Some(decoded) = decode_binary(bytes) {
+                            if decoded.ty == BinaryType::Stdout {
+                                info!(
+                                    remote_addr = %remote_addr,
+                                    session_id = %decoded.session_id,
+                                    payload_len = decoded.payload.len(),
+                                    "sent terminal stdout over websocket"
+                                );
+                                first_vpn_stdout_logged = true;
+                            }
+                        }
+                    }
+                }
                 let msg = match out {
                     BroadcastMsg::Text(text) => AxumMessage::Text(text),
                     BroadcastMsg::Binary(bytes) => AxumMessage::Binary(bytes),
@@ -309,6 +537,11 @@ async fn handle_lan_socket(state: Arc<AppState>, socket: WebSocket) {
     }
 
     state.lan_client_count.fetch_sub(1, Ordering::SeqCst);
+    info!(
+        remote_addr = %remote_addr,
+        vpn_peer = vpn_peer,
+        "websocket closed"
+    );
 }
 
 async fn status_handler(
@@ -325,11 +558,21 @@ async fn status_handler(
     let wormhole = state.wormhole_state.lock().await.clone();
     let pending = state.pending_pairing.lock().await.clone();
 
+    let wg_pub = state.wg_public_key.lock().await.clone();
+    let wg_port = state.wg_udp_port.lock().await.clone();
+    let wg_addr = state.wg_observed_addr.lock().await.clone();
+    let ws_binds: Vec<String> = state
+        .ws_bind_addrs
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+
     axum::Json(json!({
         "configId": state.config_id,
         "hostName": state.host_name,
         "lan": {
             "bind": state.bind.to_string(),
+            "binds": ws_binds,
             "port": state.port,
             "ws": format!("ws://{}:{}/ws", state.bind, state.port),
             "clients": state.lan_client_count.load(Ordering::SeqCst),
@@ -343,6 +586,12 @@ async fn status_handler(
             "lastErrorKind": wormhole.last_error_kind,
             "lastError": wormhole.last_error,
             "lastErrorAt": wormhole.last_error_at,
+        },
+        "vpn": {
+            "running": state.wg_peer_tx.lock().await.is_some(),
+            "wgPublicKey": wg_pub,
+            "wgUdpPort": wg_port,
+            "observedAddr": wg_addr,
         },
         "devMode": state.dev_mode,
         "sessions": session_count,
@@ -509,8 +758,29 @@ fn resolve_data_dir() -> PathBuf {
     base.join(".blackhole").join("horizon")
 }
 
+async fn append_remote_log(state: &AppState, line: &str) {
+    use std::io::Write;
+    let path = state.data_dir.join("voyager-remote.log");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    let millis = now.subsec_millis();
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "[{secs}.{millis:03}] {line}");
+    }
+}
+
 fn paired_devices_path(dir: &Path) -> PathBuf {
     dir.join("paired_devices.json")
+}
+
+fn settings_path(dir: &Path) -> PathBuf {
+    dir.join("settings.json")
 }
 
 fn daemon_pid_path(dir: &Path) -> PathBuf {
@@ -598,6 +868,62 @@ async fn shutdown_signal() {
     }
 }
 
+fn load_vpn_settings_from_path(
+    path: &Path,
+) -> (
+    Option<bool>,
+    Option<String>,
+    Option<u16>,
+    Option<Vec<String>>,
+) {
+    if !path.exists() {
+        return (None, None, None, None);
+    }
+    let Ok(content) = fs::read_to_string(&path) else {
+        return (None, None, None, None);
+    };
+    let Ok(parsed) = serde_json::from_str::<PairedDevicesFile>(&content) else {
+        return (None, None, None, None);
+    };
+    let settings = &parsed.settings;
+    let vpn_enabled = settings.get("vpnEnabled").and_then(|v| v.as_bool());
+    let vpn_subnet = settings
+        .get("vpnSubnet")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let vpn_port = settings
+        .get("vpnPort")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u16);
+    let vpn_routes = settings
+        .get("vpnRoutes")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        });
+    (vpn_enabled, vpn_subnet, vpn_port, vpn_routes)
+}
+
+/// Load VPN settings from settings.json, falling back to the legacy
+/// paired_devices.json settings field when needed.
+/// Returns (vpn_enabled, vpn_subnet, vpn_port, vpn_routes) or None values.
+fn load_vpn_settings_from_file(
+    dir: &Path,
+) -> (
+    Option<bool>,
+    Option<String>,
+    Option<u16>,
+    Option<Vec<String>>,
+) {
+    let current = load_vpn_settings_from_path(&settings_path(dir));
+    if current.0.is_some() || current.1.is_some() || current.2.is_some() || current.3.is_some() {
+        return current;
+    }
+    load_vpn_settings_from_path(&paired_devices_path(dir))
+}
+
 fn load_paired_devices(dir: &Path) -> std::io::Result<Vec<PairedDevice>> {
     let path = paired_devices_path(dir);
     if !path.exists() {
@@ -670,6 +996,31 @@ fn find_group_index(groups: &[TerminalGroup], id: &str) -> Option<usize> {
 fn default_group_mut(groups: &mut Vec<TerminalGroup>) -> &mut TerminalGroup {
     ensure_default_group(groups);
     groups.iter_mut().find(|g| g.is_default()).unwrap()
+}
+
+async fn resolve_group_id_for_source_session(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> Result<String, (String, String)> {
+    {
+        let sessions = state.sessions.lock().await;
+        if !sessions.contains_key(session_id) {
+            return Err(host_err(
+                "not_found",
+                &format!("session not found: {session_id}"),
+            ));
+        }
+    }
+
+    let groups = state.groups.lock().await;
+    if let Some(group) = groups
+        .iter()
+        .find(|g| g.session_ids.iter().any(|id| id == session_id))
+    {
+        return Ok(group.id.clone());
+    }
+
+    Ok(DEFAULT_GROUP_ID.to_string())
 }
 
 fn next_group_name(groups: &[TerminalGroup]) -> String {
@@ -803,7 +1154,9 @@ async fn handle_lan_incoming(
     state: &Arc<AppState>,
     msg: AxumMessage,
     sink: &mut futures_util::stream::SplitSink<WebSocket, AxumMessage>,
+    remote_addr: SocketAddr,
 ) -> Result<(), ()> {
+    let vpn_peer = matches!(remote_addr.ip(), IpAddr::V4(ip) if ip.octets()[0..3] == [10, 13, 37]);
     match msg {
         AxumMessage::Text(text) => {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -825,11 +1178,16 @@ async fn handle_lan_incoming(
             };
 
             match ty {
+                "remote_log" => {
+                    if let Some(line) = value.get("line").and_then(|v| v.as_str()) {
+                        append_remote_log(state, line).await;
+                    }
+                }
                 "ping" => {
                     let _ = sink.send(AxumMessage::Binary(build_pong_message())).await;
                 }
                 "list" => {
-                    let _ = send_session_list(state, sink).await;
+                    let _ = send_session_list(state, sink, remote_addr).await;
                 }
                 "create" => {
                     let group_id = value.get("groupId").and_then(|v| v.as_str());
@@ -936,6 +1294,14 @@ async fn handle_lan_incoming(
             };
             match decoded.ty {
                 BinaryType::Stdin => {
+                    if vpn_peer && !decoded.payload.is_empty() {
+                        info!(
+                            remote_addr = %remote_addr,
+                            session_id = %decoded.session_id,
+                            payload_len = decoded.payload.len(),
+                            "received terminal stdin over websocket"
+                        );
+                    }
                     write_stdin(state, &decoded.session_id, &decoded.payload).await;
                 }
                 BinaryType::Resize => {
@@ -961,6 +1327,7 @@ async fn handle_lan_incoming(
 async fn send_session_list(
     state: &Arc<AppState>,
     sink: &mut futures_util::stream::SplitSink<WebSocket, AxumMessage>,
+    remote_addr: SocketAddr,
 ) -> Result<(), ()> {
     let ids = list_session_ids(state).await;
     sink.send(AxumMessage::Text(encode_json(json!({
@@ -993,6 +1360,13 @@ async fn send_session_list(
         ))))
         .await;
 
+    info!(
+        remote_addr = %remote_addr,
+        session_count = active_sessions.len(),
+        group_count = groups.len(),
+        "sent websocket bootstrap payloads"
+    );
+
     Ok(())
 }
 
@@ -1002,16 +1376,29 @@ async fn list_session_ids(state: &Arc<AppState>) -> Vec<String> {
 }
 
 async fn create_session(state: &Arc<AppState>) -> std::io::Result<String> {
-    create_session_in_group(state, None).await
+    create_session_with_command(state, None, None).await
 }
 
 async fn create_session_in_group(
     state: &Arc<AppState>,
     group_id: Option<&str>,
 ) -> std::io::Result<String> {
+    create_session_with_command(state, group_id, None).await
+}
+
+async fn create_session_with_command(
+    state: &Arc<AppState>,
+    group_id: Option<&str>,
+    startup_command: Option<&str>,
+) -> std::io::Result<String> {
     let session_id = generate_session_id();
-    let arc = Arc::new(spawn_pty_session(&session_id, &state.shell)?);
+    let arc = Arc::new(spawn_pty_session(
+        &session_id,
+        &state.shell,
+        startup_command,
+    )?);
     start_output_thread(state.clone(), arc.clone());
+    start_inject_socket(state, &session_id, arc.clone());
 
     let mut sessions = state.sessions.lock().await;
     sessions.insert(session_id.clone(), arc);
@@ -1046,6 +1433,518 @@ async fn create_session_in_group(
     Ok(session_id)
 }
 
+fn inject_sock_path(data_dir: &Path, session_id: &str) -> PathBuf {
+    data_dir
+        .join("sessions")
+        .join(session_id)
+        .join("inject.sock")
+}
+
+#[cfg(unix)]
+fn start_inject_socket(state: &Arc<AppState>, session_id: &str, session: Arc<PtySession>) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let sock_path = inject_sock_path(&state.data_dir, session_id);
+    if let Some(parent) = sock_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    // Remove stale socket
+    let _ = fs::remove_file(&sock_path);
+
+    let listener = match std::os::unix::net::UnixListener::bind(&sock_path) {
+        Ok(l) => {
+            l.set_nonblocking(true).ok();
+            // Restrict to owner only
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600));
+            l
+        }
+        Err(e) => {
+            warn!("failed to bind inject socket {sock_path:?}: {e}");
+            return;
+        }
+    };
+    let listener = match tokio::net::UnixListener::from_std(listener) {
+        Ok(l) => l,
+        Err(e) => {
+            warn!("failed to convert inject socket to tokio: {e}");
+            return;
+        }
+    };
+
+    let state_for_listener = state.clone();
+    let session_id = session_id.to_string();
+    let listener_session_id = session_id.clone();
+    let handle = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(_) => break,
+            };
+            let session = session.clone();
+            let state = state_for_listener.clone();
+            let inject_session_id = listener_session_id.clone();
+            tokio::spawn(async move {
+                let (reader, mut writer) = stream.into_split();
+                let mut lines = BufReader::new(reader).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let (req_id, resp, should_close_session) = match serde_json::from_str::<
+                        serde_json::Value,
+                    >(&line)
+                    {
+                        Ok(req) => {
+                            let rid = req
+                                .get("request_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            match handle_inject_request(&state, &inject_session_id, &session, &req)
+                                .await
+                            {
+                                Ok((result, should_close_session)) => {
+                                    (rid, Ok(result), should_close_session)
+                                }
+                                Err(err) => (rid, Err(err), false),
+                            }
+                        }
+                        Err(e) => (
+                            "".to_string(),
+                            Err(("invalid_request".to_string(), format!("{e}"))),
+                            false,
+                        ),
+                    };
+                    let envelope = match resp {
+                        Ok(result) => {
+                            serde_json::json!({"v": 1, "request_id": req_id, "ok": true, "result": result})
+                        }
+                        Err((code, msg)) => {
+                            serde_json::json!({"v": 1, "request_id": req_id, "ok": false, "error_code": code, "error": msg})
+                        }
+                    };
+                    let mut out = envelope.to_string();
+                    out.push('\n');
+                    if writer.write_all(out.as_bytes()).await.is_err() {
+                        break;
+                    }
+                    if should_close_session {
+                        let state = state.clone();
+                        let session_id = inject_session_id.clone();
+                        tokio::spawn(async move {
+                            close_session(&state, &session_id).await;
+                        });
+                        break;
+                    }
+                }
+            });
+        }
+    });
+
+    // Store task handle for cleanup — spawn a blocking lock to avoid
+    // holding the future across an await in the synchronous caller.
+    let state2 = state.clone();
+    let sid = session_id;
+    tokio::spawn(async move {
+        state2.inject_tasks.lock().await.insert(sid, handle);
+    });
+}
+
+#[cfg(unix)]
+fn host_err(code: &str, msg: &str) -> (String, String) {
+    (code.to_string(), msg.to_string())
+}
+
+#[cfg(unix)]
+fn session_capability_commands() -> Vec<&'static str> {
+    let mut commands = vec![
+        "inject",
+        "raw",
+        "resize",
+        "ping",
+        "capabilities",
+        "snapshot",
+        "close_session",
+    ];
+    #[cfg(target_os = "macos")]
+    {
+        commands.push("activate");
+        commands.push("notify");
+    }
+    commands
+}
+
+#[cfg(unix)]
+fn current_terminal_size(master_fd: std::os::fd::RawFd) -> (usize, usize) {
+    let mut winsz: libc::winsize = unsafe { std::mem::zeroed() };
+    let ioctl_rc = unsafe { libc::ioctl(master_fd, libc::TIOCGWINSZ as libc::c_ulong, &mut winsz) };
+    if ioctl_rc < 0 || winsz.ws_col == 0 || winsz.ws_row == 0 {
+        return (80, 24);
+    }
+    (winsz.ws_col as usize, winsz.ws_row as usize)
+}
+
+#[cfg(target_os = "macos")]
+fn escape_applescript_string(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
+#[cfg(target_os = "macos")]
+fn activate_host_window() -> Result<(), (String, String)> {
+    let status = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(r#"tell application "Horizon" to activate"#)
+        .status()
+        .map_err(|e| host_err("internal_error", &format!("activate failed: {e}")))?;
+    if !status.success() {
+        return Err(host_err("internal_error", "activate failed"));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn activate_host_window() -> Result<(), (String, String)> {
+    Err(host_err(
+        "unsupported",
+        "activate is not supported on this platform",
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn deliver_host_notification(title: &str, message: &str) -> Result<(), (String, String)> {
+    let script = format!(
+        "display notification \"{}\" with title \"{}\"",
+        escape_applescript_string(message),
+        escape_applescript_string(title)
+    );
+    let status = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .status()
+        .map_err(|e| host_err("internal_error", &format!("notify failed: {e}")))?;
+    if !status.success() {
+        return Err(host_err("internal_error", "notify failed"));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn deliver_host_notification(_title: &str, _message: &str) -> Result<(), (String, String)> {
+    Err(host_err(
+        "unsupported",
+        "notify is not supported on this platform",
+    ))
+}
+
+#[cfg(unix)]
+async fn handle_inject_request(
+    state: &Arc<AppState>,
+    session_id: &str,
+    session: &PtySession,
+    req: &serde_json::Value,
+) -> Result<(serde_json::Value, bool), (String, String)> {
+    let req_type = req.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    match req_type {
+        "inject" => {
+            let command = req
+                .get("command")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| host_err("invalid_request", "missing field: command"))?;
+            let data = encode_injected_command_text(command);
+            if !data.is_empty() {
+                write_all_pty(session.master_fd, &data)
+                    .map_err(|_| host_err("internal_error", "write to pty failed"))?;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    HOST_INJECT_SUBMIT_DELAY_MS,
+                ))
+                .await;
+            }
+            if write_all_pty(session.master_fd, injected_submit_bytes()).is_err() {
+                Err(host_err("internal_error", "write to pty failed"))
+            } else {
+                Ok((serde_json::json!({}), false))
+            }
+        }
+        "raw" => {
+            let data = req
+                .get("data")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| host_err("invalid_request", "missing field: data"))?;
+            if write_all_pty(session.master_fd, data.as_bytes()).is_err() {
+                Err(host_err("internal_error", "write to pty failed"))
+            } else {
+                Ok((serde_json::json!({}), false))
+            }
+        }
+        "resize" => {
+            let rows = req.get("rows").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            let cols = req.get("cols").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            if rows == 0 || cols == 0 {
+                return Err(host_err("invalid_request", "rows and cols must be > 0"));
+            }
+            let winsz = libc::winsize {
+                ws_row: rows,
+                ws_col: cols,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            unsafe {
+                libc::ioctl(session.master_fd, libc::TIOCSWINSZ as libc::c_ulong, &winsz);
+            }
+            Ok((serde_json::json!({}), false))
+        }
+        "snapshot" => {
+            let (cols, rows) = current_terminal_size(session.master_fd);
+            let cap = (cols * rows * 4).min(65536).max(4096);
+            let raw = {
+                let history = session
+                    .history
+                    .lock()
+                    .map_err(|_| host_err("internal_error", "history lock poisoned"))?;
+                let start = history.len().saturating_sub(cap);
+                history[start..].to_vec()
+            };
+            let text = String::from_utf8_lossy(&raw);
+            let lines: Vec<&str> = text.lines().collect();
+            let visible_start = lines.len().saturating_sub(rows);
+            let visible: Vec<&str> = lines[visible_start..].to_vec();
+            Ok((
+                serde_json::json!({
+                    "lines": visible,
+                    "cols": cols,
+                    "rows": rows,
+                }),
+                false,
+            ))
+        }
+        "activate" => {
+            activate_host_window()?;
+            Ok((
+                serde_json::json!({
+                    "session_id": session.session_id,
+                }),
+                false,
+            ))
+        }
+        "notify" => {
+            let message = req
+                .get("message")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| host_err("invalid_request", "missing field: message"))?;
+            let title = req.get("title").and_then(|v| v.as_str()).unwrap_or("ufoo");
+            deliver_host_notification(title, message)?;
+            Ok((
+                serde_json::json!({
+                    "delivered": true,
+                    "title": title,
+                    "message": message,
+                }),
+                false,
+            ))
+        }
+        "close_session" => {
+            let sessions = state.sessions.lock().await;
+            if !sessions.contains_key(session_id) {
+                return Err(host_err(
+                    "not_found",
+                    &format!("session not found: {session_id}"),
+                ));
+            }
+            drop(sessions);
+            Ok((serde_json::json!({}), true))
+        }
+        "ping" => Ok((serde_json::json!({"pong": true}), false)),
+        "capabilities" => Ok((
+            serde_json::json!({
+                "host": "horizon",
+                "protocol_version": 1,
+                "commands": session_capability_commands()
+            }),
+            false,
+        )),
+        _ => Err(host_err(
+            "unsupported",
+            &format!("unknown command: {req_type}"),
+        )),
+    }
+}
+
+#[cfg(not(unix))]
+fn start_inject_socket(_state: &Arc<AppState>, _session_id: &str, _session: Arc<PtySession>) {}
+
+/// Daemon management socket — ufoo Terminal Host Protocol (per-host).
+/// Listens at `~/.blackhole/horizon/daemon.sock`.
+/// Commands: create_session, list_sessions, close_session, capabilities, ping.
+#[cfg(unix)]
+async fn start_daemon_mgmt_socket(state: Arc<AppState>) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let sock_path = state.data_dir.join("daemon.sock");
+    let _ = fs::remove_file(&sock_path);
+
+    let listener = match std::os::unix::net::UnixListener::bind(&sock_path) {
+        Ok(l) => {
+            l.set_nonblocking(true).ok();
+            // Restrict to owner only
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600));
+            l
+        }
+        Err(e) => {
+            warn!("failed to bind daemon mgmt socket {sock_path:?}: {e}");
+            return;
+        }
+    };
+    let listener = match tokio::net::UnixListener::from_std(listener) {
+        Ok(l) => l,
+        Err(e) => {
+            warn!("failed to convert daemon mgmt socket to tokio: {e}");
+            return;
+        }
+    };
+
+    info!("daemon mgmt socket listening on {sock_path:?}");
+
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(_) => break,
+        };
+        let state = state.clone();
+        tokio::spawn(async move {
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = BufReader::new(reader).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let (req_id, resp) = match serde_json::from_str::<serde_json::Value>(&line) {
+                    Ok(req) => {
+                        let rid = req
+                            .get("request_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        (rid, handle_daemon_request(&state, &req).await)
+                    }
+                    Err(e) => (
+                        "".to_string(),
+                        Err(("invalid_request".to_string(), format!("{e}"))),
+                    ),
+                };
+                let envelope = match resp {
+                    Ok(result) => {
+                        serde_json::json!({"v": 1, "request_id": req_id, "ok": true, "result": result})
+                    }
+                    Err((code, msg)) => {
+                        serde_json::json!({"v": 1, "request_id": req_id, "ok": false, "error_code": code, "error": msg})
+                    }
+                };
+                let mut out = envelope.to_string();
+                out.push('\n');
+                if writer.write_all(out.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+}
+
+#[cfg(unix)]
+async fn handle_daemon_request(
+    state: &Arc<AppState>,
+    req: &serde_json::Value,
+) -> Result<serde_json::Value, (String, String)> {
+    let req_type = req.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    match req_type {
+        "create_session" => {
+            let explicit_group_id = req.get("group_id").and_then(|v| v.as_str());
+            let source_session_id = req.get("source_session_id").and_then(|v| v.as_str());
+            let startup_command = req
+                .get("command")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty());
+            let resolved_group_id = if let Some(group_id) = explicit_group_id {
+                Some(group_id.to_string())
+            } else if let Some(session_id) = source_session_id {
+                Some(resolve_group_id_for_source_session(state, session_id).await?)
+            } else {
+                None
+            };
+            let session_id =
+                create_session_with_command(state, resolved_group_id.as_deref(), startup_command)
+                    .await
+                    .map_err(|e| host_err("internal_error", &format!("spawn failed: {e}")))?;
+            // Notify LAN + Wormhole clients so UI updates
+            let msg = encode_json(json!({
+                "type": "session_created",
+                "sessionId": session_id,
+            }));
+            let _ = state.lan_broadcast.send(BroadcastMsg::Text(msg.clone()));
+            let _ = state.wormhole_broadcast.send(BroadcastMsg::Text(msg));
+            let inject_sock = inject_sock_path(&state.data_dir, &session_id);
+            Ok(serde_json::json!({
+                "session_id": session_id,
+                "inject_sock": inject_sock.to_string_lossy(),
+            }))
+        }
+        "list_sessions" => {
+            let sessions = state.sessions.lock().await;
+            let list: Vec<serde_json::Value> = sessions
+                .keys()
+                .map(|id| {
+                    let sock = inject_sock_path(&state.data_dir, id);
+                    serde_json::json!({
+                        "session_id": id,
+                        "inject_sock": sock.to_string_lossy(),
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({"sessions": list}))
+        }
+        "close_session" => {
+            let session_id = req
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| host_err("invalid_request", "missing field: session_id"))?;
+            // Check session exists
+            {
+                let sessions = state.sessions.lock().await;
+                if !sessions.contains_key(session_id) {
+                    return Err(host_err(
+                        "not_found",
+                        &format!("session not found: {session_id}"),
+                    ));
+                }
+            }
+            close_session(state, session_id).await;
+            Ok(serde_json::json!({}))
+        }
+        "ping" => Ok(serde_json::json!({"pong": true})),
+        "capabilities" => Ok(serde_json::json!({
+            "host": "horizon",
+            "protocol_version": 1,
+            "commands": [
+                "create_session",
+                "list_sessions",
+                "close_session",
+                "ping",
+                "capabilities"
+            ],
+            "session_commands": session_capability_commands()
+        })),
+        _ => Err(host_err(
+            "unsupported",
+            &format!("unknown command: {req_type}"),
+        )),
+    }
+}
+
 async fn close_session(state: &Arc<AppState>, session_id: &str) {
     let session = {
         let mut sessions = state.sessions.lock().await;
@@ -1055,6 +1954,20 @@ async fn close_session(state: &Arc<AppState>, session_id: &str) {
         return;
     };
     session.cleanup();
+
+    // Abort inject socket task and remove socket file
+    {
+        let mut tasks = state.inject_tasks.lock().await;
+        if let Some(handle) = tasks.remove(session_id) {
+            handle.abort();
+        }
+    }
+    let sock_path = inject_sock_path(&state.data_dir, session_id);
+    let _ = fs::remove_file(&sock_path);
+    // Remove session directory if empty
+    if let Some(parent) = sock_path.parent() {
+        let _ = fs::remove_dir(parent);
+    }
 
     // Remove from groups
     let mut groups = state.groups.lock().await;
@@ -1162,6 +2075,282 @@ fn encode_json(value: serde_json::Value) -> String {
         map.entry("v".to_string()).or_insert_with(|| json!(1));
     }
     obj.to_string()
+}
+
+fn parse_direct_candidates(value: &serde_json::Value, key: &str) -> Vec<DirectCandidate> {
+    value
+        .get(key)
+        .and_then(|raw| raw.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|candidate| {
+            let addr = candidate.get("addr")?.as_str()?.trim();
+            let port = candidate.get("port")?.as_u64()? as u16;
+            if addr.is_empty() || port == 0 {
+                return None;
+            }
+            Some(DirectCandidate {
+                addr: addr.to_string(),
+                port,
+                scope: candidate
+                    .get("scope")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                priority: candidate
+                    .get("priority")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or_default() as i32,
+                source: candidate
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("peer")
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+fn merge_direct_candidates(
+    base: Vec<DirectCandidate>,
+    extra: impl IntoIterator<Item = DirectCandidate>,
+) -> Vec<DirectCandidate> {
+    let mut merged = base;
+    for candidate in extra {
+        let duplicate = merged.iter().any(|existing| {
+            existing.addr == candidate.addr
+                && existing.port == candidate.port
+                && existing.scope == candidate.scope
+        });
+        if !duplicate {
+            merged.push(candidate);
+        }
+    }
+    merged.sort_by(|a, b| b.priority.cmp(&a.priority));
+    merged
+}
+
+fn is_shared_private_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, ..] = ip.octets();
+    matches!(
+        (a, b),
+        (10, _) | (172, 16..=31) | (192, 168) | (100, 64..=127)
+    )
+}
+
+fn is_usable_lan_direct_ipv4(ip: Ipv4Addr) -> bool {
+    if ip.is_unspecified() || ip.is_loopback() || ip.is_link_local() || ip.is_multicast() {
+        return false;
+    }
+    if ip.octets()[0..3] == [10, 13, 37] {
+        return false;
+    }
+    is_shared_private_ipv4(ip)
+}
+
+fn parse_candidate_ip(addr: &str) -> Option<IpAddr> {
+    addr.trim().parse::<IpAddr>().ok()
+}
+
+fn has_scope(candidates: &[DirectCandidate], scope: &str) -> bool {
+    candidates.iter().any(|candidate| candidate.scope == scope)
+}
+
+fn classify_nat_mapping_behavior(observed_endpoints: &[DirectCandidate]) -> &'static str {
+    if observed_endpoints.is_empty() {
+        return "unknown";
+    }
+    let mut unique = observed_endpoints
+        .iter()
+        .map(|candidate| (candidate.addr.clone(), candidate.port))
+        .collect::<Vec<_>>();
+    unique.sort();
+    unique.dedup();
+    if unique.len() <= 1 {
+        return "stable";
+    }
+    let first_addr = unique.first().map(|entry| entry.0.clone());
+    if unique
+        .iter()
+        .all(|(addr, _)| Some(addr.clone()) == first_addr)
+    {
+        "port_variant"
+    } else {
+        "endpoint_variant"
+    }
+}
+
+fn compute_direct_reachability_score(
+    horizon_candidates: &[DirectCandidate],
+    voyager_candidates: &[DirectCandidate],
+    nat_mapping_behavior: &str,
+    hairpin_likely: bool,
+) -> i32 {
+    if horizon_candidates.is_empty() {
+        return 0;
+    }
+    let mut score = 35;
+    if has_scope(horizon_candidates, "lan") {
+        score += 20;
+    }
+    if has_scope(voyager_candidates, "lan") {
+        score += 15;
+    }
+    if has_scope(horizon_candidates, "public_observed") {
+        score += 10;
+    }
+    if has_scope(horizon_candidates, "last_known") {
+        score += 5;
+    }
+    if hairpin_likely {
+        score += 10;
+    }
+    score += match nat_mapping_behavior {
+        "stable" => 15,
+        "port_variant" => 8,
+        "endpoint_variant" => 0,
+        _ => 4,
+    };
+    score.clamp(0, 100)
+}
+
+fn hairpin_likely(observed_addr: Option<&str>, voyager_candidates: &[DirectCandidate]) -> bool {
+    let Some(observed_ip) = observed_addr.and_then(parse_candidate_ip) else {
+        return false;
+    };
+    voyager_candidates.iter().any(|candidate| {
+        matches!(candidate.scope.as_str(), "public_observed" | "last_known")
+            && parse_candidate_ip(&candidate.addr) == Some(observed_ip)
+    })
+}
+
+fn record_observed_direct_candidate(
+    store: &mut Vec<DirectCandidate>,
+    addr: Option<&str>,
+    port: Option<u16>,
+    source: &str,
+) {
+    let Some(addr) = addr.map(str::trim) else {
+        return;
+    };
+    let Some(port) = port else {
+        return;
+    };
+    if addr.is_empty() || port == 0 {
+        return;
+    }
+
+    for candidate in store.iter_mut() {
+        if candidate.scope == "public_observed" {
+            candidate.scope = "last_known".to_string();
+            candidate.priority = 120;
+        }
+    }
+
+    if let Some(candidate) = store
+        .iter_mut()
+        .find(|candidate| candidate.addr == addr && candidate.port == port)
+    {
+        candidate.scope = "public_observed".to_string();
+        candidate.priority = 180;
+        candidate.source = source.to_string();
+    } else {
+        store.push(DirectCandidate {
+            addr: addr.to_string(),
+            port,
+            scope: "public_observed".to_string(),
+            priority: 180,
+            source: source.to_string(),
+        });
+    }
+    store.sort_by(|a, b| b.priority.cmp(&a.priority));
+    if store.len() > 8 {
+        store.truncate(8);
+    }
+}
+
+fn observed_direct_candidate(addr: Option<&str>, port: Option<u16>) -> Option<DirectCandidate> {
+    let addr = addr?.trim();
+    let port = port?;
+    if addr.is_empty() || port == 0 {
+        return None;
+    }
+    Some(DirectCandidate {
+        addr: addr.to_string(),
+        port,
+        scope: "public_observed".to_string(),
+        priority: 180,
+        source: "wormhole_observed".to_string(),
+    })
+}
+
+#[cfg(unix)]
+fn local_lan_direct_candidates(port: u16) -> Vec<DirectCandidate> {
+    let mut result = Vec::new();
+    let mut addrs: *mut libc::ifaddrs = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut addrs) } != 0 || addrs.is_null() {
+        return result;
+    }
+
+    unsafe {
+        let mut cursor = addrs;
+        while !cursor.is_null() {
+            let ifa = &*cursor;
+            let flags = ifa.ifa_flags as i32;
+            if !ifa.ifa_addr.is_null()
+                && (flags & libc::IFF_UP) != 0
+                && (flags & libc::IFF_LOOPBACK) == 0
+                && (*ifa.ifa_addr).sa_family as i32 == libc::AF_INET
+            {
+                let sockaddr = &*(ifa.ifa_addr as *const libc::sockaddr_in);
+                let ip = Ipv4Addr::from(u32::from_be(sockaddr.sin_addr.s_addr));
+                if is_usable_lan_direct_ipv4(ip) {
+                    let name = CStr::from_ptr(ifa.ifa_name).to_string_lossy();
+                    result.push(DirectCandidate {
+                        addr: ip.to_string(),
+                        port,
+                        scope: "lan".to_string(),
+                        priority: 250,
+                        source: format!("local_interface:{name}"),
+                    });
+                }
+            }
+            cursor = (*cursor).ifa_next;
+        }
+        libc::freeifaddrs(addrs);
+    }
+
+    merge_direct_candidates(Vec::new(), result)
+}
+
+#[cfg(not(unix))]
+fn local_lan_direct_candidates(_port: u16) -> Vec<DirectCandidate> {
+    Vec::new()
+}
+
+fn best_direct_endpoint(
+    candidates: &[DirectCandidate],
+    fallback: Option<SocketAddr>,
+) -> Option<SocketAddr> {
+    candidates
+        .iter()
+        .filter_map(|candidate| {
+            if candidate.port == 0 || candidate.addr.is_empty() {
+                return None;
+            }
+            format!("{}:{}", candidate.addr, candidate.port)
+                .parse::<SocketAddr>()
+                .ok()
+        })
+        .next()
+        .or(fallback)
+}
+
+async fn current_horizon_direct_candidates(state: &Arc<AppState>) -> Vec<DirectCandidate> {
+    let observed_endpoints = state.wg_observed_endpoints.lock().await.clone();
+    let wg_port = state.wg_udp_port.lock().await.clone();
+    let local_candidates = wg_port.map(local_lan_direct_candidates).unwrap_or_default();
+    merge_direct_candidates(local_candidates, observed_endpoints)
 }
 
 fn generate_session_id() -> String {
@@ -1363,7 +2552,196 @@ impl PtySession {
 }
 
 #[cfg(unix)]
-fn spawn_pty_session(session_id: &str, shell: &str) -> std::io::Result<PtySession> {
+fn resolve_unix_home_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var("HOME")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        return Some(PathBuf::from(home));
+    }
+
+    unsafe {
+        let pw = libc::getpwuid(libc::geteuid());
+        if pw.is_null() {
+            return None;
+        }
+        let dir_ptr = (*pw).pw_dir;
+        if dir_ptr.is_null() {
+            return None;
+        }
+        let home = std::ffi::CStr::from_ptr(dir_ptr)
+            .to_string_lossy()
+            .trim()
+            .to_string();
+        if home.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(home))
+        }
+    }
+}
+
+#[cfg(unix)]
+fn should_use_login_interactive_shell(shell_path: &str) -> bool {
+    let shell_name = Path::new(shell_path)
+        .file_name()
+        .and_then(|v| v.to_str())
+        .map(|v| v.to_ascii_lowercase())
+        .unwrap_or_default();
+    matches!(
+        shell_name.as_str(),
+        "zsh" | "bash" | "sh" | "dash" | "ksh" | "mksh" | "ash" | "fish"
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn build_macos_bootstrap_path() -> String {
+    let current = std::env::var("PATH")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "/usr/bin:/bin:/usr/sbin:/sbin".to_string());
+
+    let mut merged = Vec::<String>::new();
+    for path in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"] {
+        if !current.split(':').any(|p| p == path) {
+            merged.push(path.to_string());
+        }
+    }
+    merged.push(current);
+    merged.join(":")
+}
+
+#[cfg(unix)]
+fn maybe_inject_codex_startup_overrides(command: &str) -> String {
+    let trimmed = command.trim_end();
+    if trimmed.is_empty() || trimmed.contains("disable_paste_burst") {
+        return trimmed.to_string();
+    }
+
+    for launcher in ["ucodex", "codex"] {
+        if trimmed == launcher || trimmed.ends_with(&format!(" {launcher}")) {
+            return format!("{trimmed} -c disable_paste_burst=true");
+        }
+    }
+
+    trimmed.to_string()
+}
+
+#[cfg(unix)]
+const HOST_INJECT_SUBMIT_DELAY_MS: u64 = 180;
+
+#[cfg(unix)]
+fn encode_injected_command_text(command: &str) -> Vec<u8> {
+    command.as_bytes().to_vec()
+}
+
+#[cfg(unix)]
+fn injected_submit_bytes() -> &'static [u8] {
+    b"\r"
+}
+
+#[cfg(unix)]
+fn write_all_pty(master_fd: std::os::fd::RawFd, data: &[u8]) -> std::io::Result<()> {
+    let mut total_written = 0;
+    while total_written < data.len() {
+        let written = unsafe {
+            libc::write(
+                master_fd,
+                data[total_written..].as_ptr() as *const _,
+                data.len() - total_written,
+            )
+        };
+        if written < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        if written == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "write to pty returned 0",
+            ));
+        }
+        total_written += written as usize;
+    }
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod startup_command_tests {
+    use super::maybe_inject_codex_startup_overrides;
+
+    #[test]
+    fn appends_disable_paste_burst_for_ucodex_launches() {
+        let input = "cd '/tmp' && UFOO_LAUNCH_MODE=host ucodex";
+        let output = maybe_inject_codex_startup_overrides(input);
+        assert_eq!(
+            output,
+            "cd '/tmp' && UFOO_LAUNCH_MODE=host ucodex -c disable_paste_burst=true"
+        );
+    }
+
+    #[test]
+    fn leaves_other_startup_commands_unchanged() {
+        let input = "cd '/tmp' && echo hi";
+        let output = maybe_inject_codex_startup_overrides(input);
+        assert_eq!(output, input);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod inject_command_tests {
+    use super::encode_injected_command_text;
+    use super::injected_submit_bytes;
+
+    #[test]
+    fn host_inject_text_excludes_submit_terminator() {
+        let encoded = encode_injected_command_text("$ufoo codex-8");
+        assert_eq!(encoded, b"$ufoo codex-8");
+    }
+
+    #[test]
+    fn host_inject_submit_uses_carriage_return() {
+        assert_eq!(injected_submit_bytes(), b"\r");
+    }
+}
+
+#[cfg(test)]
+mod websocket_bind_tests {
+    use super::{default_vpn_ws_bind, secondary_vpn_ws_addr, websocket_bind_ips};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    #[test]
+    fn adds_vpn_bind_when_primary_is_loopback() {
+        let primary = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let vpn = default_vpn_ws_bind();
+
+        assert_eq!(websocket_bind_ips(primary, Some(vpn)), vec![primary, vpn]);
+        assert_eq!(
+            secondary_vpn_ws_addr(primary, 9527, Some(vpn)),
+            Some(SocketAddr::new(vpn, 9527))
+        );
+    }
+
+    #[test]
+    fn skips_secondary_bind_when_primary_already_covers_all_interfaces() {
+        let primary = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let vpn = default_vpn_ws_bind();
+
+        assert_eq!(websocket_bind_ips(primary, Some(vpn)), vec![primary]);
+        assert_eq!(secondary_vpn_ws_addr(primary, 9527, Some(vpn)), None);
+    }
+}
+
+#[cfg(unix)]
+fn spawn_pty_session(
+    session_id: &str,
+    shell: &str,
+    startup_command: Option<&str>,
+) -> std::io::Result<PtySession> {
     use std::ffi::CString;
     use std::os::unix::io::FromRawFd;
     use std::os::unix::process::CommandExt;
@@ -1406,6 +2784,7 @@ fn spawn_pty_session(session_id: &str, shell: &str) -> std::io::Result<PtySessio
     } else {
         shell.to_string()
     };
+    let home_dir = resolve_unix_home_dir();
 
     let stdin_fd = unsafe { libc::dup(slave_fd) };
     let stdout_fd = unsafe { libc::dup(slave_fd) };
@@ -1434,8 +2813,69 @@ fn spawn_pty_session(session_id: &str, shell: &str) -> std::io::Result<PtySessio
         ws_ypixel: 0,
     };
 
-    let mut cmd = Command::new(shell_path);
+    let mut cmd = Command::new(&shell_path);
+    let startup_command = startup_command.map(str::trim).filter(|v| !v.is_empty());
+    if let Some(command) = startup_command {
+        let command = maybe_inject_codex_startup_overrides(command);
+        if should_use_login_interactive_shell(&shell_path) {
+            cmd.arg("-ilc");
+        } else {
+            cmd.arg("-c");
+        }
+        cmd.arg(command);
+    } else if should_use_login_interactive_shell(&shell_path) {
+        // Keep daemon PTY shell init behavior aligned with in-process PTY paths.
+        cmd.arg("-il");
+    }
     cmd.env("TERM", term);
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env(
+        "LANG",
+        std::env::var("LANG")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "en_US.UTF-8".to_string()),
+    );
+    #[cfg(target_os = "macos")]
+    {
+        cmd.env("PATH", build_macos_bootstrap_path());
+    }
+    if let Some(home) = home_dir.as_ref() {
+        cmd.env("HOME", home);
+        if home.is_dir() {
+            cmd.current_dir(home);
+        }
+    }
+    // Clean up inherited env that interferes with nested tools
+    cmd.env_remove("CLAUDECODE");
+
+    // Pass through ufoo environment variables for agent coordination
+    for (key, value) in std::env::vars() {
+        if key.starts_with("UFOO_") {
+            cmd.env(&key, &value);
+        }
+    }
+
+    // Expose ufoo Terminal Host Protocol env vars for agent coordination
+    cmd.env("UFOO_HOST_NAME", "horizon");
+    cmd.env("UFOO_HOST_SESSION_ID", session_id);
+    // Host-launched agents already run inside a real PTY provided by Horizon.
+    // Disabling ufoo's nested node-pty wrapper avoids double-PTY input quirks
+    // such as Enter being interpreted as newline inside Codex.
+    cmd.env("UFOO_DISABLE_PTY", "1");
+    if let Some(home) = home_dir.as_ref() {
+        let base = home.join(".blackhole").join("horizon");
+        let inject_sock = base.join("sessions").join(session_id).join("inject.sock");
+        cmd.env(
+            "UFOO_HOST_INJECT_SOCK",
+            inject_sock.to_string_lossy().as_ref(),
+        );
+        let daemon_sock = base.join("daemon.sock");
+        cmd.env(
+            "UFOO_HOST_DAEMON_SOCK",
+            daemon_sock.to_string_lossy().as_ref(),
+        );
+    }
     cmd.stdin(unsafe { Stdio::from_raw_fd(stdin_fd) });
     cmd.stdout(unsafe { Stdio::from_raw_fd(stdout_fd) });
     cmd.stderr(unsafe { Stdio::from_raw_fd(stderr_fd) });
@@ -1467,7 +2907,11 @@ fn spawn_pty_session(session_id: &str, shell: &str) -> std::io::Result<PtySessio
 }
 
 #[cfg(windows)]
-fn spawn_pty_session(session_id: &str, shell: &str) -> std::io::Result<PtySession> {
+fn spawn_pty_session(
+    session_id: &str,
+    shell: &str,
+    _startup_command: Option<&str>,
+) -> std::io::Result<PtySession> {
     let conpty = winconpty::ConPty::spawn(shell, 24, 80)?;
     Ok(PtySession {
         session_id: session_id.to_string(),
@@ -1478,7 +2922,11 @@ fn spawn_pty_session(session_id: &str, shell: &str) -> std::io::Result<PtySessio
 }
 
 #[cfg(not(any(unix, windows)))]
-fn spawn_pty_session(_session_id: &str, _shell: &str) -> std::io::Result<PtySession> {
+fn spawn_pty_session(
+    _session_id: &str,
+    _shell: &str,
+    _startup_command: Option<&str>,
+) -> std::io::Result<PtySession> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "PTY is not implemented for this platform yet",
@@ -2509,6 +3957,16 @@ struct Config {
     custom_session: Option<String>,
     config_id: Option<String>,
     no_initial_session: bool,
+    /// Enable VPN server.
+    vpn: bool,
+    /// Optional VPN-facing WebSocket bind address for Blackhole app takeover.
+    vpn_ws_bind: Option<IpAddr>,
+    /// VPN subnet (default: 10.13.37.0/24).
+    vpn_subnet: String,
+    /// WireGuard UDP listen port (default: 51820).
+    vpn_port: u16,
+    /// Internal network routes to advertise to VPN clients.
+    vpn_routes: Vec<String>,
 }
 
 fn parse_args(args: Vec<String>) -> Result<Config, String> {
@@ -2529,6 +3987,11 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
     let mut custom_session = None::<String>;
     let mut config_id = None::<String>;
     let mut no_initial_session = false;
+    let mut vpn = false;
+    let vpn_ws_bind = None::<IpAddr>;
+    let mut vpn_subnet = "10.13.37.0/24".to_string();
+    let mut vpn_port = 51820u16;
+    let mut vpn_routes: Vec<String> = Vec::new();
 
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
@@ -2588,6 +4051,40 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
                 config_id = Some(v);
             }
             "--no-initial-session" => no_initial_session = true,
+            "--vpn" => vpn = true,
+            "--vpn-subnet" => {
+                let Some(v) = it.next() else {
+                    return Err("--vpn-subnet requires a value".to_string());
+                };
+                vpn_subnet = v;
+            }
+            "--vpn-port" => {
+                let Some(v) = it.next() else {
+                    return Err("--vpn-port requires a value".to_string());
+                };
+                vpn_port = v
+                    .parse::<u16>()
+                    .map_err(|_| format!("invalid --vpn-port: {v}"))?;
+            }
+            "--vpn-routes" => {
+                let Some(v) = it.next() else {
+                    return Err("--vpn-routes requires a value".to_string());
+                };
+                vpn_routes.extend(v.split(',').map(|s| s.trim().to_string()));
+            }
+            _ if arg.starts_with("--vpn-subnet=") => {
+                vpn_subnet = arg.trim_start_matches("--vpn-subnet=").to_string();
+            }
+            _ if arg.starts_with("--vpn-port=") => {
+                let v = arg.trim_start_matches("--vpn-port=");
+                vpn_port = v
+                    .parse::<u16>()
+                    .map_err(|_| format!("invalid --vpn-port: {v}"))?;
+            }
+            _ if arg.starts_with("--vpn-routes=") => {
+                let v = arg.trim_start_matches("--vpn-routes=");
+                vpn_routes.extend(v.split(',').map(|s| s.trim().to_string()));
+            }
             _ if arg.starts_with("--bind=") => {
                 let v = arg.trim_start_matches("--bind=");
                 bind = v
@@ -2622,6 +4119,13 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
         }
     }
 
+    // Validate vpn_subnet CIDR format
+    if vpn {
+        if let Err(e) = validate_cidr(&vpn_subnet) {
+            return Err(format!("invalid --vpn-subnet '{}': {}", vpn_subnet, e));
+        }
+    }
+
     Ok(Config {
         bind,
         port,
@@ -2633,6 +4137,11 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
         custom_session,
         config_id,
         no_initial_session,
+        vpn,
+        vpn_ws_bind,
+        vpn_subnet,
+        vpn_port,
+        vpn_routes,
     })
 }
 
@@ -2654,11 +4163,312 @@ fn usage() -> String {
     .join("\n")
 }
 
+fn validate_cidr(cidr: &str) -> Result<(), String> {
+    let parts: Vec<&str> = cidr.splitn(2, '/').collect();
+    if parts.len() != 2 {
+        return Err("expected format: IP/PREFIX (e.g. 10.13.37.0/24)".to_string());
+    }
+    parts[0]
+        .parse::<Ipv4Addr>()
+        .map_err(|_| format!("'{}' is not a valid IPv4 address", parts[0]))?;
+    let prefix: u8 = parts[1]
+        .parse()
+        .map_err(|_| format!("'{}' is not a valid prefix length", parts[1]))?;
+    if prefix > 32 {
+        return Err(format!("prefix length {} exceeds maximum of 32", prefix));
+    }
+    if prefix < 8 {
+        return Err(format!("prefix length {} is too small (minimum 8)", prefix));
+    }
+    Ok(())
+}
+
 fn hostname() -> String {
     std::env::var("HOSTNAME")
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| "Horizon".to_string())
+}
+
+fn default_vpn_ws_bind() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::new(10, 13, 37, 1))
+}
+
+fn websocket_bind_ips(primary_bind: IpAddr, vpn_ws_bind: Option<IpAddr>) -> Vec<IpAddr> {
+    let mut binds = vec![primary_bind];
+    if let Some(vpn_bind) = vpn_ws_bind {
+        if !primary_bind.is_unspecified() && primary_bind != vpn_bind && !binds.contains(&vpn_bind)
+        {
+            binds.push(vpn_bind);
+        }
+    }
+    binds
+}
+
+fn secondary_vpn_ws_addr(
+    primary_bind: IpAddr,
+    port: u16,
+    vpn_ws_bind: Option<IpAddr>,
+) -> Option<SocketAddr> {
+    if primary_bind.is_unspecified() {
+        return None;
+    }
+    let vpn_bind = vpn_ws_bind?;
+    if vpn_bind == primary_bind {
+        return None;
+    }
+    Some(SocketAddr::new(vpn_bind, port))
+}
+
+// ============ VPN Server ============
+
+async fn start_vpn_server(
+    state: Arc<AppState>,
+    port: u16,
+    subnet: &str,
+    routes: &[String],
+) -> Result<(), String> {
+    info!("starting VPN server on port {port}, subnet {subnet}");
+
+    {
+        let mut advertised_routes = state.wg_internal_routes.lock().await;
+        *advertised_routes = routes.to_vec();
+    }
+
+    // Load or generate WireGuard keypair (persist to disk for stability)
+    let keys_path = state.data_dir.join("wg_keys.json");
+    let (pub_key, priv_key) = if let Ok(content) = fs::read_to_string(&keys_path) {
+        if let Ok(keys) = serde_json::from_str::<serde_json::Value>(&content) {
+            let pk = keys
+                .get("publicKey")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let sk = keys
+                .get("privateKey")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if let (Some(pk), Some(sk)) = (pk, sk) {
+                info!("loaded existing VPN keypair from {}", keys_path.display());
+                (pk, sk)
+            } else {
+                let (pk, sk) = tunnel::generate_keypair();
+                let _ = fs::write(
+                    &keys_path,
+                    serde_json::to_string_pretty(&json!({
+                        "publicKey": pk, "privateKey": sk
+                    }))
+                    .unwrap_or_default(),
+                );
+                (pk, sk)
+            }
+        } else {
+            let (pk, sk) = tunnel::generate_keypair();
+            let _ = fs::write(
+                &keys_path,
+                serde_json::to_string_pretty(&json!({
+                    "publicKey": pk, "privateKey": sk
+                }))
+                .unwrap_or_default(),
+            );
+            (pk, sk)
+        }
+    } else {
+        let (pk, sk) = tunnel::generate_keypair();
+        let _ = fs::create_dir_all(&state.data_dir);
+        let _ = fs::write(
+            &keys_path,
+            serde_json::to_string_pretty(&json!({
+                "publicKey": pk, "privateKey": sk
+            }))
+            .unwrap_or_default(),
+        );
+        info!(
+            "generated and saved new VPN keypair to {}",
+            keys_path.display()
+        );
+        (pk, sk)
+    };
+    info!("VPN WireGuard public key: {}", pub_key);
+
+    // Store public key and port in AppState
+    {
+        let mut wg_pub = state.wg_public_key.lock().await;
+        *wg_pub = Some(pub_key.clone());
+    }
+    {
+        let mut wg_port = state.wg_udp_port.lock().await;
+        *wg_port = Some(port);
+    }
+
+    let server_ip = VPN_SERVER_IP_STR;
+    let mut helper_session = None;
+    let tun = if cfg!(target_os = "macos") && vpn_helper_client::is_available(&state.data_dir) {
+        let prepared = vpn_helper_client::start_vpn(
+            &state.data_dir,
+            server_ip,
+            subnet,
+            "255.255.255.0",
+            state.port,
+        )
+        .map_err(|e| format!("failed to start VPN via helper: {e}"))?;
+        info!("created helper-backed TUN device: {}", prepared.tun.name);
+        helper_session = Some(prepared.session);
+        prepared.tun
+    } else {
+        let tun = tun_device::create_tun(None)
+            .map_err(|e| format!("failed to create TUN device: {e}"))?;
+        info!("created TUN device: {}", tun.name);
+
+        tun_device::configure_tun(&tun, server_ip, "255.255.255.0")
+            .map_err(|e| format!("failed to configure TUN: {e}"))?;
+        info!("TUN device configured with IP {server_ip}");
+
+        if let Err(e) = nat::enable_ip_forwarding() {
+            warn!("failed to enable IP forwarding: {e}");
+        }
+        if let Err(e) = nat::setup_nat(subnet, None, Some((server_ip, state.port, None))) {
+            warn!("failed to setup NAT: {e}");
+        }
+
+        tun
+    };
+
+    if helper_session.is_none() {
+        // Start DNS forwarder
+        let dns_listen: SocketAddr = format!("{server_ip}:53")
+            .parse()
+            .map_err(|e| format!("invalid dns listen addr: {e}"))?;
+        let dns_upstream = dns_forwarder::detect_system_dns();
+        info!(
+            "starting DNS forwarder on {} → {}",
+            dns_listen, dns_upstream
+        );
+        tokio::spawn(async move {
+            if let Err(e) = dns_forwarder::run_dns_forwarder(dns_listen, dns_upstream).await {
+                warn!("DNS forwarder error: {}", e);
+            }
+        });
+    } else {
+        info!("DNS forwarder delegated to privileged VPN helper");
+    }
+
+    // Create WG server
+    let tun_fd = tun.fd;
+    let tun_transport = tun.transport;
+    // Prevent TunDevice from closing the fd (WgServer takes ownership)
+    std::mem::forget(tun);
+
+    let mut server = wg_server::WgServer::new(priv_key, port, tun_fd, tun_transport)
+        .await
+        .map_err(|e| format!("failed to create WG server: {e}"))?;
+    info!("WireGuard server listening on UDP port {port}");
+
+    // Try UPnP port mapping so external clients can reach us
+    tokio::spawn(async move {
+        match upnp::add_port_mapping(port).await {
+            Ok(external) => info!("UPnP: external UDP endpoint {external}"),
+            Err(e) => warn!("UPnP: {e} (external clients may need manual port forwarding)"),
+        }
+    });
+    // Renew UPnP mapping periodically in background
+    let _upnp_task = upnp::spawn_renewal_task(port);
+
+    // Create peer command channel and store sender in AppState
+    let (peer_tx, peer_rx) = mpsc::unbounded_channel::<WgPeerCommand>();
+    {
+        let mut tx = state.wg_peer_tx.lock().await;
+        *tx = Some(peer_tx);
+    }
+
+    // Run the WG server event loop with peer command receiver
+    if let Err(e) = server.run_with_peer_commands(peer_rx).await {
+        warn!("WG server stopped: {e}");
+    }
+
+    if let Some(session) = helper_session {
+        if let Err(e) = session.stop() {
+            warn!("failed to stop helper-backed VPN session: {e}");
+        }
+    } else if let Err(e) = nat::teardown_nat() {
+        warn!("failed to tear down NAT: {e}");
+    }
+
+    Ok(())
+}
+
+async fn vpn_status_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !addr.ip().is_loopback() {
+        return (StatusCode::FORBIDDEN, "forbidden").into_response();
+    }
+    let wg_pub = state.wg_public_key.lock().await.clone();
+    let wg_port = state.wg_udp_port.lock().await.clone();
+    let wg_addr = state.wg_observed_addr.lock().await.clone();
+    let wg_running = state.wg_peer_tx.lock().await.is_some();
+
+    axum::Json(json!({
+        "enabled": wg_pub.is_some(),
+        "running": wg_running,
+        "serverIp": VPN_SERVER_IP_STR,
+        "subnet": "10.13.37.0/24",
+        "listenPort": wg_port,
+        "publicKey": wg_pub,
+        "observedAddr": wg_addr,
+    }))
+    .into_response()
+}
+
+async fn wait_for_wormhole_session(state: &Arc<AppState>) -> Option<String> {
+    loop {
+        if state.wormhole_url.is_none() {
+            return None;
+        }
+        let session_id = {
+            let wormhole = state.wormhole_state.lock().await;
+            if wormhole.connected {
+                wormhole.session_id.clone()
+            } else {
+                None
+            }
+        };
+        if session_id.is_some() {
+            return session_id;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+
+
+fn configured_wg_netcheck_endpoint(state: &Arc<AppState>) -> (Option<String>, Option<u16>) {
+    let configured_host = std::env::var("WORMHOLE_NETCHECK_HOST")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let configured_port = std::env::var("WORMHOLE_NETCHECK_PORT")
+        .ok()
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .filter(|value| *value > 0);
+
+    let derived_host = state.wormhole_url.as_deref().and_then(|base_url| {
+        let without_scheme = base_url.split("://").nth(1).unwrap_or(base_url);
+        let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
+        let host_port = authority.rsplit('@').next().unwrap_or(authority).trim();
+        let host = host_port
+            .strip_prefix('[')
+            .and_then(|value| value.split(']').next())
+            .unwrap_or_else(|| host_port.split(':').next().unwrap_or(host_port))
+            .trim();
+        if host.is_empty() {
+            None
+        } else {
+            Some(host.to_string())
+        }
+    });
+
+    (configured_host.or(derived_host), configured_port)
 }
 
 async fn run_wormhole(
@@ -2709,14 +4519,20 @@ async fn connect_wormhole(
         })?;
     info!("connecting wormhole: {url}");
 
-    let connect = tokio_tungstenite::connect_async(url);
-    let (ws, _) = match tokio::time::timeout(std::time::Duration::from_secs(5), connect).await {
+    let connect_started_at = tokio::time::Instant::now();
+    let connect = tokio_tungstenite::connect_async(url.clone());
+    let (ws, _) = match tokio::time::timeout(RELAY_CONNECT_TIMEOUT, connect).await {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => return Err(classify_wormhole_ws_error(&e)),
         Err(_) => {
             return Err(WormholeConnectError {
                 kind: "timeout",
-                message: "Timed out connecting to relay.".to_string(),
+                message: format!(
+                    "Timed out connecting to relay after {} ms (timeout={}s, url={}).",
+                    connect_started_at.elapsed().as_millis(),
+                    RELAY_CONNECT_TIMEOUT.as_secs(),
+                    url
+                ),
             });
         }
     };
@@ -2733,6 +4549,9 @@ async fn connect_wormhole(
     let (mut write, mut read) = ws.split();
     let mut broadcast_rx = state.wormhole_broadcast.subscribe();
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<tokio_tungstenite::tungstenite::Message>();
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(5));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_incoming = tokio::time::Instant::now();
     {
         let mut sender = state.wormhole_sender.lock().await;
         *sender = Some(cmd_tx);
@@ -2760,10 +4579,30 @@ async fn connect_wormhole(
         )))
         .await;
 
+    // Send WG endpoint registration if VPN is configured.
+    {
+        let wg_pub = state.wg_public_key.lock().await.clone();
+        let wg_port = state.wg_udp_port.lock().await.clone();
+        if wg_pub.is_some() || wg_port.is_some() {
+            let horizon_candidates = current_horizon_direct_candidates(state).await;
+            let _ = write
+                .send(tokio_tungstenite::tungstenite::Message::Text(encode_json(
+                    json!({
+                        "type": "endpoint_register",
+                        "wgPublicKey": wg_pub,
+                        "wgUdpPort": wg_port,
+                        "horizonCandidates": horizon_candidates,
+                    }),
+                )))
+                .await;
+        }
+    }
+
     loop {
         tokio::select! {
             msg = read.next() => {
                 let Some(Ok(msg)) = msg else { return Ok(()) };
+                last_incoming = tokio::time::Instant::now();
                 if handle_wormhole_incoming(state, msg, &mut write).await.is_err() {
                     return Ok(());
                 }
@@ -2781,6 +4620,16 @@ async fn connect_wormhole(
                     BroadcastMsg::Binary(bytes) => tokio_tungstenite::tungstenite::Message::Binary(bytes),
                 };
                 if write.send(msg).await.is_err() {
+                    return Ok(());
+                }
+            }
+            _ = heartbeat.tick() => {
+                if last_incoming.elapsed() > std::time::Duration::from_secs(20) {
+                    debug!("wormhole heartbeat timeout, reconnecting silently");
+                    return Ok(());
+                }
+                let ping = encode_json(json!({"type":"ping"}));
+                if write.send(tokio_tungstenite::tungstenite::Message::Text(ping)).await.is_err() {
                     return Ok(());
                 }
             }
@@ -2812,6 +4661,11 @@ async fn handle_wormhole_incoming(
             };
 
             match ty {
+                "remote_log" => {
+                    if let Some(line) = value.get("line").and_then(|v| v.as_str()) {
+                        append_remote_log(state, line).await;
+                    }
+                }
                 "ping" => {
                     let _ = write
                         .send(tokio_tungstenite::tungstenite::Message::Binary(
@@ -2819,6 +4673,7 @@ async fn handle_wormhole_incoming(
                         ))
                         .await;
                 }
+                "pong" => {}
                 "session_assigned" => {
                     if let Some(session_id) = value.get("sessionId").and_then(|v| v.as_str()) {
                         info!("wormhole session assigned: {session_id}");
@@ -2931,6 +4786,200 @@ async fn handle_wormhole_incoming(
                 "getCwd" => {
                     if let Some(session_id) = value.get("sessionId").and_then(|v| v.as_str()) {
                         handle_get_cwd_wormhole(state, session_id, write).await;
+                    }
+                }
+                // WireGuard VPN endpoint signaling
+                "endpoint_registered" => {
+                    let observed_addr = value.get("observedAddr").and_then(|v| v.as_str());
+                    let observed_port = value.get("observedPort").and_then(|v| v.as_u64());
+                    if let Some(addr) = observed_addr {
+                        let mut wg_addr = state.wg_observed_addr.lock().await;
+                        *wg_addr = Some(addr.to_string());
+                        let mut observed_endpoints = state.wg_observed_endpoints.lock().await;
+                        record_observed_direct_candidate(
+                            &mut observed_endpoints,
+                            observed_addr,
+                            observed_port.map(|port| port as u16),
+                            "wormhole_observed",
+                        );
+                        info!(
+                            "wg endpoint registered: observed {}:{}",
+                            addr,
+                            observed_port.unwrap_or(0)
+                        );
+                    }
+                }
+                "endpoint_request" | "endpoint_probe_request" => {
+                    let device_key = value.get("deviceKey").and_then(|v| v.as_str());
+                    let wg_pub = value.get("wgPublicKey").and_then(|v| v.as_str());
+                    let voyager_candidates = parse_direct_candidates(&value, "voyagerCandidates");
+                    let response_type = if value.get("type").and_then(|v| v.as_str())
+                        == Some("endpoint_probe_request")
+                    {
+                        "endpoint_probe_response"
+                    } else {
+                        "endpoint_info"
+                    };
+                    let server_pub = state.wg_public_key.lock().await.clone();
+                    let wg_port = state.wg_udp_port.lock().await.clone();
+                    let horizon_addr = state.wg_observed_addr.lock().await.clone();
+                    let (netcheck_host, netcheck_port) = configured_wg_netcheck_endpoint(state);
+                    let horizon_candidates = current_horizon_direct_candidates(state).await;
+                    let observed_endpoints = state.wg_observed_endpoints.lock().await.clone();
+                    let nat_mapping_behavior = classify_nat_mapping_behavior(&observed_endpoints);
+                    let hairpin_likely =
+                        hairpin_likely(horizon_addr.as_deref(), &voyager_candidates);
+                    let direct_reachability_score = compute_direct_reachability_score(
+                        &horizon_candidates,
+                        &voyager_candidates,
+                        nat_mapping_behavior,
+                        hairpin_likely,
+                    );
+                    let response = encode_json(json!({
+                        "type": response_type,
+                        "wgPublicKey": server_pub,
+                        "wgUdpPort": wg_port,
+                        "netcheckHost": netcheck_host,
+                        "netcheckPort": netcheck_port,
+                        "horizonAddr": horizon_addr,
+                        "horizonPort": serde_json::Value::Null,
+                        "horizonCandidates": horizon_candidates,
+                        "observedEndpoints": observed_endpoints,
+                        "natMappingBehavior": nat_mapping_behavior,
+                        "hairpinLikely": hairpin_likely,
+                        "directReachabilityScore": direct_reachability_score,
+                    }));
+                    let _ = write
+                        .send(tokio_tungstenite::tungstenite::Message::Text(response))
+                        .await;
+                    info!(
+                        "direct endpoint_request received: device={:?} has_wg_pub={} horizon_addr={:?} wg_port={:?}",
+                        device_key,
+                        wg_pub.is_some(),
+                        horizon_addr,
+                        wg_port,
+                    );
+                }
+                "peer_endpoint" | "direct_candidates_update" => {
+                    let device_key = value.get("deviceKey").and_then(|v| v.as_str());
+                    let wg_pub = value.get("wgPublicKey").and_then(|v| v.as_str());
+                    let observed_addr = value.get("observedAddr").and_then(|v| v.as_str());
+                    let observed_port = value.get("observedPort").and_then(|v| v.as_u64());
+                    let voyager_candidates = merge_direct_candidates(
+                        parse_direct_candidates(&value, "voyagerCandidates"),
+                        observed_direct_candidate(
+                            observed_addr,
+                            observed_port.map(|port| port as u16),
+                        ),
+                    );
+                    info!(
+                        "peer endpoint received: device={:?} wg_pub={} addr={}:{} candidate_count={}",
+                        device_key,
+                        wg_pub.unwrap_or("none"),
+                        observed_addr.unwrap_or("?"),
+                        observed_port.unwrap_or(0),
+                        voyager_candidates.len(),
+                    );
+
+                    // Send add_peer command to the WgServer via channel
+                    if let Some(pub_key) = wg_pub {
+                        let endpoint = best_direct_endpoint(
+                            &voyager_candidates,
+                            observed_addr.and_then(|addr| {
+                                let port = observed_port.unwrap_or(0) as u16;
+                                format!("{addr}:{port}").parse::<SocketAddr>().ok()
+                            }),
+                        );
+                        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                        let sent = {
+                            let tx = state.wg_peer_tx.lock().await;
+                            if let Some(tx) = tx.as_ref() {
+                                tx.send(WgPeerCommand::AddPeer {
+                                    public_key: pub_key.to_string(),
+                                    device_key: device_key.map(|s| s.to_string()),
+                                    endpoint,
+                                    candidate_endpoints: voyager_candidates
+                                        .iter()
+                                        .filter_map(|candidate| {
+                                            format!("{}:{}", candidate.addr, candidate.port)
+                                                .parse::<SocketAddr>()
+                                                .ok()
+                                        })
+                                        .collect(),
+                                    reply_tx,
+                                })
+                                .is_ok()
+                            } else {
+                                false
+                            }
+                        }; // lock dropped here
+                        if sent {
+                            if let Ok(Ok(assignment)) = reply_rx.await {
+                                let server_pub = state.wg_public_key.lock().await.clone();
+                                let wg_port = state.wg_udp_port.lock().await.clone();
+                                let internal_routes = state.wg_internal_routes.lock().await.clone();
+                                let (netcheck_host, netcheck_port) =
+                                    configured_wg_netcheck_endpoint(state);
+                                let horizon_candidates =
+                                    current_horizon_direct_candidates(state).await;
+                                let observed_endpoints =
+                                    state.wg_observed_endpoints.lock().await.clone();
+                                let horizon_addr = state.wg_observed_addr.lock().await.clone();
+                                let nat_mapping_behavior =
+                                    classify_nat_mapping_behavior(&observed_endpoints);
+                                let hairpin_likely =
+                                    hairpin_likely(horizon_addr.as_deref(), &voyager_candidates);
+                                let direct_reachability_score = compute_direct_reachability_score(
+                                    &horizon_candidates,
+                                    &voyager_candidates,
+                                    nat_mapping_behavior,
+                                    hairpin_likely,
+                                );
+                                let response = encode_json(json!({
+                                    "type": "vpn_config",
+                                    "clientIp": assignment.client_ip,
+                                    "serverIp": assignment.server_ip,
+                                    "subnet": assignment.subnet,
+                                    "dns": assignment.dns,
+                                    "internalRoutes": internal_routes,
+                                    "mtu": assignment.mtu,
+                                    "wgPublicKey": server_pub,
+                                    "wgUdpPort": wg_port,
+                                    "horizonAddr": horizon_addr,
+                                    "netcheckHost": netcheck_host,
+                                    "netcheckPort": netcheck_port,
+                                    "horizonCandidates": horizon_candidates,
+                                    "voyagerCandidates": voyager_candidates,
+                                    "observedEndpoints": observed_endpoints,
+                                    "natMappingBehavior": nat_mapping_behavior,
+                                    "hairpinLikely": hairpin_likely,
+                                    "directReachabilityScore": direct_reachability_score,
+                                    "lanPort": state.port,
+                                }));
+                                let _ = write
+                                    .send(tokio_tungstenite::tungstenite::Message::Text(response))
+                                    .await;
+                                info!(
+                                    "vpn_config sent: device={:?} client_ip={} server_ip={} wg_port={:?}",
+                                    device_key,
+                                    assignment.client_ip,
+                                    assignment.server_ip,
+                                    wg_port,
+                                );
+                            } else {
+                                warn!(
+                                    "peer_endpoint add_peer failed or channel dropped: device={:?} wg_pub={}",
+                                    device_key,
+                                    pub_key,
+                                );
+                            }
+                        } else {
+                            warn!(
+                                "peer_endpoint ignored because WG server channel is unavailable: device={:?} wg_pub={}",
+                                device_key,
+                                pub_key,
+                            );
+                        }
                     }
                 }
                 _ => {}
@@ -3100,11 +5149,26 @@ fn build_wormhole_url(
     token: Option<&str>,
     session: Option<&str>,
 ) -> Result<String, String> {
+    build_wormhole_socket_url(base_url, token, session, "horizon", "/ws")
+}
+
+fn build_wormhole_socket_url(
+    base_url: &str,
+    token: Option<&str>,
+    session: Option<&str>,
+    role: &str,
+    path: &str,
+) -> Result<String, String> {
     // base_url is typically like: ws://host:6666/ws
     // It may already have query parameters.
     let mut parts = base_url.splitn(2, '?');
     let base = parts.next().unwrap_or(base_url);
     let existing = parts.next();
+    let target_base = if let Some((prefix, _)) = base.rsplit_once('/') {
+        format!("{prefix}{path}")
+    } else {
+        return Err(format!("invalid wormhole base URL: {base_url}"));
+    };
 
     let mut query: Vec<(String, String)> = Vec::new();
     if let Some(existing) = existing {
@@ -3121,7 +5185,8 @@ fn build_wormhole_url(
         }
     }
 
-    query.push(("role".to_string(), "horizon".to_string()));
+    query.retain(|(key, _)| key != "role" && key != "session" && key != "token");
+    query.push(("role".to_string(), role.to_string()));
     if let Some(session) = session {
         if !session.trim().is_empty() {
             query.push(("session".to_string(), session.to_string()));
@@ -3138,7 +5203,7 @@ fn build_wormhole_url(
         .map(|(k, v)| format!("{k}={}", url_escape(&v)))
         .collect::<Vec<_>>()
         .join("&");
-    Ok(format!("{base}?{q}"))
+    Ok(format!("{target_base}?{q}"))
 }
 
 fn url_escape(input: &str) -> String {
@@ -3164,4 +5229,62 @@ fn generate_device_key() -> String {
             CHARSET[idx] as char
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(addr: &str, port: u16, scope: &str, priority: i32) -> DirectCandidate {
+        DirectCandidate {
+            addr: addr.to_string(),
+            port,
+            scope: scope.to_string(),
+            priority,
+            source: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn record_observed_direct_candidate_promotes_new_endpoint_and_keeps_last_known() {
+        let mut store = Vec::new();
+
+        record_observed_direct_candidate(
+            &mut store,
+            Some("1.2.3.4"),
+            Some(1111),
+            "wormhole_observed",
+        );
+        record_observed_direct_candidate(
+            &mut store,
+            Some("1.2.3.4"),
+            Some(2222),
+            "wormhole_observed",
+        );
+
+        assert_eq!(store.len(), 2);
+        assert_eq!(store[0].scope, "public_observed");
+        assert_eq!(store[0].port, 2222);
+        assert_eq!(store[1].scope, "last_known");
+        assert_eq!(store[1].port, 1111);
+        assert_eq!(classify_nat_mapping_behavior(&store), "port_variant");
+    }
+
+    #[test]
+    fn direct_reachability_score_and_hairpin_reflect_lan_candidates() {
+        let horizon = vec![
+            candidate("192.168.1.10", 51820, "lan", 250),
+            candidate("1.2.3.4", 51820, "public_observed", 180),
+        ];
+        let voyager = vec![
+            candidate("192.168.1.20", 25000, "lan", 250),
+            candidate("1.2.3.4", 25000, "public_observed", 180),
+        ];
+
+        let hairpin = hairpin_likely(Some("1.2.3.4"), &voyager);
+        let score = compute_direct_reachability_score(&horizon, &voyager, "stable", hairpin);
+
+        assert!(hairpin);
+        assert!(score >= 90);
+    }
 }

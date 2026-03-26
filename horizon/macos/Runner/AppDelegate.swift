@@ -8,9 +8,13 @@ class AppDelegate: FlutterAppDelegate {
   private var outputSink: FlutterEventSink?
   private var securityScopedUrls: [URL] = []
   private let bookmarkDefaultsKey = "blackhole.security.bookmarks"
+  private let vpnHelperSocketRelativePath = ".blackhole/horizon/vpn-helper.sock"
+  private let vpnHelperPidRelativePath = ".blackhole/horizon/vpn-helper.pid"
+  private let vpnHelperLogRelativePath = ".blackhole/horizon/vpn-helper.log"
   private var statusItem: NSStatusItem?
   private var allowTerminate = false
   private var systemChannel: FlutterMethodChannel?
+  private var preventSleepActivity: NSObjectProtocol?
 
   override func applicationDidFinishLaunching(_ notification: Notification) {
     guard let controller = mainFlutterWindow?.contentViewController as? FlutterViewController else {
@@ -21,6 +25,12 @@ class AppDelegate: FlutterAppDelegate {
     setupStatusItem()
     setupAppMenu()
     setupToolbar()
+
+    // Prevent macOS from sleeping while Horizon is running (keeps daemon accessible)
+    preventSleepActivity = ProcessInfo.processInfo.beginActivity(
+      options: [.idleSystemSleepDisabled, .userInitiated],
+      reason: "Horizon daemon serving remote terminals"
+    )
 
     let channel = FlutterMethodChannel(
       name: "com.blackhole/pty",
@@ -110,8 +120,51 @@ class AppDelegate: FlutterAppDelegate {
         self.openSettingsWindow()
         result(nil)
       case "settingsChanged":
+        self.syncVpnHelperWithSettings()
         self.restartDaemonIfNeeded()
         result(nil)
+      case "startWindowDrag":
+        if let window = self.mainFlutterWindow {
+          // Synthesise a left-mouse-down at the current mouse location so
+          // performDrag has an event to work with.
+          let loc = window.mouseLocationOutsideOfEventStream
+          let screenLoc = window.convertPoint(toScreen: loc)
+          if let event = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: loc,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1.0
+          ) {
+            window.performDrag(with: event)
+          }
+        }
+        result(nil)
+      case "ensureVpnHelper":
+        DispatchQueue.global(qos: .userInitiated).async {
+          do {
+            let status = try self.ensureVpnHelper()
+            DispatchQueue.main.async {
+              result(status)
+            }
+          } catch {
+            DispatchQueue.main.async {
+              result(
+                FlutterError(
+                  code: "VPN_HELPER",
+                  message: error.localizedDescription,
+                  details: nil
+                )
+              )
+            }
+          }
+        }
+      case "vpnHelperStatus":
+        result(self.vpnHelperStatus())
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -186,11 +239,16 @@ class AppDelegate: FlutterAppDelegate {
 
     window.titleVisibility = .hidden
     window.titlebarAppearsTransparent = true
+
+    // Disable the system title bar drag region so it doesn't intercept clicks on
+    // Flutter buttons in the top bar area. Window dragging is handled by Flutter
+    // via the "startWindowDrag" method channel call.
+    window.isMovableByWindowBackground = false
     if #available(macOS 11.0, *) {
       window.titlebarSeparatorStyle = .none
     }
-    // Match tab bar background color #202124
-    window.backgroundColor = NSColor(calibratedRed: 0.125, green: 0.129, blue: 0.141, alpha: 1.0)
+    // Match HorizonColors.surface (#FAFBFC)
+    window.backgroundColor = NSColor(calibratedRed: 0.98, green: 0.984, blue: 0.988, alpha: 1.0)
     window.isOpaque = true
     window.contentView?.wantsLayer = true
     window.contentView?.layer?.backgroundColor = window.backgroundColor?.cgColor
@@ -602,7 +660,11 @@ class AppDelegate: FlutterAppDelegate {
     }
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     if let button = item.button {
-      if #available(macOS 11.0, *) {
+      if let iconImage = NSImage(named: "StatusBarIcon") {
+        iconImage.isTemplate = false
+        iconImage.size = NSSize(width: 22, height: 22)
+        button.image = iconImage
+      } else if #available(macOS 11.0, *) {
         button.image = NSImage(systemSymbolName: "terminal.fill", accessibilityDescription: "Horizon")
       } else {
         button.title = "H"
@@ -696,7 +758,253 @@ class AppDelegate: FlutterAppDelegate {
     guard let pid = Int32(trimmed), pid > 0 else {
       return
     }
-    _ = kill(pid, SIGHUP)
+    _ = kill(pid, SIGTERM)
+  }
+
+  private func syncVpnHelperWithSettings() {
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        _ = try self.ensureVpnHelper()
+      } catch {
+        NSLog("Failed to sync VPN helper: %@", error.localizedDescription)
+      }
+    }
+  }
+
+  private func ensureVpnHelper() throws -> [String: Any] {
+    let settings = readNativeSettings()
+    let enabled = settings["vpnEnabled"] as? Bool ?? false
+    if enabled {
+      try startVpnHelperIfNeeded()
+    }
+    return vpnHelperStatus(enabled: enabled)
+  }
+
+  private func vpnHelperStatus(enabled: Bool? = nil) -> [String: Any] {
+    let effectiveEnabled = enabled ?? (readNativeSettings()["vpnEnabled"] as? Bool ?? false)
+    return [
+      "enabled": effectiveEnabled,
+      "running": isVpnHelperRunning(),
+      "socketPath": vpnHelperSocketURL().path,
+      "pidPath": vpnHelperPidURL().path,
+      "pid": currentVpnHelperPid() as Any,
+      "helperPath": bundledVpnHelperURL()?.path as Any,
+    ]
+  }
+
+  private func startVpnHelperIfNeeded() throws {
+    if isVpnHelperRunning() {
+      return
+    }
+    guard let helperURL = bundledVpnHelperURL() else {
+      throw NSError(
+        domain: "HorizonVPNHelper",
+        code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "Bundled horizon-vpn-helper not found."]
+      )
+    }
+
+    let dataDir = vpnHelperDataDirectoryURL()
+    let socketURL = vpnHelperSocketURL()
+    let pidURL = vpnHelperPidURL()
+    let logURL = vpnHelperLogURL()
+    let command =
+      "/bin/mkdir -p \(shellQuote(dataDir.path)) && " +
+      "if [ -f \(shellQuote(pidURL.path)) ]; then " +
+      "/bin/kill \"$(/bin/cat \(shellQuote(pidURL.path)))\" >/dev/null 2>&1 || true; " +
+      "fi && " +
+      "/bin/rm -f \(shellQuote(socketURL.path)) \(shellQuote(pidURL.path)) && " +
+      "\(shellQuote(helperURL.path)) " +
+      "--socket \(shellQuote(socketURL.path)) " +
+      "--pid-file \(shellQuote(pidURL.path)) " +
+      "</dev/null >> \(shellQuote(logURL.path)) 2>&1 &"
+
+    try runAdministratorShell(command)
+
+    let deadline = Date().addingTimeInterval(10)
+    while Date() < deadline {
+      if isVpnHelperRunning() {
+        return
+      }
+      Thread.sleep(forTimeInterval: 0.1)
+    }
+
+    throw NSError(
+      domain: "HorizonVPNHelper",
+      code: 2,
+      userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for VPN helper to start."]
+    )
+  }
+
+  private func bundledVpnHelperURL() -> URL? {
+    Bundle.main.resourceURL?.appendingPathComponent("horizon-vpn-helper")
+  }
+
+  private func vpnHelperDataDirectoryURL() -> URL {
+    FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".blackhole")
+      .appendingPathComponent("horizon")
+  }
+
+  private func vpnHelperSocketURL() -> URL {
+    vpnHelperDataDirectoryURL().appendingPathComponent("vpn-helper.sock")
+  }
+
+  private func vpnHelperPidURL() -> URL {
+    vpnHelperDataDirectoryURL().appendingPathComponent("vpn-helper.pid")
+  }
+
+  private func vpnHelperLogURL() -> URL {
+    vpnHelperDataDirectoryURL().appendingPathComponent("vpn-helper.log")
+  }
+
+  private func currentVpnHelperPid() -> Int? {
+    let pidURL = vpnHelperPidURL()
+    guard let pidText = try? String(contentsOf: pidURL, encoding: .utf8) else {
+      return nil
+    }
+    let trimmed = pidText.trimmingCharacters(in: .whitespacesAndNewlines)
+    return Int(trimmed)
+  }
+
+  private func currentVpnHelperCommand(pid: Int) -> String? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/ps")
+    process.arguments = ["-p", "\(pid)", "-o", "command="]
+    let output = Pipe()
+    process.standardOutput = output
+
+    do {
+      try process.run()
+      process.waitUntilExit()
+    } catch {
+      return nil
+    }
+
+    guard process.terminationStatus == 0 else {
+      return nil
+    }
+
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    return String(data: data, encoding: .utf8)?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  private func currentVpnHelperStartDate(pid: Int) -> Date? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/ps")
+    process.arguments = ["-p", "\(pid)", "-o", "lstart="]
+    let output = Pipe()
+    process.standardOutput = output
+
+    do {
+      try process.run()
+      process.waitUntilExit()
+    } catch {
+      return nil
+    }
+
+    guard process.terminationStatus == 0 else {
+      return nil
+    }
+
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    guard
+      let raw = String(data: data, encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+      !raw.isEmpty
+    else {
+      return nil
+    }
+
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = TimeZone.current
+    formatter.dateFormat = "EEE MMM d HH:mm:ss yyyy"
+    return formatter.date(from: raw)
+  }
+
+  private func isVpnHelperRunning() -> Bool {
+    guard let pid = currentVpnHelperPid(), pid > 0 else {
+      return false
+    }
+    guard FileManager.default.fileExists(atPath: vpnHelperSocketURL().path) else {
+      return false
+    }
+    guard let helperPath = bundledVpnHelperURL()?.path else {
+      return false
+    }
+    guard
+      let command = currentVpnHelperCommand(pid: pid),
+      command.contains(helperPath)
+    else {
+      return false
+    }
+    if
+      let helperAttrs = try? FileManager.default.attributesOfItem(atPath: helperPath),
+      let helperModified = helperAttrs[.modificationDate] as? Date,
+      let startedAt = currentVpnHelperStartDate(pid: pid),
+      helperModified > startedAt
+    {
+      return false
+    }
+
+    let result = kill(Int32(pid), 0)
+    if result == 0 {
+      return true
+    }
+    let error = errno
+    return error == EPERM
+  }
+
+  private func readNativeSettings() -> [String: Any] {
+    let settingsURL = vpnHelperDataDirectoryURL().appendingPathComponent("settings.json")
+    guard
+      let data = try? Data(contentsOf: settingsURL),
+      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let settings = json["settings"] as? [String: Any]
+    else {
+      return [:]
+    }
+    return settings
+  }
+
+  private func runAdministratorShell(_ shellCommand: String) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+    process.arguments = [
+      "-e",
+      "do shell script \(appleScriptString(shellCommand)) with administrator privileges",
+    ]
+    let output = Pipe()
+    let error = Pipe()
+    process.standardOutput = output
+    process.standardError = error
+    try process.run()
+    process.waitUntilExit()
+
+    let stderrData = error.fileHandleForReading.readDataToEndOfFile()
+    let stderr = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if process.terminationStatus != 0 {
+      throw NSError(
+        domain: "HorizonVPNHelper",
+        code: Int(process.terminationStatus),
+        userInfo: [
+          NSLocalizedDescriptionKey: stderr.isEmpty ? "Administrator command failed." : stderr
+        ]
+      )
+    }
+  }
+
+  private func shellQuote(_ value: String) -> String {
+    "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+  }
+
+  private func appleScriptString(_ value: String) -> String {
+    let escaped = value
+      .replacingOccurrences(of: "\\", with: "\\\\")
+      .replacingOccurrences(of: "\"", with: "\\\"")
+    return "\"\(escaped)\""
   }
 
   private func requestFolderAccess(initialPath: String?, completion: @escaping (String?) -> Void) {

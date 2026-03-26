@@ -17,6 +17,7 @@ class DaemonStatus {
     required this.wormholeSessionId,
     required this.wormholeRequestedSession,
     required this.wormholeHasToken,
+    required this.vpnRunning,
     required this.sessionCount,
   });
 
@@ -30,12 +31,15 @@ class DaemonStatus {
   final String? wormholeSessionId;
   final String? wormholeRequestedSession;
   final bool wormholeHasToken;
+  final bool vpnRunning;
   final int sessionCount;
 }
 
 class DaemonManager {
   Process? _process;
   String? _lastConfigKey;
+  static const String _defaultVpnWebsocketBind = '10.13.37.1';
+  IOSink? _daemonLogSink;
 
   static String? _normalizeNullable(String? value) {
     final v = value?.trim();
@@ -50,12 +54,13 @@ class DaemonManager {
     required int port,
     required String hostName,
     required bool devMode,
+    required bool vpnRequired,
     required String? wormholeUrl,
     required String? wormholeToken,
     required String? wormholeSession,
   }) async {
     final canonical =
-        'bind=$bindHost;port=$port;host=${hostName.trim()};devMode=$devMode;wormholeUrl=${wormholeUrl ?? ""};wormholeSession=${wormholeSession ?? ""};wormholeToken=${wormholeToken ?? ""}';
+        'bind=$bindHost;port=$port;host=${hostName.trim()};devMode=$devMode;vpn=$vpnRequired;vpnWsBind=${vpnRequired ? _defaultVpnWebsocketBind : ""};wormholeUrl=${wormholeUrl ?? ""};wormholeSession=${wormholeSession ?? ""};wormholeToken=${wormholeToken ?? ""}';
     final digest = await Sha256().hash(utf8.encode(canonical));
     final hex =
         digest.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
@@ -67,6 +72,12 @@ class DaemonManager {
     final home = Platform.environment['HOME'] ?? '';
     final base = home.isNotEmpty ? home : Directory.systemTemp.path;
     return File('$base/.blackhole/horizon/daemon.pid');
+  }
+
+  static File _daemonLogFile() {
+    final home = Platform.environment['HOME'] ?? '';
+    final base = home.isNotEmpty ? home : Directory.systemTemp.path;
+    return File('$base/.blackhole/horizon/daemon.log');
   }
 
   static Future<void> _killDaemonByPid() async {
@@ -202,6 +213,10 @@ class DaemonManager {
           map['wormhole'] is Map
               ? Map<String, dynamic>.from(map['wormhole'] as Map)
               : const {};
+      final vpn =
+          map['vpn'] is Map
+              ? Map<String, dynamic>.from(map['vpn'] as Map)
+              : const {};
 
       return DaemonStatus(
         configId: map['configId'] as String?,
@@ -214,6 +229,7 @@ class DaemonManager {
         wormholeSessionId: wormhole['sessionId'] as String?,
         wormholeRequestedSession: wormhole['requestedSession'] as String?,
         wormholeHasToken: wormhole['hasToken'] as bool? ?? false,
+        vpnRunning: vpn['running'] as bool? ?? false,
         sessionCount: map['sessions'] as int? ?? 0,
       );
     } catch (_) {
@@ -232,6 +248,7 @@ class DaemonManager {
     required Uri wsUri,
     required String hostName,
     required bool devMode,
+    bool vpnRequired = false,
     String? wormholeUrl,
     String? wormholeToken,
     String? wormholeSession,
@@ -244,13 +261,14 @@ class DaemonManager {
     final desiredWormholeToken = _normalizeNullable(wormholeToken);
     final desiredWormholeSession = _normalizeNullable(wormholeSession);
     final desiredHostName = hostName.trim();
-    final desiredBindHost = _resolveBindHost(bindHost ?? wsUri.host);
+    var desiredBindHost = _resolveBindHost(bindHost ?? wsUri.host);
     final desiredPort = wsUri.hasPort ? wsUri.port : 9527;
     final desiredConfigId = await _computeConfigId(
       bindHost: desiredBindHost,
       port: desiredPort,
       hostName: desiredHostName,
       devMode: devMode,
+      vpnRequired: vpnRequired,
       wormholeUrl: desiredWormholeUrl,
       wormholeToken: desiredWormholeToken,
       wormholeSession: desiredWormholeSession,
@@ -274,13 +292,15 @@ class DaemonManager {
       final urlMismatch =
           _normalizeNullable(status.wormholeUrl) !=
           _normalizeNullable(desiredWormholeUrl);
+      final vpnMismatch = status.vpnRunning != vpnRequired;
 
       if (configMismatch ||
           hostMismatch ||
           bindMismatch ||
           tokenPresenceMismatch ||
           requestedSessionMismatch ||
-          urlMismatch) {
+          urlMismatch ||
+          vpnMismatch) {
         debugPrint('[Daemon] Config changed. Restarting daemon.');
         await shutdown(wsUri);
         final deadline = DateTime.now().add(const Duration(seconds: 2));
@@ -320,6 +340,7 @@ class DaemonManager {
       '$port',
       '--host-name',
       hostName,
+      if (vpnRequired) '--vpn',
       if (devMode) '--dev-mode',
       '--config-id',
       desiredConfigId,
@@ -339,20 +360,32 @@ class DaemonManager {
 
     debugPrint('[Daemon] Starting: $bin ${args.join(" ")}');
     try {
+      final logFile = _daemonLogFile();
+      await logFile.parent.create(recursive: true);
+      _daemonLogSink?.close();
+      _daemonLogSink = logFile.openWrite(mode: FileMode.append);
+      _daemonLogSink!.writeln(
+        '===== ${DateTime.now().toUtc().toIso8601String()} starting: $bin ${args.join(" ")} =====',
+      );
       _process = await Process.start(
         bin,
         args,
         environment: env.isEmpty ? null : env,
         mode: ProcessStartMode.detachedWithStdio,
       );
-      _process!.stdout.transform(utf8.decoder).listen((line) {
-        debugPrint('[Daemon] $line');
+      _process!.stdout.transform(utf8.decoder).listen((chunk) {
+        _daemonLogSink?.write(chunk);
+        debugPrint('[Daemon] $chunk');
       });
-      _process!.stderr.transform(utf8.decoder).listen((line) {
-        debugPrint('[Daemon][err] $line');
+      _process!.stderr.transform(utf8.decoder).listen((chunk) {
+        _daemonLogSink?.write(chunk);
+        debugPrint('[Daemon][err] $chunk');
       });
     } catch (e) {
       debugPrint('[Daemon] Failed to start daemon: $e');
+      _daemonLogSink?.writeln(
+        '===== ${DateTime.now().toUtc().toIso8601String()} failed to start daemon: $e =====',
+      );
       return false;
     }
 
@@ -381,6 +414,9 @@ class DaemonManager {
     try {
       proc.kill(ProcessSignal.sigterm);
     } catch (_) {}
+    await _daemonLogSink?.flush();
+    await _daemonLogSink?.close();
+    _daemonLogSink = null;
   }
 
   static bool isLocalWs(Uri wsUri) {

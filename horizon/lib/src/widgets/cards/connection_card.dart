@@ -158,8 +158,8 @@ class _FadingDivider extends StatelessWidget {
         gradient: LinearGradient(
           colors: [
             Colors.transparent,
-            Colors.white.withValues(alpha: 0.08),
-            Colors.white.withValues(alpha: 0.08),
+            HorizonColors.border,
+            HorizonColors.border,
             Colors.transparent,
           ],
           stops: const [0.0, 0.2, 0.8, 1.0],
@@ -194,7 +194,7 @@ class ConfigRow extends StatelessWidget {
               Text(
                 label,
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: HorizonColors.textPrimary,
                   fontSize: 15,
                   fontWeight: FontWeight.w500,
                 ),

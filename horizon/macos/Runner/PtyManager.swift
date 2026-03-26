@@ -21,41 +21,89 @@ final class PtyManager {
       ws_ypixel: 0
     )
 
+    // Resolve all values BEFORE fork — Foundation/Swift calls are not safe after fork()
+    let shell = shellPath ?? "/bin/zsh"
+
+    let homeDir: String = {
+      // Prefer getpwuid (POSIX, reliable) over NSHomeDirectory (may return sandbox path)
+      if let pw = getpwuid(getuid()) {
+        return String(cString: pw.pointee.pw_dir)
+      }
+      let h = NSHomeDirectory()
+      if !h.isEmpty && h != "/" { return h }
+      return "/Users/\(NSUserName())"
+    }()
+
+    let userName: String = {
+      if let pw = getpwuid(getuid()) {
+        return String(cString: pw.pointee.pw_name)
+      }
+      return NSUserName()
+    }()
+
+    // Bootstrap PATH: GUI apps inherit minimal PATH from launchd (/usr/bin:/bin:/usr/sbin:/sbin).
+    // Profile scripts (e.g. .zshrc) need tools like rbenv/brew to already be reachable.
+    let bootstrapPath: String = {
+      let extra = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin"
+      if let cur = ProcessInfo.processInfo.environment["PATH"], !cur.isEmpty {
+        if cur.contains("/opt/homebrew/bin") { return cur }
+        return "\(extra):\(cur)"
+      }
+      return "\(extra):/usr/bin:/bin:/usr/sbin:/sbin"
+    }()
+
+    // Pre-allocate C strings so the child process only uses POSIX calls
+    let cHome  = strdup(homeDir)
+    let cShell = strdup(shell)
+    let cPath  = strdup(bootstrapPath)
+    let cUser  = strdup(userName)
+    // Shell command: cd to home first, then exec interactive login shell
+    let cCdExec = strdup("cd && exec \(shell) -il")
+
     let pid = forkpty(&masterFd, nil, nil, &win)
     if pid < 0 {
+      free(cHome); free(cShell); free(cPath); free(cUser); free(cCdExec)
       throw NSError(domain: "PtyManager", code: 1, userInfo: [
         NSLocalizedDescriptionKey: "forkpty failed"
       ])
     }
 
     if pid == 0 {
-      let shell = shellPath ?? "/bin/zsh"
-      let home = NSHomeDirectory()
-      _ = home.withCString { chdir($0) }
+      // ── Child process — only POSIX/C calls from here ──
 
-      // Set essential environment variables for interactive programs
+      // Set identity & home
+      if let h = cHome {
+        setenv("HOME", h, 1)
+      }
+      if let u = cUser {
+        setenv("USER", u, 1)
+        setenv("LOGNAME", u, 1)
+      }
+      if let s = cShell { setenv("SHELL", s, 1) }
+      if let p = cPath  { setenv("PATH", p, 1) }
+
+      // Terminal environment
       setenv("TERM", "xterm-256color", 1)
       setenv("COLORTERM", "truecolor", 1)
       setenv("LANG", "en_US.UTF-8", 1)
 
-      guard let shellCString = strdup(shell) else {
-        _exit(1)
-      }
+      // Clean up inherited env that interferes with nested tools
+      unsetenv("CLAUDECODE")
+
+      // Use shell -c "cd && exec shell -il" so the shell itself handles
+      // changing to $HOME before starting the interactive login session.
       var args: [UnsafeMutablePointer<CChar>?] = [
-        shellCString,
-        strdup("-i"),
-        strdup("-l"),
+        cShell,
+        strdup("-c"),
+        cCdExec,
         nil
       ]
-      execv(shellCString, &args)
-      free(shellCString)
-      for arg in args {
-        if let arg = arg {
-          free(arg)
-        }
-      }
+      execv(cShell!, &args)
       _exit(1)
     }
+
+    // Parent — free pre-allocated C strings
+    free(cHome); free(cShell); free(cPath); free(cUser); free(cCdExec)
 
     let flags = fcntl(masterFd, F_GETFL)
     _ = fcntl(masterFd, F_SETFL, flags | O_NONBLOCK)

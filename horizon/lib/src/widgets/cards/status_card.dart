@@ -15,6 +15,28 @@ class StatusCard extends StatelessWidget {
   final HorizonController controller;
   final bool flat;
 
+  Color _connectionStatusColor() {
+    if (!controller.running) return StatusDot.red;
+
+    int enabled = 0;
+    int connected = 0;
+
+    if (controller.lanEnabled) {
+      enabled++;
+      // LAN server is listening when running and enabled
+      connected++;
+    }
+    if (controller.wormholeEnabled) {
+      enabled++;
+      if (controller.wormholeConnected) connected++;
+    }
+
+    if (enabled == 0) return StatusDot.red;
+    if (connected == enabled) return StatusDot.green;
+    if (connected > 0) return StatusDot.yellow;
+    return StatusDot.red;
+  }
+
   @override
   Widget build(BuildContext context) {
     final statusText = controller.running ? 'Running' : 'Stopped';
@@ -24,6 +46,7 @@ class StatusCard extends StatelessWidget {
     final contentPadding = flat
         ? const EdgeInsets.symmetric(vertical: 20)
         : const EdgeInsets.all(20);
+    final statusColor = _connectionStatusColor();
 
     final content = Container(
       decoration: controller.running
@@ -53,7 +76,7 @@ class StatusCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                StatusDot(connected: controller.running),
+                StatusDot(connected: controller.running, overrideColor: statusColor),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
@@ -61,7 +84,7 @@ class StatusCard extends StatelessWidget {
                     style: const TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.bold,
-                      color: Colors.white,
+                      color: HorizonColors.textPrimary,
                     ),
                   ),
                 ),
@@ -110,6 +133,8 @@ class StatusCard extends StatelessWidget {
                     Expanded(
                       child: Text(
                         controller.error!,
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
                             color: HorizonColors.error, fontSize: 13),
                       ),
@@ -145,7 +170,7 @@ class _InfoChip extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.2),
+        color: HorizonColors.surfaceVariant,
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: HorizonColors.borderSubtle),
       ),
@@ -165,7 +190,7 @@ class _InfoChip extends StatelessWidget {
           Text(
             value,
             style: const TextStyle(
-              color: Colors.white,
+              color: HorizonColors.textPrimary,
               fontSize: 15,
               fontWeight: FontWeight.w500,
             ),
@@ -204,7 +229,7 @@ class _SessionIdDisplayState extends State<SessionIdDisplay> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: const Color(0xFF2D2E30),
+        color: HorizonColors.surfaceVariant,
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: HorizonColors.border),
       ),
@@ -229,11 +254,13 @@ class _SessionIdDisplayState extends State<SessionIdDisplay> {
                 const SizedBox(height: 2),
                 Text(
                   hasId ? id : 'Connecting...',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     fontFamily: 'Menlo',
                     fontWeight: FontWeight.bold,
                     fontSize: 22,
-                    color: Colors.white,
+                    color: HorizonColors.textPrimary,
                     letterSpacing: 4.0,
                   ),
                 ),

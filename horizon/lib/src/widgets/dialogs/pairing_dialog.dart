@@ -51,7 +51,7 @@ class _PairingDialogState extends State<PairingDialog>
           backgroundColor: HorizonColors.surface,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
-            side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+            side: BorderSide(color: HorizonColors.borderSubtle, width: 0.5),
           ),
           child: Container(
             width: 340,
@@ -84,7 +84,7 @@ class _PairingDialogState extends State<PairingDialog>
                     const Text(
                       'Connection Request',
                       style: TextStyle(
-                        color: Colors.white,
+                        color: HorizonColors.textPrimary,
                         fontSize: 18,
                         fontWeight: FontWeight.bold,
                       ),
@@ -95,7 +95,7 @@ class _PairingDialogState extends State<PairingDialog>
                 Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.2),
+                    color: HorizonColors.surfaceVariant,
                     borderRadius: BorderRadius.circular(10),
                     border:
                         Border.all(color: HorizonColors.borderSubtle),
@@ -109,7 +109,7 @@ class _PairingDialogState extends State<PairingDialog>
                         child: Text(
                           widget.deviceName,
                           style: const TextStyle(
-                            color: Colors.white,
+                            color: HorizonColors.textPrimary,
                             fontSize: 14,
                             fontWeight: FontWeight.w500,
                             fontFamily: 'Menlo',
@@ -134,7 +134,7 @@ class _PairingDialogState extends State<PairingDialog>
                     gradient: LinearGradient(
                       colors: [
                         Colors.transparent,
-                        Colors.white.withValues(alpha: 0.08),
+                        HorizonColors.border,
                         Colors.transparent,
                       ],
                     ),
@@ -166,7 +166,7 @@ class _PairingDialogState extends State<PairingDialog>
                             style: OutlinedButton.styleFrom(
                               side: const BorderSide(
                                   color: HorizonColors.border),
-                              foregroundColor: Colors.white,
+                              foregroundColor: HorizonColors.textSecondary,
                               padding:
                                   const EdgeInsets.symmetric(vertical: 16),
                               shape: RoundedRectangleBorder(
@@ -178,17 +178,23 @@ class _PairingDialogState extends State<PairingDialog>
                         ),
                         const SizedBox(width: 10),
                         Expanded(
-                          child: TextButton(
+                          child: OutlinedButton(
                             onPressed: widget.onReject,
-                            style: TextButton.styleFrom(
+                            style: OutlinedButton.styleFrom(
+                              side: const BorderSide(
+                                  color: HorizonColors.error),
                               foregroundColor: HorizonColors.error,
+                              backgroundColor:
+                                  HorizonColors.error.withValues(alpha: 0.06),
                               padding:
                                   const EdgeInsets.symmetric(vertical: 16),
                               shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(10)),
                             ),
                             child: const Text('Reject',
-                                style: TextStyle(fontSize: 13)),
+                                style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600)),
                           ),
                         ),
                       ],

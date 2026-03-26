@@ -5,12 +5,15 @@ edition = "2021"
 
 [dependencies]
 axum = { version = "0.7", features = ["ws"] }
+tunnel = { path = "../../tunnel" }
 futures-util = "0.3"
 libc = "0.2"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
-tokio-tungstenite = "0.24"
+socket2 = "0.5"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "net", "io-util"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+igd-next = { version = "0.17", features = ["aio_tokio"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

@@ -112,6 +112,9 @@ enum _BinaryType {
 }
 
 class HorizonController extends ChangeNotifier {
+  static const _defaultWormholeUrl = 'wss://wormhole.blackhole-ai.com/ws';
+  static const _buildTimeToken = String.fromEnvironment('WORMHOLE_TOKEN');
+
   HorizonController({
     int port = 9527,
     Duration? pingInterval = const Duration(seconds: 10),
@@ -120,8 +123,9 @@ class HorizonController extends ChangeNotifier {
   }) : _wsServer = WsServer(port: port, pingInterval: pingInterval),
        _devModeRequested = devModeRequested,
        _requireDevModeConfirmation = requireDevModeConfirmation,
-       _wormholeBaseUrl = Platform.environment['WORMHOLE_URL'],
-       _wormholeToken = Platform.environment['WORMHOLE_TOKEN'],
+       _wormholeBaseUrl = Platform.environment['WORMHOLE_URL'] ?? _defaultWormholeUrl,
+       _wormholeToken = Platform.environment['WORMHOLE_TOKEN'] ??
+           (_buildTimeToken.isNotEmpty ? _buildTimeToken : null),
        _wormholeEnabled =
            (Platform.environment['WORMHOLE_URL'] ?? '').isNotEmpty,
        _hostDeviceName = Platform.localHostname;
@@ -147,8 +151,6 @@ class HorizonController extends ChangeNotifier {
   bool _wormholeEnabled;
   bool _wormholeConnecting = false;
   bool _lanEnabled = true;
-  final bool _tailnetIngressEnabled =
-      TransportRolloutConfig.enableTailnetIngress;
   final bool _transportSwitchEnabled =
       TransportRolloutConfig.enableTransportSwitch;
   String? _hostDeviceName;
@@ -198,7 +200,6 @@ class HorizonController extends ChangeNotifier {
   bool get wormholeEnabled => _wormholeEnabled;
   bool get wormholeConnecting => _wormholeConnecting;
   bool get wormholeConnected => _wormholeEnabled && _wormholeSocket != null;
-  bool get tailnetIngressEnabled => _tailnetIngressEnabled;
   String get wormholeBaseUrl => _wormholeBaseUrl ?? '';
   String get wormholeToken => _wormholeToken ?? '';
   String? get wormholeSessionId => _wormholeSessionId;
@@ -615,7 +616,6 @@ class HorizonController extends ChangeNotifier {
   ) async {
     switch (context.source) {
       case GatewayIngressSource.lan:
-      case GatewayIngressSource.tailnet:
         final socket = context.socket;
         if (socket == null) {
           return;
@@ -658,24 +658,6 @@ class HorizonController extends ChangeNotifier {
     );
   }
 
-  Future<void> handleTailnetIngressMessage(
-    WebSocket socket,
-    dynamic message,
-  ) async {
-    if (!_tailnetIngressEnabled) {
-      return;
-    }
-    await _sessionGateway.handle(
-      GatewayIngressContext(
-        source: GatewayIngressSource.tailnet,
-        transportKind: TransportKind.tailnetDirect,
-        socket: socket,
-        transportId: 'tailnet',
-        pathId: 'tailnet:${socket.hashCode}',
-      ),
-      message,
-    );
-  }
 
   Future<void> _handleDecodedLanMessage(
     WebSocket socket,
@@ -1414,9 +1396,6 @@ class HorizonController extends ChangeNotifier {
 
   Object _buildHostInfoMessage() {
     final hints = <String>[TransportKind.lanDirect.wireName];
-    if (_tailnetIngressEnabled) {
-      hints.add(TransportKind.tailnetDirect.wireName);
-    }
     if (_wormholeEnabled) {
       hints.add(TransportKind.wormholeRelay.wireName);
     }
@@ -1426,9 +1405,6 @@ class HorizonController extends ChangeNotifier {
       'transportHints': hints,
       'transportVersion': 1,
     };
-    if (TransportRolloutConfig.tailnetHint.trim().isNotEmpty) {
-      payload['tailnetHint'] = TransportRolloutConfig.tailnetHint.trim();
-    }
     return _encodeMessage(payload);
   }
 
@@ -2103,16 +2079,12 @@ class HorizonController extends ChangeNotifier {
       _customSessionEnabled =
           settings['customSessionEnabled'] as bool? ?? false;
       _customSessionId = settings['customSessionId'] as String? ?? '';
-      final savedBase = settings['wormholeBaseUrl'] as String?;
-      if (savedBase != null) {
-        final trimmed = savedBase.trim();
-        _wormholeBaseUrl = trimmed.isEmpty ? null : trimmed;
-      }
-      final savedToken = settings['wormholeToken'] as String?;
-      if (savedToken != null) {
-        final trimmed = savedToken.trim();
-        _wormholeToken = trimmed.isEmpty ? null : trimmed;
-      }
+      final savedBase = (settings['wormholeBaseUrl'] as String? ?? '').trim();
+      _wormholeBaseUrl = savedBase.isNotEmpty ? savedBase : _defaultWormholeUrl;
+      final savedToken = (settings['wormholeToken'] as String? ?? '').trim();
+      _wormholeToken = savedToken.isNotEmpty
+          ? savedToken
+          : (_buildTimeToken.isNotEmpty ? _buildTimeToken : null);
 
       debugPrint('[Horizon] Loaded ${_pairedDevices.length} paired devices');
     } catch (e) {

@@ -41,6 +41,7 @@ class ConnectionManager {
     required this.onSessionList,
     required this.onSessionCreated,
     required this.onSessionClosed,
+    required this.onStdoutBytes,
     required this.onStdout,
     this.onCwd,
     this.onSessionSync,
@@ -59,6 +60,7 @@ class ConnectionManager {
   final void Function(List<String> sessions) onSessionList;
   final void Function(String sessionId) onSessionCreated;
   final void Function(String sessionId) onSessionClosed;
+  final void Function(String sessionId, Uint8List bytes) onStdoutBytes;
   final void Function(String sessionId, String text) onStdout;
   final void Function(String sessionId, String cwd)? onCwd;
   final void Function(String sessionId, String content)? onSessionSync;
@@ -355,22 +357,25 @@ class ConnectionManager {
       final raw = decoded['raw'];
       final sessionId = decoded['sessionId'];
       if (sessionId is String) {
-        if (data is String) {
+        if (raw is Uint8List) {
+          _logDeleteProbe(utf8.decode(raw, allowMalformed: true));
+          _logStdoutProbe(raw);
+          onStdoutBytes(sessionId, raw);
+        } else if (data is String) {
           _logDeleteProbe(data);
           _logStdoutProbe(utf8.encode(data));
           onStdout(sessionId, data);
-        } else if (raw is Uint8List) {
-          _logDeleteProbe(utf8.decode(raw, allowMalformed: true));
-          _logStdoutProbe(raw);
-          final text = utf8.decode(raw, allowMalformed: true);
-          onStdout(sessionId, text);
         }
       }
     }
   }
 
+  int _heartbeatMisses = 0;
+  static const int _maxHeartbeatMisses = 3;
+
   void _startHeartbeat() {
     _stopHeartbeat();
+    _heartbeatMisses = 0;
     _heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (!_connected) {
         return;
@@ -382,8 +387,18 @@ class ConnectionManager {
       }
       final silence = DateTime.now().difference(last);
       if (silence > const Duration(seconds: 20)) {
-        onError('Heartbeat timeout: no data for ${silence.inSeconds}s');
-        disconnect(shouldReconnect: true);
+        _heartbeatMisses++;
+        debugPrint(
+          '[Connection] heartbeat miss $_heartbeatMisses/$_maxHeartbeatMisses '
+          '(silent ${silence.inSeconds}s)',
+        );
+        if (_heartbeatMisses >= _maxHeartbeatMisses) {
+          debugPrint('[Connection] heartbeat exceeded max misses, reconnecting silently');
+          _heartbeatMisses = 0;
+          disconnect(shouldReconnect: true);
+        }
+      } else {
+        _heartbeatMisses = 0;
       }
     });
   }

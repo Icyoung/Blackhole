@@ -17,6 +17,8 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
+  static const _defaultWormholeUrl = 'wss://wormhole.blackhole-ai.com/ws';
+  static const _buildTimeToken = String.fromEnvironment('WORMHOLE_TOKEN');
   static const _systemChannel = MethodChannel('com.blackhole/system');
   static const _settingsChannel = WindowMethodChannel(
     'com.blackhole/settings',
@@ -46,6 +48,12 @@ class _SettingsPageState extends State<SettingsPage> {
   final _remoteServerController = TextEditingController();
   final _remoteTokenController = TextEditingController();
 
+  // VPN
+  bool _vpnEnabled = false;
+  final _vpnSubnetController = TextEditingController(text: '10.13.37.0/24');
+  final _vpnPortController = TextEditingController(text: '51820');
+  final _vpnRoutesController = TextEditingController();
+
   // Devices
   List<Map<String, dynamic>> _pairedDevices = [];
 
@@ -55,6 +63,22 @@ class _SettingsPageState extends State<SettingsPage> {
   String _selectedTab = 'general';
   String _version = '';
   bool _saveSuccess = false;
+
+  String _resolveDefaultWormholeUrl() {
+    final envUrl = Platform.environment['WORMHOLE_URL']?.trim();
+    if (envUrl != null && envUrl.isNotEmpty) {
+      return envUrl;
+    }
+    return _defaultWormholeUrl;
+  }
+
+  String _resolveDefaultWormholeToken() {
+    final envToken = Platform.environment['WORMHOLE_TOKEN']?.trim();
+    if (envToken != null && envToken.isNotEmpty) {
+      return envToken;
+    }
+    return _buildTimeToken.trim();
+  }
 
   @override
   void initState() {
@@ -74,6 +98,9 @@ class _SettingsPageState extends State<SettingsPage> {
     _remoteSessionController.dispose();
     _remoteServerController.dispose();
     _remoteTokenController.dispose();
+    _vpnSubnetController.dispose();
+    _vpnPortController.dispose();
+    _vpnRoutesController.dispose();
     super.dispose();
   }
 
@@ -84,9 +111,14 @@ class _SettingsPageState extends State<SettingsPage> {
 
       final settingsPath = '$home/.blackhole/horizon/settings.json';
       final file = File(settingsPath);
+      final defaultWormholeUrl = _resolveDefaultWormholeUrl();
+      final defaultWormholeToken = _resolveDefaultWormholeToken();
       if (!await file.exists()) {
-        // Set default host name
+        // Set defaults for first run.
         _hostNameController.text = Platform.localHostname;
+        _wormholeUrlController.text = defaultWormholeUrl;
+        _wormholeTokenController.text = defaultWormholeToken;
+        _remoteTokenController.text = defaultWormholeToken;
         return;
       }
 
@@ -103,9 +135,10 @@ class _SettingsPageState extends State<SettingsPage> {
         _lanPortController.text = '${settings['lanPort'] as int? ?? 9527}';
         _wormholeEnabled = settings['wormholeEnabled'] as bool? ?? false;
         _wormholeUrlController.text =
-            settings['wormholeBaseUrl'] as String? ?? '';
+            settings['wormholeBaseUrl'] as String? ?? defaultWormholeUrl;
+        final savedToken = (settings['wormholeToken'] as String? ?? '').trim();
         _wormholeTokenController.text =
-            settings['wormholeToken'] as String? ?? '';
+            savedToken.isNotEmpty ? savedToken : defaultWormholeToken;
         _customSessionEnabled =
             settings['customSessionEnabled'] as bool? ?? false;
         _customSessionController.text =
@@ -117,8 +150,19 @@ class _SettingsPageState extends State<SettingsPage> {
             settings['clientRemoteSession'] as String? ?? '';
         _remoteServerController.text =
             settings['clientRemoteServer'] as String? ?? '';
+        final savedRemoteToken =
+            (settings['clientRemoteToken'] as String? ?? '').trim();
         _remoteTokenController.text =
-            settings['clientRemoteToken'] as String? ?? '';
+            savedRemoteToken.isNotEmpty
+                ? savedRemoteToken
+                : defaultWormholeToken;
+        _vpnEnabled = settings['vpnEnabled'] as bool? ?? false;
+        _vpnSubnetController.text =
+            settings['vpnSubnet'] as String? ?? '10.13.37.0/24';
+        _vpnPortController.text =
+            '${settings['vpnPort'] as int? ?? 51820}';
+        _vpnRoutesController.text =
+            (settings['vpnRoutes'] as List<dynamic>?)?.join(', ') ?? '';
         _pairedDevices = devices.cast<Map<String, dynamic>>();
         _selectedTab = _isClientMode ? 'connection' : 'general';
       });
@@ -184,6 +228,14 @@ class _SettingsPageState extends State<SettingsPage> {
         'clientRemoteSession': _remoteSessionController.text.toUpperCase(),
         'clientRemoteServer': _remoteServerController.text,
         'clientRemoteToken': _remoteTokenController.text,
+        'vpnEnabled': _vpnEnabled,
+        'vpnSubnet': _vpnSubnetController.text,
+        'vpnPort': int.tryParse(_vpnPortController.text) ?? 51820,
+        'vpnRoutes': _vpnRoutesController.text
+            .split(',')
+            .map((r) => r.trim())
+            .where((r) => r.isNotEmpty)
+            .toList(),
       };
 
       final json = {
@@ -215,6 +267,12 @@ class _SettingsPageState extends State<SettingsPage> {
       }
     } catch (e) {
       debugPrint('[Settings] Failed to save: $e');
+      if (mounted) {
+        setState(() => _saveSuccess = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to save settings')),
+        );
+      }
     }
   }
 
@@ -363,6 +421,7 @@ class _SettingsPageState extends State<SettingsPage> {
         : [
             ('general', 'General', Icons.settings),
             ('remote', 'Remote', Icons.public),
+            ('vpn', 'VPN', Icons.shield_outlined),
             ('pairs', 'Devices', Icons.phone_iphone),
           ];
 
@@ -481,6 +540,8 @@ class _SettingsPageState extends State<SettingsPage> {
         return 'General';
       case 'remote':
         return 'Remote';
+      case 'vpn':
+        return 'VPN Server';
       case 'pairs':
         return 'Paired Devices';
       case 'connection':
@@ -496,6 +557,8 @@ class _SettingsPageState extends State<SettingsPage> {
         return _buildGeneralTab();
       case 'remote':
         return _buildRemoteTab();
+      case 'vpn':
+        return _buildVpnTab();
       case 'pairs':
         return _buildPairsTab();
       case 'connection':
@@ -548,6 +611,11 @@ class _SettingsPageState extends State<SettingsPage> {
                     child: _buildTextField(
                       controller: _lanPortController,
                       textAlign: TextAlign.center,
+                      keyboardType: TextInputType.number,
+                      inputFormatters: [
+                        FilteringTextInputFormatter.digitsOnly,
+                        LengthLimitingTextInputFormatter(5),
+                      ],
                     ),
                   ),
                 ),
@@ -753,6 +821,9 @@ class _SettingsPageState extends State<SettingsPage> {
                     hint: 'ABC123',
                     maxLength: 6,
                     textCapitalization: TextCapitalization.characters,
+                    inputFormatters: [
+                      FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9]')),
+                    ],
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -813,6 +884,10 @@ class _SettingsPageState extends State<SettingsPage> {
                         child: _buildTextField(
                           controller: _wormholeUrlController,
                           hint: 'wss://wormhole.example.com',
+                          keyboardType: TextInputType.url,
+                          inputFormatters: [
+                            FilteringTextInputFormatter.deny(RegExp(r'\s')),
+                          ],
                         ),
                       ),
                       const SizedBox(height: 12),
@@ -833,6 +908,97 @@ class _SettingsPageState extends State<SettingsPage> {
                   : CrossFadeState.showFirst,
               duration: const Duration(milliseconds: 250),
               sizeCurve: Curves.easeInOut,
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  // ===== VPN Tab =====
+  Widget _buildVpnTab() {
+    return Column(
+      children: [
+        _buildCard(
+          title: 'VPN Server',
+          subtitle: 'WireGuard VPN server for remote access to this network.',
+          children: [
+            _buildSwitchRow(
+              label: 'Enable VPN Server',
+              value: _vpnEnabled,
+              onChanged: (v) => setState(() => _vpnEnabled = v),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: _buildLabeledField(
+                    label: 'Subnet',
+                    child: _buildTextField(
+                      controller: _vpnSubnetController,
+                      hint: '10.13.37.0/24',
+                      inputFormatters: [
+                        FilteringTextInputFormatter.allow(RegExp(r'[0-9./]')),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                SizedBox(
+                  width: 120,
+                  child: _buildLabeledField(
+                    label: 'Port',
+                    child: _buildTextField(
+                      controller: _vpnPortController,
+                      textAlign: TextAlign.center,
+                      hint: '51820',
+                      keyboardType: TextInputType.number,
+                      inputFormatters: [
+                        FilteringTextInputFormatter.digitsOnly,
+                        LengthLimitingTextInputFormatter(5),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            _buildLabeledField(
+              label: 'Internal Routes',
+              child: _buildTextField(
+                controller: _vpnRoutesController,
+                hint: '192.168.1.0/24, 10.0.0.0/8',
+                inputFormatters: [
+                  FilteringTextInputFormatter.allow(RegExp(r'[0-9./, ]')),
+                ],
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Comma-separated CIDR ranges that VPN clients can access',
+              style: TextStyle(
+                color: HorizonColors.textTertiary,
+                fontSize: 11,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        _buildCard(
+          title: 'How it works',
+          children: [
+            Text(
+              'When enabled, Horizon starts a WireGuard server that Voyager '
+              'clients can connect to. VPN traffic is routed through a TUN '
+              'device with NAT, giving clients access to the internal routes '
+              'specified above.\n\n'
+              'Voyager will first attempt a direct UDP connection (hole '
+              'punching). If that fails, traffic is relayed through Wormhole.',
+              style: TextStyle(
+                color: HorizonColors.textTertiary,
+                fontSize: 12,
+                height: 1.5,
+              ),
             ),
           ],
         ),
@@ -1019,6 +1185,9 @@ class _SettingsPageState extends State<SettingsPage> {
               textAlign: TextAlign.center,
               maxLength: 6,
               textCapitalization: TextCapitalization.characters,
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9]')),
+              ],
             ),
           ),
         ),
@@ -1142,6 +1311,8 @@ class _SettingsPageState extends State<SettingsPage> {
     int? maxLength,
     TextCapitalization textCapitalization = TextCapitalization.none,
     ValueChanged<String>? onChanged,
+    List<TextInputFormatter>? inputFormatters,
+    TextInputType? keyboardType,
   }) {
     return TextField(
       controller: controller,
@@ -1150,6 +1321,8 @@ class _SettingsPageState extends State<SettingsPage> {
       maxLength: maxLength,
       textCapitalization: textCapitalization,
       onChanged: onChanged,
+      inputFormatters: inputFormatters,
+      keyboardType: keyboardType,
       cursorColor: HorizonColors.accent,
       style: const TextStyle(color: HorizonColors.textPrimary, fontSize: 13),
       decoration: InputDecoration(

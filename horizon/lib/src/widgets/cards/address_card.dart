@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../app.dart';
 import '../../controllers/horizon_controller.dart';
 import '../common/section_title.dart';
 import '../common/status_message.dart';
@@ -42,22 +43,22 @@ class AddressCard extends StatelessWidget {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                   decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.2),
+                    color: HorizonColors.surfaceVariant,
                     borderRadius: BorderRadius.circular(6),
                     border:
-                        Border.all(color: Colors.white.withValues(alpha: 0.05)),
+                        Border.all(color: HorizonColors.border),
                   ),
                   child: Row(
                     children: [
                       const Icon(Icons.link,
-                          size: 14, color: Color(0xFF9AA6B2)),
+                          size: 14, color: HorizonColors.textTertiary),
                       const SizedBox(width: 10),
                       Text(
                         'ws://$addr:${controller.port}',
                         style: const TextStyle(
                           fontFamily: 'Menlo',
                           fontSize: 13,
-                          color: Color(0xFF41C87A),
+                          color: HorizonColors.success,
                         ),
                       ),
                     ],
