@@ -2452,10 +2452,11 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
             borderRadius: BorderRadius.circular(10),
             border: Border.all(color: HorizonColors.borderSubtle),
           ),
-          child: const Icon(
-            Icons.menu_rounded,
-            size: 18,
-            color: HorizonColors.textSecondary,
+          child: CustomPaint(
+            size: const Size(18, 14),
+            painter: _SidebarIconPainter(
+              color: HorizonColors.textSecondary,
+            ),
           ),
         ),
       ),
@@ -3816,4 +3817,75 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     }
     return _hostController.addresses.contains(host);
   }
+}
+
+/// Sidebar toggle icon based on SF Symbols sidebar.left design.
+class _SidebarIconPainter extends CustomPainter {
+  _SidebarIconPainter({required this.color});
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // Original viewBox: 0 0 23.3887 17.9785
+    final sx = size.width / 23.3887;
+    final sy = size.height / 17.9785;
+    canvas.scale(sx, sy);
+
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
+
+    // Outer rounded rect (border)
+    final outer = Path()
+      ..moveTo(4.12109, 17.9785)
+      ..lineTo(19.1504, 17.9785)
+      ..cubicTo(21.6113, 17.9785, 23.0273, 16.4941, 23.0273, 13.8574)
+      ..lineTo(23.0273, 4.13086)
+      ..cubicTo(23.0273, 1.49414, 21.6113, 0, 19.1504, 0)
+      ..lineTo(4.12109, 0)
+      ..cubicTo(1.49414, 0, 0, 1.49414, 0, 4.13086)
+      ..lineTo(0, 13.8574)
+      ..cubicTo(0, 16.4941, 1.49414, 17.9785, 4.12109, 17.9785)
+      ..close();
+    // Inner cutout
+    final inner = Path()
+      ..moveTo(4.13086, 16.4062)
+      ..cubicTo(2.50977, 16.4062, 1.57227, 15.4785, 1.57227, 13.8574)
+      ..lineTo(1.57227, 4.13086)
+      ..cubicTo(1.57227, 2.50977, 2.50977, 1.57227, 4.13086, 1.57227)
+      ..lineTo(18.8965, 1.57227)
+      ..cubicTo(20.5176, 1.57227, 21.4551, 2.50977, 21.4551, 4.13086)
+      ..lineTo(21.4551, 13.8574)
+      ..cubicTo(21.4551, 15.4785, 20.5176, 16.4062, 18.8965, 16.4062)
+      ..close();
+    final border = Path.combine(PathOperation.difference, outer, inner);
+    canvas.drawPath(border, paint);
+
+    // Vertical divider
+    canvas.drawRect(
+      const Rect.fromLTWH(7.44141, 1.28906, 1.53320, 15.42974),
+      paint,
+    );
+
+    // Three horizontal lines (left sidebar content)
+    const lineRects = [
+      Rect.fromLTWH(2.91992, 4.11133, 3.20313, 1.09375), // top
+      Rect.fromLTWH(2.91992, 6.64062, 3.20313, 1.09375), // middle
+      Rect.fromLTWH(2.91992, 9.16992, 3.20313, 1.09375), // bottom
+    ];
+    final linePaint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
+    for (final r in lineRects) {
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(r, const Radius.circular(0.55)),
+        linePaint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_SidebarIconPainter oldDelegate) =>
+      color != oldDelegate.color;
 }
