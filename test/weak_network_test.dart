@@ -130,10 +130,10 @@ void main() {
       final candidates = [
         TransportCandidate(
           id: 'primary',
-          kind: TransportKind.tailnetDirect,
-          uri: Uri.parse('ws://100.64.0.1:9527/ws'),
+          kind: TransportKind.lanDirect,
+          uri: Uri.parse('ws://192.168.1.100:9527/ws'),
           waitForPairing: false,
-          priority: 120,
+          priority: 110,
         ),
         TransportCandidate(
           id: 'fallback',
@@ -192,10 +192,10 @@ void main() {
       final candidates = [
         TransportCandidate(
           id: 'direct-unreliable',
-          kind: TransportKind.tailnetDirect,
-          uri: Uri.parse('ws://100.64.0.1:9527/ws'),
+          kind: TransportKind.lanDirect,
+          uri: Uri.parse('ws://192.168.1.100:9527/ws'),
           waitForPairing: false,
-          priority: 120,
+          priority: 110,
         ),
         TransportCandidate(
           id: 'relay-stable',
@@ -249,8 +249,8 @@ void main() {
       final candidates = [
         TransportCandidate(
           id: 'direct-low-latency',
-          kind: TransportKind.tailnetDirect,
-          uri: Uri.parse('ws://100.64.0.1:9527/ws'),
+          kind: TransportKind.lanDirect,
+          uri: Uri.parse('ws://192.168.1.100:9527/ws'),
           waitForPairing: false,
           priority: 100,
         ),

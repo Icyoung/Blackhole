@@ -30,13 +30,6 @@ void main() {
           priority: 110,
         ),
         TransportCandidate(
-          id: 'tailnet-1',
-          kind: TransportKind.tailnetDirect,
-          uri: Uri.parse('ws://100.64.0.1:9527/ws'),
-          waitForPairing: false,
-          priority: 120,
-        ),
-        TransportCandidate(
           id: 'wormhole-1',
           kind: TransportKind.wormholeRelay,
           uri: Uri.parse('wss://wormhole.example.com/ws'),
@@ -85,8 +78,7 @@ void main() {
         await Future.delayed(const Duration(milliseconds: 100));
 
         // Direct connections fail
-        if (candidate.kind == TransportKind.lanDirect ||
-            candidate.kind == TransportKind.tailnetDirect) {
+        if (candidate.kind == TransportKind.lanDirect) {
           return TransportProbeResult(
             candidate: candidate,
             success: false,

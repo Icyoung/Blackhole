@@ -1,6 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:voyager/src/services/transport_models.dart';
-import 'package:voyager/src/services/transport_rollout.dart';
 
 void main() {
   group('Transport Rollback Tests', () {
@@ -19,13 +18,6 @@ void main() {
           uri: Uri.parse('ws://192.168.1.100:9527/ws'),
           waitForPairing: false,
           priority: 110,
-        ),
-        TransportCandidate(
-          id: 'tailnet-default',
-          kind: TransportKind.tailnetDirect,
-          uri: Uri.parse('ws://100.64.0.1:9527/ws'),
-          waitForPairing: false,
-          priority: 120,
         ),
         TransportCandidate(
           id: 'wormhole-default',
@@ -52,8 +44,8 @@ void main() {
 
       int getPriority(TransportKind kind, bool prefersDirect) {
         switch (kind) {
-          case TransportKind.tailnetDirect:
-            return prefersDirect ? 120 : 100;
+          case TransportKind.wireguardDirect:
+            return 130;
           case TransportKind.lanDirect:
             return prefersDirect ? 110 : 90;
           case TransportKind.wormholeRelay:
@@ -64,25 +56,25 @@ void main() {
       }
 
       // With prefer direct
-      expect(getPriority(TransportKind.tailnetDirect, true), 120);
+      expect(getPriority(TransportKind.wireguardDirect, true), 130);
       expect(getPriority(TransportKind.lanDirect, true), 110);
       expect(getPriority(TransportKind.wormholeRelay, true), 80);
 
       // Without prefer direct
-      expect(getPriority(TransportKind.tailnetDirect, false), 100);
+      expect(getPriority(TransportKind.wireguardDirect, false), 130);
       expect(getPriority(TransportKind.lanDirect, false), 90);
       expect(getPriority(TransportKind.wormholeRelay, false), 120);
 
-      // Verify tailnet > lan > wormhole when prefer direct
-      expect(getPriority(TransportKind.tailnetDirect, true) >
+      // Verify wireguard > lan > wormhole when prefer direct
+      expect(getPriority(TransportKind.wireguardDirect, true) >
              getPriority(TransportKind.lanDirect, true), true);
       expect(getPriority(TransportKind.lanDirect, true) >
              getPriority(TransportKind.wormholeRelay, true), true);
 
-      // Verify wormhole > tailnet > lan when not prefer direct
+      // Verify wireguard > wormhole > lan when not prefer direct
+      expect(getPriority(TransportKind.wireguardDirect, false) >
+             getPriority(TransportKind.wormholeRelay, false), true);
       expect(getPriority(TransportKind.wormholeRelay, false) >
-             getPriority(TransportKind.tailnetDirect, false), true);
-      expect(getPriority(TransportKind.tailnetDirect, false) >
              getPriority(TransportKind.lanDirect, false), true);
     });
 
@@ -159,7 +151,6 @@ void main() {
       // Test various fallback scenarios
       final fallbackReasons = <String, String>{
         'probe_unavailable': 'No transport could be probed',
-        'tailnet_unreachable': 'Tailnet peer not reachable',
         'lan_timeout': 'LAN connection timed out',
         'all_failed': 'All transport candidates failed',
       };
@@ -216,7 +207,6 @@ void main() {
         'BH_ENABLE_SMART_TRANSPORT': false, // default
         'BH_FORCE_WORMHOLE_RELAY': false, // default
         'BH_PREFER_DIRECT_BY_DEFAULT': false, // default
-        'BH_ENABLE_TAILNET_INGRESS': false, // default
         'BH_TRANSPORT_CANARY_PERCENT': 0, // default
       };
 

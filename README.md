@@ -61,6 +61,17 @@ A Rust-based relay server that enables connections between Voyager and Horizon w
 - Admin API for session management
 - Docker deployment ready
 
+### blackhole-wg (Vendored VPN Core)
+
+Shared Rust crate used by the in-progress VPN/WireGuard transport work.
+
+**Roles:**
+- Host-side WireGuard server logic for `horizon/daemon`
+- C FFI surface consumed by Voyager packet tunnel targets on Apple platforms
+
+Source lives in `blackhole-wg/`. Generated artifacts under `blackhole-wg/target/`
+are build output and should not be committed.
+
 ## Quick Start
 
 ### 1. Run Horizon (Host)
@@ -94,6 +105,20 @@ If `horizon-daemon` is running, choosing **Quit** from the tray/menu-bar menu wi
 cd voyager
 flutter run -d ios     # or macos, android, chrome, linux, windows
 ```
+
+#### iOS Native VPN
+
+Voyager's Apple packet-tunnel path is currently iOS-only and opt-in. Enable it
+with:
+
+```bash
+cd voyager
+flutter run -d ios --dart-define=BH_ENABLE_NATIVE_VPN=true
+```
+
+You still need the matching Apple App Group and Network Extension signing
+capabilities for a real-device run. Full setup notes live in
+[`docs/ios-native-vpn.md`](docs/ios-native-vpn.md).
 
 ### 3. Run Wormhole (Relay) - Optional
 
