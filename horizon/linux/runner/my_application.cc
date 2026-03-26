@@ -1,5 +1,10 @@
 #include "my_application.h"
 
+// GtkStatusIcon is deprecated in GTK 3.14+ but there is no direct
+// replacement for system tray icons in GTK3.  Suppress the warnings
+// so they don't become errors under -Werror.
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
 #include <signal.h>
 #include <unistd.h>
 #include <cstdio>
