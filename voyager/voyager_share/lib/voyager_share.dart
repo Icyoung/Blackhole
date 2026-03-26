@@ -22,13 +22,18 @@ export 'src/widgets/chrome/tab_clipper.dart';
 export 'src/widgets/common/action_button.dart';
 export 'src/widgets/common/fade_overflow_text.dart';
 export 'src/widgets/common/status_dot.dart';
+export 'src/widgets/common/vpn_status_ring.dart';
 
 // Widgets - Keyboard
 export 'src/widgets/keyboard/candidate_bar.dart';
 export 'src/widgets/keyboard/hhkb_key.dart';
 export 'src/widgets/keyboard/hhkb_keyboard.dart';
 
+// Widgets - Design System
+export 'src/widgets/design_tokens.dart';
+
 // Widgets - Other
+export 'src/widgets/command_input_bar.dart';
 export 'src/widgets/add_terminal_card.dart';
 export 'src/widgets/group_drawer.dart';
 export 'src/widgets/quick_actions_bar.dart';

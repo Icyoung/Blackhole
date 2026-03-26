@@ -1,0 +1,26 @@
+{
+  "" : {
+    "const-values" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/Runner.build/Objects-normal/arm64/Runner-primary.swiftconstvalues",
+    "dependencies" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/Runner.build/Objects-normal/arm64/Runner-primary.d",
+    "diagnostics" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/Runner.build/Objects-normal/arm64/Runner-primary.dia",
+    "emit-module-dependencies" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/Runner.build/Objects-normal/arm64/Runner-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/Runner.build/Objects-normal/arm64/Runner-primary-emit-module.dia",
+    "pch" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/Runner.build/Objects-normal/arm64/Runner-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/Runner.build/Objects-normal/arm64/Runner-primary.swiftdeps"
+  },
+  "/Users/icy/Code/Blackhole/voyager/ios/Runner/AppDelegate.swift" : {
+    "index-unit-output-path" : "/Runner.build/Release-iphonesimulator/Runner.build/Objects-normal/arm64/AppDelegate.o",
+    "llvm-bc" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/Runner.build/Objects-normal/arm64/AppDelegate.bc",
+    "object" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/Runner.build/Objects-normal/arm64/AppDelegate.o"
+  },
+  "/Users/icy/Code/Blackhole/voyager/ios/Runner/VpnPlugin.swift" : {
+    "index-unit-output-path" : "/Runner.build/Release-iphonesimulator/Runner.build/Objects-normal/arm64/VpnPlugin.o",
+    "llvm-bc" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/Runner.build/Objects-normal/arm64/VpnPlugin.bc",
+    "object" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/Runner.build/Objects-normal/arm64/VpnPlugin.o"
+  },
+  "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/Runner.build/DerivedSources/GeneratedAssetSymbols.swift" : {
+    "index-unit-output-path" : "/Runner.build/Release-iphonesimulator/Runner.build/Objects-normal/arm64/GeneratedAssetSymbols.o",
+    "llvm-bc" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/Runner.build/Objects-normal/arm64/GeneratedAssetSymbols.bc",
+    "object" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/Runner.build/Objects-normal/arm64/GeneratedAssetSymbols.o"
+  }
+}

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../design_tokens.dart';
 import 'hhkb_key.dart';
 
 class HHKBKeyboard extends StatefulWidget {
@@ -42,7 +43,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
   DateTime? _lastFnTap;
   bool _fnLocked = false;
 
-  static const _bgColor = Color(0xFF1A1A1A);
+  static const _bgColor = AppColors.surfaceDim;
   static const _shiftDeleteFlex = 12;
 
   void _onShiftTap() {
@@ -98,7 +99,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
   Widget build(BuildContext context) {
     return Container(
       color: _bgColor,
-      padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
+      padding: const EdgeInsets.symmetric(vertical: 8),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -457,9 +458,9 @@ class _SpaceKeyState extends State<_SpaceKey> {
   bool _verticalTriggered = false; // Vertical swipe triggers only once
   static const _stepThreshold = 20.0; // Distance per arrow key trigger
 
-  static const _keyColor = Color(0xFF2D2D2D);
-  static const _keyPressedColor = Color(0xFF1A1A1A);
-  static const _keyBorder = Color(0xFF3D3D3D);
+  static const _keyColor = AppColors.keyBackground;
+  static const _keyPressedColor = AppColors.keyPressed;
+  static const _keyBorder = AppColors.keyBorder;
 
   @override
   Widget build(BuildContext context) {
@@ -532,7 +533,7 @@ class _SpaceKeyState extends State<_SpaceKey> {
               }
               : null,
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 100),
+        duration: AppDurations.fast,
         height: 42,
         decoration: BoxDecoration(
           color: _pressed ? _keyPressedColor : _keyColor,

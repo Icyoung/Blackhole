@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../design_tokens.dart';
+
 class ActionButton extends StatelessWidget {
   const ActionButton({
     super.key,
@@ -24,32 +26,32 @@ class ActionButton extends StatelessWidget {
     Color borderColor;
 
     if (modifier) {
-      bgColor = active ? const Color(0xFF284058) : const Color(0xFF141B24);
+      bgColor = active ? AppColors.border : AppColors.borderSubtle;
       borderColor =
-          active ? const Color(0xFF9AA0A6) : const Color(0xFF223042);
+          active ? AppColors.borderFocus : AppColors.divider;
     } else {
-      bgColor = enabled ? const Color(0xFF1B2430) : const Color(0xFF0E131A);
+      bgColor = enabled ? AppColors.borderSubtle : AppColors.surfaceDim;
       borderColor =
-          enabled ? const Color(0xFF2E3A4A) : const Color(0xFF1A222D);
+          enabled ? AppColors.divider : AppColors.border;
     }
 
     final textColor = modifier
-        ? (active ? Colors.white : const Color(0xFF9AA6B2))
-        : (enabled ? Colors.white : const Color(0xFF6D7785));
+        ? (active ? AppColors.textPrimary : AppColors.textTertiary)
+        : (enabled ? AppColors.textPrimary : AppColors.textMuted);
 
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        duration: AppDurations.normal,
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: 10),
         decoration: BoxDecoration(
           color: bgColor,
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(AppRadius.sm),
           border: Border.all(color: borderColor),
           boxShadow: (enabled || modifier)
               ? [
                   BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.2),
+                    color: Colors.black.withValues(alpha: 0.06),
                     blurRadius: 4,
                     offset: const Offset(0, 2),
                   )

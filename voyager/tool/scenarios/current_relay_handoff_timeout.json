@@ -1,0 +1,72 @@
+{
+  "defaultLanPort": 9527,
+  "events": [
+    {
+      "type": "restore",
+      "isActive": true,
+      "isConnected": true,
+      "mode": "relay",
+      "serverIp": "10.13.37.1"
+    },
+    {
+      "type": "vpn",
+      "isActive": true,
+      "isConnected": false,
+      "mode": "unknown",
+      "serverIp": "10.13.37.1",
+      "lanPort": 9529,
+      "primaryConnectionConnected": true,
+      "activeTransportKind": "wormhole_relay"
+    },
+    {
+      "type": "vpn",
+      "isActive": false,
+      "isConnected": false,
+      "mode": "direct",
+      "serverIp": "10.13.37.1",
+      "lanPort": 9529,
+      "primaryConnectionConnected": true,
+      "activeTransportKind": "wormhole_relay"
+    },
+    {
+      "type": "vpn",
+      "isActive": true,
+      "isConnected": false,
+      "mode": "direct",
+      "serverIp": "10.13.37.1",
+      "lanPort": 9529,
+      "primaryConnectionConnected": true,
+      "activeTransportKind": "wormhole_relay"
+    },
+    {
+      "type": "vpn",
+      "isActive": true,
+      "isConnected": false,
+      "mode": "relay",
+      "serverIp": "10.13.37.1",
+      "lanPort": 9529,
+      "primaryConnectionConnected": true,
+      "activeTransportKind": "wormhole_relay"
+    },
+    {
+      "type": "vpn",
+      "isActive": true,
+      "isConnected": true,
+      "mode": "relay",
+      "serverIp": "10.13.37.1",
+      "lanPort": 9529,
+      "primaryConnectionConnected": true,
+      "activeTransportKind": "wormhole_relay"
+    },
+    {
+      "type": "vpn",
+      "isActive": true,
+      "isConnected": true,
+      "mode": "relay",
+      "serverIp": "10.13.37.1",
+      "lanPort": 9529,
+      "primaryConnectionConnected": true,
+      "activeTransportKind": "wormhole_relay"
+    }
+  ]
+}

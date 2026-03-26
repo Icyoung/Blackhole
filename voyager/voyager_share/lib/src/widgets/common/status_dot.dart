@@ -1,14 +1,26 @@
 import 'package:flutter/material.dart';
 
+import '../design_tokens.dart';
+
 class StatusDot extends StatelessWidget {
-  const StatusDot({super.key, required this.connected, this.size = 10});
+  const StatusDot({
+    super.key,
+    required this.connected,
+    this.size = 10,
+    this.overrideColor,
+  });
 
   final bool connected;
   final double size;
+  final Color? overrideColor;
+
+  static const green = AppColors.statusGreen;
+  static const yellow = AppColors.statusYellow;
+  static const red = AppColors.statusRed;
 
   @override
   Widget build(BuildContext context) {
-    final color = connected ? const Color(0xFF41C87A) : const Color(0xFFFF5C5C);
+    final color = overrideColor ?? (connected ? green : red);
     return Container(
       width: size,
       height: size,

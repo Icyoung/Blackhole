@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../design_tokens.dart';
 import 'chrome_tab_shell.dart';
 
 class ChromeTabButton extends StatelessWidget {
@@ -31,7 +32,7 @@ class ChromeTabButton extends StatelessWidget {
         child: Center(
           child: Icon(
             icon,
-            color: Colors.white,
+            color: AppColors.textPrimary,
             size: 16,
           ),
         ),

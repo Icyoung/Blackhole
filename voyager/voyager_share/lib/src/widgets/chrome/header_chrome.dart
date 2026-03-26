@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../design_tokens.dart';
 import 'chrome_tab_pill.dart';
 
 class HeaderChrome extends StatelessWidget {
@@ -18,8 +19,9 @@ class HeaderChrome extends StatelessWidget {
     this.connectionContent,
     required this.error,
     required this.pairingPending,
-    this.pairingTitle = 'Waiting for host approval...',
-    this.pairingSubtitle = 'Please check the Horizon app on your computer',
+    this.pairingTitle = 'Authorizing connection...',
+    this.pairingSubtitle =
+        'Horizon may resume this device automatically or ask for approval if it is new',
     this.leadingWidget,
     this.trailingWidget,
   });
@@ -66,11 +68,11 @@ class HeaderChrome extends StatelessWidget {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 12, vertical: 10),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF9AA0A6)
-                            .withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(6),
+                        color: AppColors.textMuted
+                            .withValues(alpha: AppOpacity.light),
+                        borderRadius: BorderRadius.circular(AppRadius.sm),
                         border: Border.all(
-                            color: const Color(0xFF9AA0A6)
+                            color: AppColors.textMuted
                                 .withValues(alpha: 0.2)),
                       ),
                       child: Row(
@@ -80,7 +82,7 @@ class HeaderChrome extends StatelessWidget {
                             height: 14,
                             child: CircularProgressIndicator(
                               strokeWidth: 2,
-                              color: Color(0xFF9AA0A6),
+                              color: AppColors.textMuted,
                             ),
                           ),
                           const SizedBox(width: 10),
@@ -91,7 +93,7 @@ class HeaderChrome extends StatelessWidget {
                                 Text(
                                   pairingTitle,
                                   style: const TextStyle(
-                                    color: Color(0xFF9AA0A6),
+                                    color: AppColors.textMuted,
                                     fontSize: 12,
                                     fontWeight: FontWeight.w500,
                                   ),
@@ -100,7 +102,7 @@ class HeaderChrome extends StatelessWidget {
                                 Text(
                                   pairingSubtitle,
                                   style: const TextStyle(
-                                    color: Color(0xFF9AA6B2),
+                                    color: AppColors.textTertiary,
                                     fontSize: 11,
                                   ),
                                 ),
@@ -118,23 +120,23 @@ class HeaderChrome extends StatelessWidget {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 12, vertical: 8),
                       decoration: BoxDecoration(
-                        color: const Color(0xFFFF5C5C)
-                            .withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(6),
+                        color: AppColors.warning
+                            .withValues(alpha: AppOpacity.light),
+                        borderRadius: BorderRadius.circular(AppRadius.sm),
                         border: Border.all(
-                            color: const Color(0xFFFF5C5C)
+                            color: AppColors.warning
                                 .withValues(alpha: 0.2)),
                       ),
                       child: Row(
                         children: [
                           const Icon(Icons.error_outline,
-                              size: 14, color: Color(0xFFFF5C5C)),
+                              size: 14, color: AppColors.warning),
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
                               error!,
                               style: const TextStyle(
-                                  color: Color(0xFFFF5C5C), fontSize: 12),
+                                  color: AppColors.warning, fontSize: 12),
                             ),
                           ),
                         ],
@@ -236,9 +238,9 @@ class _CircleIconButtonState extends State<_CircleIconButton> {
   Widget build(BuildContext context) {
     final Color bg;
     if (_pressed) {
-      bg = Colors.white.withValues(alpha: 0.15);
+      bg = AppColors.surfaceBright;
     } else if (_hovered) {
-      bg = Colors.white.withValues(alpha: 0.08);
+      bg = AppColors.surfaceVariant;
     } else {
       bg = Colors.transparent;
     }
@@ -256,7 +258,7 @@ class _CircleIconButtonState extends State<_CircleIconButton> {
         onTapCancel: () => setState(() => _pressed = false),
         onTap: widget.onTap,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 120),
+          duration: AppDurations.fast,
           width: 24,
           height: 24,
           margin: const EdgeInsets.symmetric(horizontal: 4),
@@ -264,7 +266,7 @@ class _CircleIconButtonState extends State<_CircleIconButton> {
             color: bg,
             shape: BoxShape.circle,
           ),
-          child: Center(child: Icon(widget.icon, color: Colors.white54, size: 14)),
+          child: Center(child: Icon(widget.icon, color: AppColors.textTertiary, size: 14)),
         ),
       ),
     );

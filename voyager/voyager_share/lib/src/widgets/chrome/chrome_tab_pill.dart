@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../common/fade_overflow_text.dart';
+import '../design_tokens.dart';
 import 'chrome_tab_shell.dart';
 
 class ChromeTabPill extends StatelessWidget {
@@ -25,7 +26,7 @@ class ChromeTabPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final textColor = active ? Colors.white : Colors.white38;
+    final textColor = active ? AppColors.textPrimary : AppColors.textMuted;
 
     return Padding(
       padding: const EdgeInsets.only(right: 2),
@@ -42,7 +43,7 @@ class ChromeTabPill extends StatelessWidget {
               ? BoxDecoration(
                   border: Border(
                     top: BorderSide(
-                      color: Colors.white.withValues(alpha: 0.1),
+                      color: AppColors.border,
                       width: 1,
                     ),
                   ),
@@ -68,11 +69,11 @@ class ChromeTabPill extends StatelessWidget {
                   child: Container(
                     padding: const EdgeInsets.all(2),
                     decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.1),
+                      color: AppColors.border,
                       shape: BoxShape.circle,
                     ),
                     child: const Icon(Icons.close,
-                        size: 10, color: Colors.white70),
+                        size: 10, color: AppColors.accentDark),
                   ),
                 ),
             ],

@@ -9,7 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:voyager_share/voyager_share.dart'
-    show AppColors, buildTerminalStyle, kTerminalThemeLight, PinyinEngine, CandidateBar;
+    show AppColors, buildTerminalStyle, kTerminalThemeLight, PinyinEngine, CandidateBar, CommandInputBar, CommandInputBarState, VpnStatusRing, VpnRingState;
 import 'package:xterm/xterm.dart';
 
 import '../models/terminal_group.dart';
@@ -43,6 +43,7 @@ class VoyagerHome extends StatefulWidget {
 class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final GlobalKey _quickBarKey = GlobalKey();
+  final GlobalKey<CommandInputBarState> _commandInputKey = GlobalKey<CommandInputBarState>();
   final TextEditingController _urlController = TextEditingController(
     text: 'ws://127.0.0.1:9527/ws',
   );
@@ -59,20 +60,25 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   late final TerminalManager _terminalManager;
 
   bool _connected = false;
+  bool _reconnecting = false;
   bool _autoReconnect = true;
   bool _useWormhole = false;
   bool _showKeyboardTools = true;
+  bool _showCommandInput = false;
   bool _showHHKB = false;
   bool _hhkbFn = false;
   bool _multiWindow = false;
-  bool _showSidebar = false;
+
   double _quickBarHeight = 0;
   static const double _hhkbKeyboardHeight = 250; // 5*42 + 4*6 + 16 padding
 
   static const double _candidateBarHeight = 40;
 
+  static const double _commandInputBarHeight = 46;
+
   double get _bottomBarHeight =>
       (_showKeyboardTools ? _quickBarHeight : 0) +
+      (_showCommandInput ? _commandInputBarHeight : 0) +
       (_showHHKB ? _hhkbKeyboardHeight : 0) +
       (_showHHKB && _chineseMode && _pinyinEngine.hasInput
           ? _candidateBarHeight
@@ -97,6 +103,28 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   final Map<String, GlobalKey> _terminalCardKeys = {};
 
   String? _error;
+
+  void _showError(String message) {
+    if (!mounted) return;
+    setState(() { _error = null; }); // Clear inline error
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            const Icon(Icons.error_outline, size: 14, color: Colors.white70),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(message, style: const TextStyle(fontSize: 12)),
+            ),
+          ],
+        ),
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.fromLTRB(20, 0, 20, 0),
+        duration: const Duration(seconds: 4),
+        backgroundColor: const Color(0xCC9D3C3C),
+      ),
+    );
+  }
 
   // Device pairing related state
   String? _deviceKey;
@@ -156,6 +184,14 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     );
     _connectionManager = ConnectionManager(
       onConnected: ({required waitForPairing}) {
+        final wasReconnecting = _reconnecting;
+        if (_reconnecting) {
+          _reconnecting = false;
+          // Re-sync existing sessions after passive reconnect.
+          for (final sid in _sessions) {
+            _connectionManager.sendSyncRequest(sid);
+          }
+        }
         if (!waitForPairing) {
           _sendListSessions();
         }
@@ -168,7 +204,12 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
         if (handoffDecision.shouldSwitch) {
           _switchToVpnTransport(decision: handoffDecision);
         }
-        _terminalManager.activeViewKey?.currentState?.requestKeyboard();
+        if (!_showHHKB) {
+          _terminalManager.activeViewKey?.currentState?.requestKeyboard();
+        }
+        if (wasReconnecting && mounted) {
+          setState(() {});
+        }
       },
       onConnectedChanged: (connected) {
         if (!mounted) {
@@ -200,8 +241,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
         if (!mounted) {
           return;
         }
+        _showError(message);
         setState(() {
-          _error = message;
           _pairingPending = false;
         });
       },
@@ -209,12 +250,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
         _groupStore.applySync(payload);
       },
       onGroupError: (message) {
-        if (!mounted) {
-          return;
-        }
-        setState(() {
-          _error = 'Group error: $message';
-        });
+        _showError('Group error: $message');
       },
       onPairingResult: ({
         required approved,
@@ -253,9 +289,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
           _maybeStartVpnUpgrade(force: true);
         } else {
           if (mounted) {
+            _showError('Connection rejected by host');
             setState(() {
               _pairingPending = false;
-              _error = 'Connection rejected by host';
               _connected = false;
             });
           }
@@ -314,6 +350,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       _autoReconnect = prefs.getBool('autoReconnect') ?? true;
       _multiWindow = prefs.getBool('multiWindow') ?? false;
       _showKeyboardTools = prefs.getBool('showKeyboardTools') ?? true;
+      _showCommandInput = prefs.getBool('showCommandInput') ?? false;
       _showHHKB = prefs.getBool('showHHKB') ?? false;
       _chineseMode = prefs.getBool('chineseMode') ?? false;
       _deviceKey = prefs.getString('deviceKey');
@@ -504,6 +541,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     await prefs.setBool('autoReconnect', _autoReconnect);
     await prefs.setBool('multiWindow', _multiWindow);
     await prefs.setBool('showKeyboardTools', _showKeyboardTools);
+    await prefs.setBool('showCommandInput', _showCommandInput);
     await prefs.setBool('showHHKB', _showHHKB);
     await prefs.setBool('chineseMode', _chineseMode);
     if (_deviceKey != null) {
@@ -588,6 +626,18 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
         );
       }
     }
+    // Passive disconnect with auto-reconnect: keep terminal state, show overlay.
+    final passive = _connectionManager.shouldReconnect;
+    if (passive && _sessions.isNotEmpty) {
+      _reconnecting = true;
+      _groupStore.onDisconnected();
+      _pinyinEngine.clear();
+      if (mounted) {
+        setState(() {});
+      }
+      return;
+    }
+    _reconnecting = false;
     _groupStore.onDisconnected();
     _pinyinEngine.clear();
     _remoteDeviceName = null;
@@ -970,7 +1020,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
 
   void _setActiveSession(String sessionId, {bool requestKeyboard = false}) {
     if (_activeSessionId == sessionId) {
-      if (requestKeyboard && !_multiWindow) {
+      if (requestKeyboard && !_multiWindow && !_showHHKB) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           _viewKeyFor(sessionId).currentState?.requestKeyboard();
         });
@@ -992,7 +1042,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     _scheduleActiveResize();
     _restoreScrollOffset(sessionId);
     _updateWindowTitle();
-    if (requestKeyboard && !_multiWindow) {
+    if (requestKeyboard && !_multiWindow && !_showHHKB) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _viewKeyFor(sessionId).currentState?.requestKeyboard();
       });
@@ -1175,6 +1225,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     }
     return false;
   }
+
+  /// Whether HHKB input should be redirected to the command input bar.
+  bool get _hhkbToCommandInput => _showHHKB && _showCommandInput;
 
   void _sendRaw(String data) {
     final sessionId = _activeSessionId;
@@ -1366,6 +1419,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     final scaffold = Scaffold(
       key: _scaffoldKey,
       backgroundColor: AppColors.surfaceVariant,
+      drawer: _buildGroupDrawer(context),
       endDrawer: _buildSettingsDrawer(context),
       body: Stack(
         children: [
@@ -1460,7 +1514,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                                         : TextInputType.text,
                                 backgroundOpacity: 1.0,
                                 padding: const EdgeInsets.all(10),
-                                textStyle: buildTerminalStyle(fontSize: 14),
+                                textStyle: buildTerminalStyle(fontSize: 12),
                               ),
                             );
                           }
@@ -1530,12 +1584,26 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                           10,
                           _bottomBarHeight + 10,
                         ),
-                        textStyle: buildTerminalStyle(fontSize: 14),
+                        textStyle: buildTerminalStyle(fontSize: 12),
                       ),
                   if (_dragging && !_multiWindow)
                     Positioned.fill(
                       child: Container(
                         color: AppColors.accent.withValues(alpha: 0.12),
+                      ),
+                    ),
+                  if (_reconnecting)
+                    Positioned.fill(
+                      child: AbsorbPointer(
+                        child: Container(
+                          color: Colors.black.withValues(alpha: 0.45),
+                          alignment: Alignment.center,
+                          child: Icon(
+                            Icons.sync_rounded,
+                            size: 48,
+                            color: Colors.white.withValues(alpha: 0.6),
+                          ),
+                        ),
                       ),
                     ),
                 ],
@@ -1570,7 +1638,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
               color: barColor,
               activeColor: activeColor,
               overlayColor: overlayColor,
-              error: _error,
+              error: null,
               pairingPending: _pairingPending,
               onAddSession: _sendCreateSession,
               sessions: _visibleSessions,
@@ -1617,6 +1685,15 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                             )
                             : const SizedBox.shrink(),
                   ),
+                  if (_showCommandInput)
+                    CommandInputBar(
+                      key: _commandInputKey,
+                      readOnly: _showHHKB,
+                      onSend: (text) {
+                        _sendRaw(text);
+                        _sendRaw('\r');
+                      },
+                    ),
                   if (_showHHKB &&
                       _chineseMode &&
                       (_pinyinEngine.hasInput || _pinyinEngine.hasCandidates))
@@ -1625,7 +1702,13 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                       candidates: _pinyinEngine.candidates,
                       onSelect: (index) {
                         final selected = _pinyinEngine.select(index);
-                        if (selected != null) _sendRaw(selected);
+                        if (selected != null) {
+                          if (_hhkbToCommandInput) {
+                            _commandInputKey.currentState?.insertText(selected);
+                          } else {
+                            _sendRaw(selected);
+                          }
+                        }
                       },
                     ),
                   if (_showHHKB)
@@ -1652,6 +1735,20 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                             isSpecial: isSpecial,
                           );
                           if (consumed) {
+                            return;
+                          }
+                        }
+                        // Redirect to command input bar when both HHKB and input are active
+                        if (_hhkbToCommandInput) {
+                          final inputBar = _commandInputKey.currentState;
+                          if (inputBar != null) {
+                            if (key == '\r') {
+                              inputBar.submit();
+                            } else if (key == '\x7f' || key == '\b') {
+                              inputBar.deleteBack();
+                            } else if (!isSpecial && !_ctrl && !_alt) {
+                              inputBar.insertText(key);
+                            }
                             return;
                           }
                         }
@@ -1682,23 +1779,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       ),
     );
 
-    return Row(
-      children: [
-        AnimatedContainer(
-          duration: const Duration(milliseconds: 220),
-          curve: Curves.easeOutCubic,
-          width: _showSidebar ? 240.0 : 0.0,
-          clipBehavior: Clip.hardEdge,
-          decoration: const BoxDecoration(),
-          child: OverflowBox(
-            alignment: Alignment.centerLeft,
-            maxWidth: 240,
-            child: _buildGroupDrawer(context),
-          ),
-        ),
-        Expanded(child: scaffold),
-      ],
-    );
+    return scaffold;
   }
 
   Widget _buildConnectionContent(BuildContext context) {
@@ -1744,30 +1825,32 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
             IconButton(
               icon: const Icon(Icons.menu, color: AppColors.textSecondary, size: 20),
               onPressed: () {
-                setState(() => _showSidebar = !_showSidebar);
-                _groupStore.setDeferredSync(_showSidebar);
+                _scaffoldKey.currentState?.openDrawer();
+                _groupStore.setDeferredSync(true);
               },
               tooltip: 'Groups',
             ),
             const SizedBox(width: 4),
-            StatusDot(connected: _connected, size: 8),
-            if (_vpnAvailable && _vpnService.isActive) ...[
-              const SizedBox(width: 8),
-              ListenableBuilder(
-                listenable: _vpnService,
-                builder: (context, _) {
-                  if (!_vpnService.isActive) return const SizedBox.shrink();
-                  return Icon(
-                    Icons.shield,
-                    size: 14,
-                    color:
-                        _vpnService.isConnected
-                            ? AppColors.statusGreen
-                            : AppColors.statusYellow,
-                  );
-                },
-              ),
-            ],
+            ListenableBuilder(
+              listenable: _vpnService,
+              builder: (context, _) {
+                final VpnRingState vpnState;
+                if (!_vpnAvailable || !_vpnService.isActive) {
+                  vpnState = VpnRingState.none;
+                } else if (_vpnService.isConnected) {
+                  vpnState = VpnRingState.connected;
+                } else {
+                  vpnState = VpnRingState.connecting;
+                }
+                return VpnStatusRing(
+                  connected: _connected,
+                  vpnState: vpnState,
+                  size: 8,
+                  ringWidth: 1.5,
+                  ringGap: 2,
+                );
+              },
+            ),
             const SizedBox(width: 14),
             Expanded(
               child: Column(
@@ -1810,8 +1893,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                     await _connect();
                   } catch (e) {
                     if (mounted) {
+                      _showError(e.toString());
                       setState(() {
-                        _error = e.toString();
                         _connected = false;
                       });
                     }
@@ -1839,7 +1922,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
 
   Widget _buildGroupDrawer(BuildContext context) {
     return GroupDrawer(
-      embedded: true,
+      embedded: false,
       manager: _groupStore,
       activeSessionId: _activeSessionId,
       onSelectSession:
@@ -1858,6 +1941,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       autoReconnect: _autoReconnect,
       multiWindow: _multiWindow,
       showKeyboardTools: _showKeyboardTools,
+      showCommandInput: _showCommandInput,
       showHHKB: _showHHKB,
       urlController: _urlController,
       wormholeController: _wormholeController,
@@ -1891,7 +1975,18 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
           _scheduleActiveResize();
         });
       },
+      onShowCommandInputChanged: (value) {
+        setState(() => _showCommandInput = value);
+        _saveSettings();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _scheduleActiveResize();
+        });
+      },
       onShowHHKBChanged: (value) {
+        if (value) {
+          // Dismiss system keyboard before HHKB takes over input.
+          SystemChannels.textInput.invokeMethod('TextInput.hide');
+        }
         setState(() => _showHHKB = value);
         _saveSettings();
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1925,11 +2020,10 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       _vpnLocalPort = null;
       _vpnDirectCandidates = const <DirectCandidate>[];
       _lastAdvertisedVpnCandidateSignature = null;
-      if (_vpnService.isConnected) {
+      if (_vpnService.isActive) {
         unawaited(_vpnService.stop());
-      } else {
-        _vpnService.cancelPendingStart();
       }
+      _vpnService.cancelPendingStart();
       return;
     }
 
@@ -2095,7 +2189,12 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
             VpnConfig(
               privateKey: privateKey,
               peerPublicKey: mergedInfo.wgPublicKey!,
-              serverAddr: _resolveVpnServerHost(mergedInfo),
+              // iOS tunnelRemoteAddress must be the public/routable address
+              // (not LAN candidate) so iOS correctly routes tunnel UDP
+              // through the physical interface. LAN candidates are passed
+              // separately via directCandidates for the PacketTunnelProvider
+              // to choose from.
+              serverAddr: mergedInfo.horizonAddr ?? _resolveVpnServerHost(mergedInfo),
               serverPort: mergedInfo.wgUdpPort ?? 51820,
               clientIp: mergedInfo.clientIp ?? '10.13.37.2',
               serverIp: mergedInfo.serverIp ?? '10.13.37.1',
@@ -2304,6 +2403,29 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   }
 
   String _resolveVpnServerHost(EndpointInfo info) {
+    // Prefer a LAN candidate from Horizon when Voyager is on the same subnet —
+    // avoids hairpin NAT failures when both devices share the same public IP.
+    final hCandidates = info.horizonCandidates;
+    final vCandidates = _vpnDirectCandidates;
+    if (hCandidates != null) {
+      for (final hc in hCandidates) {
+        if (hc.scope == 'lan' && hc.addr.isNotEmpty) {
+          // Check if Voyager has a LAN candidate on the same /24 subnet.
+          final hParts = hc.addr.split('.');
+          if (hParts.length == 4) {
+            final hPrefix = '${hParts[0]}.${hParts[1]}.${hParts[2]}';
+            final onSameLan = vCandidates.any(
+              (vc) => vc.scope == 'lan' && vc.addr.startsWith('$hPrefix.'),
+            );
+            if (onSameLan) {
+              _vpnLog('resolveVpnServerHost: using LAN candidate ${hc.addr}');
+              return hc.addr;
+            }
+          }
+        }
+      }
+    }
+
     final horizonAddr = info.horizonAddr;
     if (horizonAddr != null && horizonAddr.isNotEmpty) {
       return horizonAddr;
@@ -2333,13 +2455,15 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
 
   VpnTransportEndpoint? _currentVpnTransportEndpoint() {
     final info = _vpnEndpointInfo;
-    final serverIp = info?.serverIp;
-    if (serverIp == null || serverIp.isEmpty) {
-      return null;
-    }
+    if (info == null) return null;
+    // Use the resolved server host (LAN candidate or horizonAddr) instead of
+    // the VPN subnet IP (10.13.37.1). macOS utun ptp routing prevents TCP
+    // connections to the TUN local address from working, so we connect via
+    // LAN/WAN and let Horizon identify it as a VPN peer by other means.
+    final host = _resolveVpnServerHost(info);
     return VpnTransportEndpoint(
-      serverIp: serverIp,
-      lanPort: info?.lanPort ?? _defaultVpnLanPort(),
+      serverIp: host,
+      lanPort: info.lanPort ?? _defaultVpnLanPort(),
     );
   }
 
@@ -2356,6 +2480,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       tunPacketsIn: _vpnService.tunPacketsIn,
       udpPacketsIn: _vpnService.udpPacketsIn,
       wgRxBytes: _vpnService.wgRxBytes,
+      directSessionReady: _vpnService.directSessionReady,
       error: _vpnService.error,
     );
     final restoredEndpoint = _vpnHandoff.restoreEndpointFromNativeStatus(
@@ -2399,12 +2524,16 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     if (isConnected) {
       _vpnConfigTimeout?.cancel();
     }
+    final handoffEndpoint = _currentVpnTransportEndpoint();
     final handoffDecision = _vpnHandoff.onVpnStatusChanged(
       snapshot: snapshot,
       primaryConnectionConnected: _connectionManager.connected,
       activeTransportKind: _connectionManager.activeTransportKind,
-      endpoint: _currentVpnTransportEndpoint(),
+      endpoint: handoffEndpoint,
     );
+    if (handoffDecision.shouldSwitch || snapshot.directSessionReady == true) {
+      debugPrint('[VPN-Handoff] shouldSwitch=${handoffDecision.shouldSwitch} shouldFallback=${handoffDecision.shouldFallback} endpoint=${handoffEndpoint?.websocketUri} gate=${VpnTransportHandoffCoordinator.satisfiesDirectReadinessGate(snapshot)} udpIn=${snapshot.udpPacketsIn} tunIn=${snapshot.tunPacketsIn} wgRx=${snapshot.wgRxBytes} directReady=${snapshot.directSessionReady} transportKind=${_connectionManager.activeTransportKind}');
+    }
     if (handoffDecision.shouldSwitch) {
       _switchToVpnTransport(decision: handoffDecision);
     } else if (handoffDecision.shouldFallback) {
@@ -2415,6 +2544,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   }
 
   void _disconnectMainConnection() {
+    _reconnecting = false;
     _vpnHandoff.suppressNextFallback();
     _vpnConfigTimeout?.cancel();
     _vpnEndpointInfo = null;

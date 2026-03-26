@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../design_tokens.dart';
+
 class HHKBKey extends StatefulWidget {
   const HHKBKey({
     super.key,
@@ -28,11 +30,11 @@ class _HHKBKeyState extends State<HHKBKey> {
   OverlayEntry? _bubbleEntry;
   final GlobalKey _keyKey = GlobalKey();
 
-  static const _keyColor = Color(0xFF2D2D2D);
-  static const _keyPressedColor = Color(0xFF1A1A1A);
-  static const _keyBorder = Color(0xFF3D3D3D);
-  static const _modActiveColor = Color(0xFF9AA0A6);
-  static const _modPressedColor = Color(0xFF3A6080);
+  static const _keyColor = AppColors.keyBackground;
+  static const _keyPressedColor = AppColors.keyPressed;
+  static const _keyBorder = AppColors.keyBorder;
+  static const _modActiveColor = AppColors.keyPressed;
+  static const _modPressedColor = AppColors.textMuted;
 
   @override
   void dispose() {
@@ -58,8 +60,8 @@ class _HHKBKeyState extends State<HHKBKey> {
             width: 56,
             height: 52,
             decoration: BoxDecoration(
-              color: const Color(0xFF3A3A3A),
-              borderRadius: BorderRadius.circular(8),
+              color: AppColors.keyBackground,
+              borderRadius: BorderRadius.circular(AppRadius.sm),
               boxShadow: [
                 BoxShadow(
                   color: Colors.black.withValues(alpha: 0.4),
@@ -74,7 +76,7 @@ class _HHKBKeyState extends State<HHKBKey> {
                 Text(
                   widget.label,
                   style: const TextStyle(
-                    color: Colors.white,
+                    color: AppColors.textPrimary,
                     fontSize: 24,
                     fontWeight: FontWeight.w500,
                     decoration: TextDecoration.none,
@@ -136,7 +138,7 @@ class _HHKBKeyState extends State<HHKBKey> {
       onTap: widget.enabled ? widget.onTap : null,
       child: AnimatedContainer(
         key: _keyKey,
-        duration: const Duration(milliseconds: 100),
+        duration: AppDurations.fast,
         height: 42,
         decoration: BoxDecoration(
           color: bgColor,
@@ -162,7 +164,7 @@ class _HHKBKeyState extends State<HHKBKey> {
           child: Text(
             widget.label,
             style: TextStyle(
-              color: widget.enabled ? Colors.white : Colors.white38,
+              color: widget.enabled ? AppColors.textPrimary : AppColors.textMuted,
               fontSize: widget.fontSize,
               fontWeight:
                   widget.isModifier ? FontWeight.bold : FontWeight.w500,

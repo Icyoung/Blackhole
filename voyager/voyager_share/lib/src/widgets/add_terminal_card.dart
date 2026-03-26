@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'design_tokens.dart';
+
 class AddTerminalCard extends StatelessWidget {
   const AddTerminalCard({super.key, required this.onTap});
 
@@ -10,12 +12,12 @@ class AddTerminalCard extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
+        duration: AppDurations.normal,
         decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.02),
-          borderRadius: BorderRadius.circular(10),
+          color: AppColors.surfaceDim,
+          borderRadius: BorderRadius.circular(AppRadius.md),
           border: Border.all(
-            color: Colors.white.withValues(alpha: 0.05),
+            color: AppColors.border,
             width: 1.0,
           ),
         ),
@@ -23,22 +25,22 @@ class AddTerminalCard extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.03),
+              padding: const EdgeInsets.all(AppSpacing.md),
+              decoration: const BoxDecoration(
+                color: AppColors.borderSubtle,
                 shape: BoxShape.circle,
               ),
-              child: Icon(
+              child: const Icon(
                 Icons.add_rounded,
                 size: 24,
-                color: Colors.white.withValues(alpha: 0.2),
+                color: AppColors.textMuted,
               ),
             ),
-            const SizedBox(height: 12),
-            Text(
+            const SizedBox(height: AppSpacing.md),
+            const Text(
               'NEW SESSION',
               style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.2),
+                color: AppColors.textMuted,
                 fontSize: 9,
                 fontWeight: FontWeight.bold,
                 letterSpacing: 1,

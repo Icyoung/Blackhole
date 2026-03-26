@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../design_tokens.dart';
+
 class CandidateBar extends StatelessWidget {
   const CandidateBar({
     super.key,
@@ -12,11 +14,11 @@ class CandidateBar extends StatelessWidget {
   final List<String> candidates;
   final void Function(int index) onSelect;
 
-  static const _bgColor = Color(0xFF1A1A1A);
-  static const _pinyinColor = Color(0xFF6B9BD2);
-  static const _candidateColor = Colors.white;
-  static const _indexColor = Color(0xFF888888);
-  static const _dividerColor = Color(0xFF333333);
+  static const _bgColor = AppColors.surfaceDim;
+  static const _pinyinColor = AppColors.textTertiary;
+  static const _candidateColor = AppColors.textPrimary;
+  static const _indexColor = AppColors.textMuted;
+  static const _dividerColor = AppColors.divider;
 
   @override
   Widget build(BuildContext context) {

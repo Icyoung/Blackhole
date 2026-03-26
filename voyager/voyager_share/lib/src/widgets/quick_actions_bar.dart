@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:xterm/xterm.dart';
 
 import 'common/action_button.dart';
+import 'design_tokens.dart';
 
 class QuickActionsBar extends StatefulWidget {
   const QuickActionsBar({
@@ -32,6 +33,9 @@ class QuickActionsBar extends StatefulWidget {
   final Future<void> Function() onCopy;
   final void Function(String data) onSend;
   final VoidCallback onScrollToBottom;
+
+  /// Threshold below which we use horizontal scroll instead of wrap.
+  static const double _wrapBreakpoint = 480;
 
   @override
   State<QuickActionsBar> createState() => _QuickActionsBarState();
@@ -119,7 +123,7 @@ class _QuickActionsBarState extends State<QuickActionsBar> {
       _scrollController
           .animateTo(
             nearest,
-            duration: const Duration(milliseconds: 180),
+            duration: AppDurations.normal,
             curve: Curves.easeOut,
           )
           .then((_) => _isSnapping = false);
@@ -134,130 +138,118 @@ class _QuickActionsBarState extends State<QuickActionsBar> {
       final boxGlobal = box.localToGlobal(Offset.zero);
       final ancestorGlobal = ancestor.localToGlobal(Offset.zero);
 
-      return _scrollController.offset + (boxGlobal.dx - ancestorGlobal.dx) - 12;
+      return _scrollController.offset + (boxGlobal.dx - ancestorGlobal.dx);
     } catch (_) {
       return null;
     }
+  }
+
+  List<Widget> _buildButtons({bool useSnapKeys = false}) {
+    return [
+      ActionButton(
+        label: 'CTRL',
+        modifier: true,
+        active: widget.ctrl,
+        onTap: widget.onToggleCtrl,
+      ),
+      ActionButton(
+        label: 'ALT',
+        modifier: true,
+        active: widget.alt,
+        onTap: widget.onToggleAlt,
+      ),
+      ActionButton(
+        key: useSnapKeys ? _snapKeys[0] : null,
+        label: 'TAB',
+        onTap: widget.connected ? () => widget.onKey(TerminalKey.tab) : null,
+      ),
+      ActionButton(
+        label: 'ESC',
+        onTap: widget.connected ? () => widget.onKey(TerminalKey.escape) : null,
+      ),
+      ActionButton(
+        key: useSnapKeys ? _snapKeys[1] : null,
+        icon: Icons.keyboard_arrow_up,
+        onTap: widget.connected ? () => widget.onKey(TerminalKey.arrowUp) : null,
+      ),
+      ActionButton(
+        icon: Icons.keyboard_arrow_down,
+        onTap: widget.connected ? () => widget.onKey(TerminalKey.arrowDown) : null,
+      ),
+      ActionButton(
+        icon: Icons.keyboard_arrow_left,
+        onTap: widget.connected ? () => widget.onKey(TerminalKey.arrowLeft) : null,
+      ),
+      ActionButton(
+        icon: Icons.keyboard_arrow_right,
+        onTap: widget.connected ? () => widget.onKey(TerminalKey.arrowRight) : null,
+      ),
+      ActionButton(
+        key: useSnapKeys ? _snapKeys[2] : null,
+        icon: Icons.keyboard_return,
+        onTap: widget.connected ? () => widget.onSend('\r') : null,
+      ),
+      ActionButton(
+        key: useSnapKeys ? _snapKeys[4] : null,
+        icon: Icons.vertical_align_bottom,
+        onTap: widget.onScrollToBottom,
+      ),
+      ActionButton(
+        label: 'LF',
+        onTap: widget.connected ? () => widget.onSend('\n') : null,
+      ),
+      ActionButton(
+        key: useSnapKeys ? _snapKeys[3] : null,
+        label: 'PASTE',
+        onTap: widget.connected ? widget.onPaste : null,
+      ),
+      ActionButton(
+        label: 'COPY',
+        onTap: widget.connected ? widget.onCopy : null,
+      ),
+    ];
   }
 
   @override
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
-      decoration: BoxDecoration(
-        color: const Color(0xFF111620),
+      decoration: const BoxDecoration(
+        color: AppColors.surfaceDim,
         border: Border(
-          top: BorderSide(color: Colors.white.withValues(alpha: 0.05)),
+          top: BorderSide(color: AppColors.border),
         ),
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      child: NotificationListener<ScrollNotification>(
-        onNotification: (notification) {
-          if (notification is ScrollEndNotification && !_isSnapping) {
-            Future.delayed(const Duration(milliseconds: 80), _onScrollEnd);
+      padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          if (constraints.maxWidth >= QuickActionsBar._wrapBreakpoint) {
+            return Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: _buildButtons(),
+            );
           }
-          return false;
+          return NotificationListener<ScrollNotification>(
+            onNotification: (notification) {
+              if (notification is ScrollEndNotification && !_isSnapping) {
+                Future.delayed(const Duration(milliseconds: 80), _onScrollEnd);
+              }
+              return false;
+            },
+            child: SingleChildScrollView(
+              controller: _scrollController,
+              scrollDirection: Axis.horizontal,
+              physics: const BouncingScrollPhysics(),
+              child: Row(
+                children: _buildButtons(useSnapKeys: true)
+                    .expand((w) => [w, const SizedBox(width: 6)])
+                    .toList()
+                  ..removeLast(),
+              ),
+            ),
+          );
         },
-        child: SingleChildScrollView(
-          controller: _scrollController,
-          scrollDirection: Axis.horizontal,
-          physics: const BouncingScrollPhysics(),
-          child: Row(
-            children: [
-              ActionButton(
-                label: 'CTRL',
-                modifier: true,
-                active: widget.ctrl,
-                onTap: widget.onToggleCtrl,
-              ),
-              const SizedBox(width: 6),
-              ActionButton(
-                label: 'ALT',
-                modifier: true,
-                active: widget.alt,
-                onTap: widget.onToggleAlt,
-              ),
-              const SizedBox(width: 12),
-              ActionButton(
-                key: _snapKeys[0],
-                label: 'TAB',
-                onTap:
-                    widget.connected
-                        ? () => widget.onKey(TerminalKey.tab)
-                        : null,
-              ),
-              const SizedBox(width: 6),
-              ActionButton(
-                label: 'ESC',
-                onTap:
-                    widget.connected
-                        ? () => widget.onKey(TerminalKey.escape)
-                        : null,
-              ),
-              const SizedBox(width: 12),
-              ActionButton(
-                key: _snapKeys[1],
-                icon: Icons.keyboard_arrow_up,
-                onTap:
-                    widget.connected
-                        ? () => widget.onKey(TerminalKey.arrowUp)
-                        : null,
-              ),
-              const SizedBox(width: 6),
-              ActionButton(
-                icon: Icons.keyboard_arrow_down,
-                onTap:
-                    widget.connected
-                        ? () => widget.onKey(TerminalKey.arrowDown)
-                        : null,
-              ),
-              const SizedBox(width: 6),
-              ActionButton(
-                icon: Icons.keyboard_arrow_left,
-                onTap:
-                    widget.connected
-                        ? () => widget.onKey(TerminalKey.arrowLeft)
-                        : null,
-              ),
-              const SizedBox(width: 6),
-              ActionButton(
-                icon: Icons.keyboard_arrow_right,
-                onTap:
-                    widget.connected
-                        ? () => widget.onKey(TerminalKey.arrowRight)
-                        : null,
-              ),
-              const SizedBox(width: 12),
-              ActionButton(
-                key: _snapKeys[2],
-                icon: Icons.keyboard_return,
-                onTap: widget.connected ? () => widget.onSend('\r') : null,
-              ),
-              const SizedBox(width: 6),
-              ActionButton(
-                key: _snapKeys[4],
-                icon: Icons.vertical_align_bottom,
-                onTap: widget.onScrollToBottom,
-              ),
-              const SizedBox(width: 12),
-              ActionButton(
-                label: 'LF',
-                onTap: widget.connected ? () => widget.onSend('\n') : null,
-              ),
-              const SizedBox(width: 6),
-              ActionButton(
-                key: _snapKeys[3],
-                label: 'PASTE',
-                onTap: widget.connected ? widget.onPaste : null,
-              ),
-              const SizedBox(width: 6),
-              ActionButton(
-                label: 'COPY',
-                onTap: widget.connected ? widget.onCopy : null,
-              ),
-            ],
-          ),
-        ),
       ),
     );
   }

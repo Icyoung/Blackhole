@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:xterm/xterm.dart';
 
-import 'common/status_dot.dart';
+import 'design_tokens.dart';
 import 'terminal_style.dart';
 
 class TerminalWindowCard extends StatefulWidget {
@@ -15,6 +15,7 @@ class TerminalWindowCard extends StatefulWidget {
     required this.label,
     required this.isActive,
     required this.showHHKB,
+    this.hardwareKeyboardOnly = false,
     this.isDragTarget = false,
     this.terminalStyle,
     this.showActiveShadow = true,
@@ -33,6 +34,7 @@ class TerminalWindowCard extends StatefulWidget {
   final String label;
   final bool isActive;
   final bool showHHKB;
+  final bool hardwareKeyboardOnly;
   final bool isDragTarget;
   final TerminalStyle? terminalStyle;
   final bool showActiveShadow;
@@ -72,113 +74,94 @@ class _TerminalWindowCardState extends State<TerminalWindowCard>
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    final borderColor = widget.isActive ? AppColors.border : Colors.transparent;
+    final headerColor = widget.isActive ? AppColors.background : AppColors.surface;
     return GestureDetector(
       onTapDown: (_) => widget.onTap?.call(),
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.easeInOut,
+        duration: AppDurations.normal,
         decoration: BoxDecoration(
-          color: const Color(0xFF0A0E14),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(
-            color: widget.isActive
-                ? const Color(0xFF9AA0A6).withValues(alpha: 0.6)
-                : Colors.white.withValues(alpha: 0.05),
-            width: widget.isActive ? 1.5 : 1.0,
-          ),
-          boxShadow: [
-            if (widget.isActive && widget.showActiveShadow)
-              BoxShadow(
-                color: const Color(0xFF9AA0A6).withValues(alpha: 0.1),
-                blurRadius: 10,
-                spreadRadius: 0,
-              ),
-          ],
+          color: AppColors.surfaceVariant,
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          border: Border.all(color: borderColor, width: 1),
         ),
         child: Stack(
           children: [
             Column(
               children: [
                 Container(
-                  height: 28,
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  height: 32,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
                   decoration: BoxDecoration(
-                    color: widget.isActive
-                        ? const Color(0xFF2D2E30).withValues(alpha: 0.4)
-                        : const Color(0xFF111620).withValues(alpha: 0.2),
+                    color: headerColor,
                     borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(9),
-                      topRight: Radius.circular(9),
+                      topLeft: Radius.circular(12),
+                      topRight: Radius.circular(12),
                     ),
                   ),
                   child: Row(
                     children: [
-                      if (widget.showStatusDot) ...[
-                        StatusDot(connected: widget.isActive, size: 6),
-                        const SizedBox(width: 8),
-                      ],
                       Expanded(
                         child: Text(
                           widget.label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           style: TextStyle(
-                            color: widget.isActive
-                                ? Colors.white
-                                : Colors.white38,
-                            fontSize: 9,
-                            fontWeight: widget.isActive
-                                ? FontWeight.bold
-                                : FontWeight.normal,
-                            letterSpacing: 0.5,
+                            color:
+                                widget.isActive
+                                    ? AppColors.textPrimary
+                                    : AppColors.textSecondary,
+                            fontSize: 11,
+                            fontWeight:
+                                widget.isActive
+                                    ? FontWeight.w600
+                                    : FontWeight.w500,
                           ),
                         ),
                       ),
-                      if (widget.isActive &&
-                          (widget.showActiveChevron || widget.showCloseButton))
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            if (widget.showActiveChevron) ...[
-                              const Icon(
-                                Icons.keyboard_arrow_right,
-                                size: 12,
-                                color: Color(0xFF9AA0A6),
-                              ),
-                              const SizedBox(width: 8),
-                            ],
-                            if (widget.showCloseButton && widget.onClose != null)
-                              GestureDetector(
-                                onTap: widget.onClose,
-                                child: Icon(
-                                  Icons.close_rounded,
-                                  size: 14,
-                                  color: Colors.white.withValues(alpha: 0.3),
-                                ),
-                              ),
-                          ],
+                      if (widget.onClose != null) ...[
+                        const SizedBox(width: 6),
+                        IconButton(
+                          onPressed: widget.onClose,
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints.tightFor(
+                            width: 24,
+                            height: 24,
+                          ),
+                          splashRadius: 12,
+                          icon: const Icon(
+                            Icons.close_rounded,
+                            size: 14,
+                            color: AppColors.textMuted,
+                          ),
                         ),
+                      ],
                     ],
                   ),
                 ),
                 Expanded(
                   child: ClipRRect(
                     borderRadius: const BorderRadius.only(
-                      bottomLeft: Radius.circular(9),
-                      bottomRight: Radius.circular(9),
+                      bottomLeft: Radius.circular(AppRadius.md),
+                      bottomRight: Radius.circular(AppRadius.md),
                     ),
                     child: TerminalView(
                       widget.terminal,
                       key: widget.viewKey,
                       controller: widget.controller,
                       scrollController: widget.scrollController,
+                      theme: kTerminalThemeLight,
                       autoResize: true,
                       autofocus: false,
                       deleteDetection: true,
+                      hardwareKeyboardOnly: widget.hardwareKeyboardOnly,
                       readOnly: widget.showHHKB,
-                      keyboardType: widget.showHHKB
-                          ? TextInputType.none
-                          : TextInputType.text,
+                      keyboardType:
+                          widget.showHHKB
+                              ? TextInputType.none
+                              : TextInputType.text,
                       backgroundOpacity: 1.0,
-                      padding: const EdgeInsets.all(8),
+                      padding: const EdgeInsets.all(10),
                       textStyle:
                           widget.terminalStyle ??
                           buildTerminalStyle(fontSize: 12),
@@ -191,8 +174,8 @@ class _TerminalWindowCardState extends State<TerminalWindowCard>
               Positioned.fill(
                 child: Container(
                   decoration: BoxDecoration(
-                    color: const Color(0xFF9AA0A6).withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(10),
+                    color: AppColors.accent.withValues(alpha: AppOpacity.light),
+                    borderRadius: BorderRadius.circular(AppRadius.lg),
                   ),
                 ),
               ),

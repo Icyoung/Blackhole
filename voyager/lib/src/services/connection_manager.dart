@@ -5,9 +5,257 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import 'remote_log_service.dart';
 import 'transport_models.dart';
 import 'transport_orchestrator.dart';
 import 'transport_telemetry.dart';
+
+/// Horizon's WireGuard endpoint info received via Wormhole signaling.
+class DirectCandidate {
+  const DirectCandidate({
+    required this.addr,
+    required this.port,
+    required this.scope,
+    required this.priority,
+    required this.source,
+  });
+
+  final String addr;
+  final int port;
+  final String scope;
+  final int priority;
+  final String source;
+
+  factory DirectCandidate.fromMap(Map<String, dynamic> map) {
+    return DirectCandidate(
+      addr: map['addr'] as String? ?? '',
+      port: (map['port'] as num?)?.toInt() ?? 0,
+      scope: map['scope'] as String? ?? 'unknown',
+      priority: (map['priority'] as num?)?.toInt() ?? 0,
+      source: map['source'] as String? ?? 'unknown',
+    );
+  }
+
+  Map<String, dynamic> toMap() => {
+    'addr': addr,
+    'port': port,
+    'scope': scope,
+    'priority': priority,
+    'source': source,
+  };
+}
+
+class EndpointInfo {
+  const EndpointInfo({
+    this.wgPublicKey,
+    this.wgUdpPort,
+    this.netcheckHost,
+    this.netcheckPort,
+    this.horizonAddr,
+    this.horizonPort,
+    this.clientIp,
+    this.serverIp,
+    this.subnet,
+    this.dns,
+    this.lanPort,
+    this.internalRoutes,
+    this.mtu,
+    this.punchEpoch,
+    this.horizonCandidates,
+    this.voyagerCandidates,
+    this.observedEndpoints,
+    this.natMappingBehavior,
+    this.hairpinLikely,
+    this.directReachabilityScore,
+  });
+
+  final String? wgPublicKey;
+  final int? wgUdpPort;
+  final String? netcheckHost;
+  final int? netcheckPort;
+  final String? horizonAddr;
+  final int? horizonPort;
+  final String? clientIp;
+  final String? serverIp;
+  final String? subnet;
+  final List<String>? dns;
+  final int? lanPort;
+  final List<String>? internalRoutes;
+  final int? mtu;
+  final int? punchEpoch;
+  final List<DirectCandidate>? horizonCandidates;
+  final List<DirectCandidate>? voyagerCandidates;
+  final List<DirectCandidate>? observedEndpoints;
+  final String? natMappingBehavior;
+  final bool? hairpinLikely;
+  final int? directReachabilityScore;
+
+  EndpointInfo mergeWith(EndpointInfo? previous) {
+    if (previous == null) {
+      return this;
+    }
+    final (mergedNetcheckHost, mergedNetcheckPort) = _mergeNetcheckEndpoint(
+      previousHost: previous.netcheckHost,
+      previousPort: previous.netcheckPort,
+      currentHost: netcheckHost,
+      currentPort: netcheckPort,
+    );
+    return EndpointInfo(
+      wgPublicKey: wgPublicKey ?? previous.wgPublicKey,
+      wgUdpPort: wgUdpPort ?? previous.wgUdpPort,
+      netcheckHost: mergedNetcheckHost,
+      netcheckPort: mergedNetcheckPort,
+      horizonAddr: horizonAddr ?? previous.horizonAddr,
+      horizonPort: horizonPort ?? previous.horizonPort,
+      clientIp: clientIp ?? previous.clientIp,
+      serverIp: serverIp ?? previous.serverIp,
+      subnet: subnet ?? previous.subnet,
+      dns: dns ?? previous.dns,
+      lanPort: lanPort ?? previous.lanPort,
+      internalRoutes: internalRoutes ?? previous.internalRoutes,
+      mtu: mtu ?? previous.mtu,
+      punchEpoch: punchEpoch ?? previous.punchEpoch,
+      horizonCandidates: _mergeDirectCandidateLists(
+        previous.horizonCandidates,
+        horizonCandidates,
+      ),
+      voyagerCandidates: _mergeDirectCandidateLists(
+        previous.voyagerCandidates,
+        voyagerCandidates,
+      ),
+      observedEndpoints: _mergeDirectCandidateLists(
+        previous.observedEndpoints,
+        observedEndpoints,
+      ),
+      natMappingBehavior: natMappingBehavior ?? previous.natMappingBehavior,
+      hairpinLikely: hairpinLikely ?? previous.hairpinLikely,
+      directReachabilityScore:
+          directReachabilityScore ?? previous.directReachabilityScore,
+    );
+  }
+
+  factory EndpointInfo.fromMap(Map<String, dynamic> map) {
+    List<DirectCandidate>? parseCandidates(String key) {
+      final raw = map[key];
+      if (raw is! List) {
+        return null;
+      }
+      final candidates =
+          raw
+              .whereType<Map>()
+              .map(
+                (entry) =>
+                    DirectCandidate.fromMap(Map<String, dynamic>.from(entry)),
+              )
+              .where(
+                (candidate) => candidate.addr.isNotEmpty && candidate.port > 0,
+              )
+              .toList();
+      return candidates.isEmpty ? null : candidates;
+    }
+
+    return EndpointInfo(
+      wgPublicKey: map['wgPublicKey'] as String?,
+      wgUdpPort: (map['wgUdpPort'] as num?)?.toInt(),
+      netcheckHost: map['netcheckHost'] as String?,
+      netcheckPort: (map['netcheckPort'] as num?)?.toInt(),
+      horizonAddr: map['horizonAddr'] as String?,
+      horizonPort: (map['horizonPort'] as num?)?.toInt(),
+      clientIp: map['clientIp'] as String?,
+      serverIp: map['serverIp'] as String?,
+      subnet: map['subnet'] as String?,
+      dns: (map['dns'] as List<dynamic>?)?.map((e) => e as String).toList(),
+      lanPort: (map['lanPort'] as num?)?.toInt(),
+      internalRoutes:
+          (map['internalRoutes'] as List<dynamic>?)
+              ?.map((e) => e as String)
+              .toList(),
+      mtu: (map['mtu'] as num?)?.toInt(),
+      punchEpoch: (map['punchEpoch'] as num?)?.toInt(),
+      horizonCandidates: parseCandidates('horizonCandidates'),
+      voyagerCandidates: parseCandidates('voyagerCandidates'),
+      observedEndpoints: parseCandidates('observedEndpoints'),
+      natMappingBehavior: map['natMappingBehavior'] as String?,
+      hairpinLikely: map['hairpinLikely'] as bool?,
+      directReachabilityScore:
+          (map['directReachabilityScore'] as num?)?.toInt(),
+    );
+  }
+}
+
+(String?, int?) _mergeNetcheckEndpoint({
+  required String? previousHost,
+  required int? previousPort,
+  required String? currentHost,
+  required int? currentPort,
+}) {
+  final normalizedPreviousHost = previousHost?.trim();
+  final normalizedCurrentHost = currentHost?.trim();
+  final previousValid =
+      normalizedPreviousHost != null &&
+      normalizedPreviousHost.isNotEmpty &&
+      previousPort != null &&
+      previousPort > 0;
+  final currentValid =
+      normalizedCurrentHost != null &&
+      normalizedCurrentHost.isNotEmpty &&
+      currentPort != null &&
+      currentPort > 0;
+
+  if (!previousValid) {
+    return (normalizedCurrentHost, currentPort);
+  }
+  if (!currentValid) {
+    return (normalizedPreviousHost, previousPort);
+  }
+  if (normalizedPreviousHost == normalizedCurrentHost) {
+    return (normalizedCurrentHost, currentPort);
+  }
+  if (_looksLikeIpLiteral(normalizedPreviousHost) &&
+      !_looksLikeIpLiteral(normalizedCurrentHost)) {
+    return (normalizedPreviousHost, previousPort);
+  }
+  return (normalizedCurrentHost, currentPort);
+}
+
+List<DirectCandidate>? _mergeDirectCandidateLists(
+  List<DirectCandidate>? previous,
+  List<DirectCandidate>? current,
+) {
+  if (previous == null || previous.isEmpty) {
+    return current;
+  }
+  if (current == null || current.isEmpty) {
+    return previous;
+  }
+
+  final merged = <String, DirectCandidate>{};
+
+  void putAll(List<DirectCandidate> candidates) {
+    for (final candidate in candidates) {
+      final key = '${candidate.addr}:${candidate.port}/${candidate.scope}';
+      merged[key] = candidate;
+    }
+  }
+
+  putAll(previous);
+  putAll(current);
+
+  final result =
+      merged.values.toList()..sort((a, b) => b.priority.compareTo(a.priority));
+  return result;
+}
+
+bool _looksLikeIpLiteral(String host) {
+  final ipv4 = RegExp(r'^\d{1,3}(?:\.\d{1,3}){3}$');
+  if (ipv4.hasMatch(host)) {
+    return true;
+  }
+  if (host.contains(':')) {
+    return true;
+  }
+  return false;
+}
 
 enum _BinaryType {
   stdin(1),
@@ -47,6 +295,8 @@ class ConnectionManager {
     required this.onSessionClosed,
     required this.onStdout,
     this.onSessionSync,
+    this.onEndpointInfo,
+    this.onVpnConfig,
   });
 
   final void Function({required bool waitForPairing}) onConnected;
@@ -68,6 +318,15 @@ class ConnectionManager {
   final void Function(String sessionId) onSessionClosed;
   final void Function(String sessionId, Uint8List data) onStdout;
   final void Function(String sessionId, String content)? onSessionSync;
+
+  /// Called when Wormhole provides Horizon's WireGuard endpoint info.
+  final void Function(EndpointInfo info)? onEndpointInfo;
+
+  /// Called when Horizon sends a vpn_config response after peer registration.
+  final void Function(EndpointInfo info)? onVpnConfig;
+
+  EndpointInfo? _endpointInfo;
+  EndpointInfo? get endpointInfo => _endpointInfo;
 
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
@@ -95,6 +354,7 @@ class ConnectionManager {
 
   bool get connected => _connected;
   bool get pairingPending => _pairingPending;
+  bool get shouldReconnect => _shouldReconnect;
   TransportKind get activeTransportKind => _activeTransportKind;
   String? get activeTransportId => _activeTransportId;
   String? get activePathId => _activePathId;
@@ -109,41 +369,101 @@ class ConnectionManager {
     TransportKind transportKind = TransportKind.unknown,
     String? transportId,
     String? pathId,
+    Duration readyTimeout = const Duration(seconds: 8),
+    bool handoffExisting = false,
   }) async {
+    final keepExisting =
+        handoffExisting &&
+        _channel != null &&
+        _subscription != null &&
+        _connected;
+    final previousChannel = keepExisting ? _channel : null;
+    final previousSubscription = keepExisting ? _subscription : null;
+    final previousTransportKind = _activeTransportKind;
+    final previousTransportId = _activeTransportId;
+    final previousPathId = _activePathId;
+
     _shouldReconnect = true;
     _autoReconnect = autoReconnect;
     // Auto-append /ws if not present (LAN mode).
     uri = _ensureWsPath(uri);
-    _lastUri = uri;
-    _lastWaitForPairing = waitForPairing;
-    _activeTransportKind = transportKind;
-    _activeTransportId = transportId;
-    _activePathId = pathId ?? transportId;
-    _activeSwitchReason = null;
-    _activeFallbackReason = null;
-    _activeProbeRttMs = null;
-    _resetConnectionState();
+    if (!keepExisting) {
+      _lastUri = uri;
+      _lastWaitForPairing = waitForPairing;
+      _activeTransportKind = transportKind;
+      _activeTransportId = transportId;
+      _activePathId = pathId ?? transportId;
+      _activeSwitchReason = null;
+      _activeFallbackReason = null;
+      _activeProbeRttMs = null;
+      _resetConnectionState();
+    }
+    debugPrint(
+      '[Connection] connect uri=$uri kind=${transportKind.wireName} '
+      'transportId=${transportId ?? "-"} waitForPairing=$waitForPairing '
+      'handoff=$keepExisting',
+    );
 
     try {
       final channel = WebSocketChannel.connect(uri);
-      _channel = channel;
-      _subscription = channel.stream.listen(
-        _handleMessage,
-        onDone: _handleConnectionClosed,
-        onError: (error) {
-          onError('WebSocket error: $error');
-          _handleConnectionClosed();
-        },
-      );
       try {
-        await channel.ready;
+        await channel.ready.timeout(readyTimeout);
       } catch (error) {
+        debugPrint('[Connection] ready failed uri=$uri error=$error');
+        channel.sink.close();
+        if (keepExisting) {
+          onError('Failed to switch transport: $error');
+          return;
+        }
+        _channel = null;
         onError('Failed to connect: $error');
         _setConnected(false);
         _setPairingPending(false);
         _scheduleReconnect();
         return;
       }
+
+      // Close previous connection BEFORE listening on new one to prevent
+      // duplicate message delivery during handoff.
+      if (keepExisting) {
+        _telemetry.emit(
+          event: 'connection_closed',
+          kind: previousTransportKind,
+          transportId: previousTransportId,
+          pathId: previousPathId,
+          connected: false,
+          extra: {'reason': 'transport_switch'},
+        );
+        previousSubscription?.cancel();
+        previousChannel?.sink.close();
+      }
+
+      final subscription = channel.stream.listen(
+        _handleMessage,
+        onDone: () => _handleConnectionClosedFor(channel),
+        onError: (error) {
+          if (!identical(_channel, channel)) {
+            return;
+          }
+          onError('WebSocket error: $error');
+          _handleConnectionClosedFor(channel);
+        },
+        cancelOnError: false,
+      );
+
+      _channel = channel;
+      _subscription = subscription;
+      _lastUri = uri;
+      _lastWaitForPairing = waitForPairing;
+      _activeTransportKind = transportKind;
+      _activeTransportId = transportId;
+      _activePathId = pathId ?? transportId;
+      _activeSwitchReason = null;
+      _activeFallbackReason = null;
+      _activeProbeRttMs = null;
+      debugPrint('[Connection] connected uri=$uri');
+      RemoteLogService.instance.start();
+      RemoteLogService.instance.attach(channel);
       _setConnected(true);
       _setPairingPending(waitForPairing);
       _lastMessageAt = DateTime.now();
@@ -158,6 +478,11 @@ class ConnectionManager {
       onConnected(waitForPairing: waitForPairing);
       _startHeartbeat();
     } catch (error) {
+      debugPrint('[Connection] connect threw uri=$uri error=$error');
+      if (keepExisting) {
+        onError('Failed to switch transport: $error');
+        return;
+      }
       onError('Failed to connect: $error');
       _telemetry.emit(
         event: 'connection_closed',
@@ -238,7 +563,7 @@ class ConnectionManager {
     }
   }
 
-  void disconnect({bool shouldReconnect = false}) {
+  void disconnect({bool shouldReconnect = false, bool silent = false}) {
     if (_connected) {
       _telemetry.emit(
         event: 'connection_closed',
@@ -246,11 +571,19 @@ class ConnectionManager {
         transportId: _activeTransportId,
         pathId: _activePathId,
         connected: false,
-        extra: {'reason': 'manual_disconnect'},
+        extra: {'reason': silent ? 'transport_switch' : 'manual_disconnect'},
       );
     }
     _shouldReconnect = shouldReconnect;
-    _resetConnectionState();
+    _resetConnectionState(silent: silent);
+  }
+
+  /// Update the cached reconnect URI, e.g. after receiving an assigned
+  /// device key from a pairing response.  Without this, automatic reconnects
+  /// reuse the original URI which may lack the device_key parameter, causing
+  /// Horizon to treat the device as new and show the pairing dialog again.
+  void updateReconnectUri(Uri uri) {
+    _lastUri = _ensureWsPath(uri);
   }
 
   void updateAutoReconnect(bool enabled) {
@@ -352,6 +685,44 @@ class ConnectionManager {
     channel.sink.add(_encodeMessage({'type': 'ping'}));
   }
 
+  /// Request Horizon's WireGuard endpoint info from Wormhole.
+  void sendEndpointRequest({
+    String? wgPublicKey,
+    int? wgUdpPort,
+    String? deviceKey,
+    List<DirectCandidate> voyagerCandidates = const <DirectCandidate>[],
+  }) {
+    sendCommand({
+      'type': 'endpoint_probe_request',
+      if (wgPublicKey != null) 'wgPublicKey': wgPublicKey,
+      if (wgUdpPort != null) 'wgUdpPort': wgUdpPort,
+      if (deviceKey != null) 'deviceKey': deviceKey,
+      if (voyagerCandidates.isNotEmpty)
+        'voyagerCandidates':
+            voyagerCandidates.map((candidate) => candidate.toMap()).toList(),
+      'supportsCandidateSet': true,
+    });
+  }
+
+  /// Send our WireGuard public key to Horizon for peer registration.
+  void sendPeerEndpoint(
+    String wgPublicKey, {
+    String? deviceKey,
+    int? wgUdpPort,
+    List<DirectCandidate> voyagerCandidates = const <DirectCandidate>[],
+  }) {
+    sendCommand({
+      'type': 'direct_candidates_update',
+      'wgPublicKey': wgPublicKey,
+      if (deviceKey != null) 'deviceKey': deviceKey,
+      if (wgUdpPort != null) 'wgUdpPort': wgUdpPort,
+      if (voyagerCandidates.isNotEmpty)
+        'voyagerCandidates':
+            voyagerCandidates.map((candidate) => candidate.toMap()).toList(),
+      'supportsCandidateSet': true,
+    });
+  }
+
   Future<TransportProbeResult> _probeCandidate(
     TransportCandidate candidate,
   ) async {
@@ -411,10 +782,11 @@ class ConnectionManager {
     }
   }
 
-  void _handleConnectionClosed() {
-    if (!_connected) {
+  void _handleConnectionClosedFor(WebSocketChannel channel) {
+    if (!identical(_channel, channel) || !_connected) {
       return;
     }
+    RemoteLogService.instance.detach();
     _telemetry.emit(
       event: 'connection_closed',
       kind: _activeTransportKind,
@@ -454,7 +826,7 @@ class ConnectionManager {
     _reconnectDelaySeconds = (_reconnectDelaySeconds * 2).clamp(2, 10);
   }
 
-  void _resetConnectionState() {
+  void _resetConnectionState({bool silent = false}) {
     _subscription?.cancel();
     _subscription = null;
     _channel?.sink.close();
@@ -462,7 +834,9 @@ class ConnectionManager {
     _stopHeartbeat();
     _setConnected(false);
     _setPairingPending(false);
-    onDisconnected();
+    if (!silent) {
+      onDisconnected();
+    }
   }
 
   void _setConnected(bool value) {
@@ -550,6 +924,16 @@ class ConnectionManager {
       }
       return;
     }
+    if (type == 'endpoint_info' || type == 'endpoint_probe_response') {
+      _endpointInfo = EndpointInfo.fromMap(decoded);
+      onEndpointInfo?.call(_endpointInfo!);
+      return;
+    }
+    if (type == 'vpn_config') {
+      _endpointInfo = EndpointInfo.fromMap(decoded);
+      onVpnConfig?.call(_endpointInfo!);
+      return;
+    }
     if (type == 'pairing_result') {
       final approved = decoded['approved'] as bool? ?? false;
       final assignedKey = decoded['assignedKey'] as String?;
@@ -614,8 +998,12 @@ class ConnectionManager {
     }
   }
 
+  int _heartbeatMisses = 0;
+  static const int _maxHeartbeatMisses = 3;
+
   void _startHeartbeat() {
     _stopHeartbeat();
+    _heartbeatMisses = 0;
     _heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (!_connected) {
         return;
@@ -627,8 +1015,18 @@ class ConnectionManager {
       }
       final silence = DateTime.now().difference(last);
       if (silence > const Duration(seconds: 20)) {
-        onError('Heartbeat timeout: no data for ${silence.inSeconds}s');
-        disconnect(shouldReconnect: true);
+        _heartbeatMisses++;
+        debugPrint(
+          '[Connection] heartbeat miss $_heartbeatMisses/$_maxHeartbeatMisses '
+          '(silent ${silence.inSeconds}s)',
+        );
+        if (_heartbeatMisses >= _maxHeartbeatMisses) {
+          debugPrint('[Connection] heartbeat exceeded max misses, reconnecting silently');
+          _heartbeatMisses = 0;
+          disconnect(shouldReconnect: true);
+        }
+      } else {
+        _heartbeatMisses = 0;
       }
     });
   }

@@ -1,0 +1,46 @@
+{
+  "" : {
+    "const-values" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/RunnerTests-primary.swiftconstvalues",
+    "dependencies" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/RunnerTests-primary.d",
+    "diagnostics" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/RunnerTests-primary.dia",
+    "emit-module-dependencies" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/RunnerTests-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/RunnerTests-primary-emit-module.dia",
+    "pch" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/RunnerTests-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/RunnerTests-primary.swiftdeps"
+  },
+  "/Users/icy/Code/Blackhole/voyager/ios/RunnerTests/DirectCandidatePlannerTests.swift" : {
+    "index-unit-output-path" : "/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/DirectCandidatePlannerTests.o",
+    "llvm-bc" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/DirectCandidatePlannerTests.bc",
+    "object" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/DirectCandidatePlannerTests.o"
+  },
+  "/Users/icy/Code/Blackhole/voyager/ios/RunnerTests/DirectDatapathCoordinatorTests.swift" : {
+    "index-unit-output-path" : "/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/DirectDatapathCoordinatorTests.o",
+    "llvm-bc" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/DirectDatapathCoordinatorTests.bc",
+    "object" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/DirectDatapathCoordinatorTests.o"
+  },
+  "/Users/icy/Code/Blackhole/voyager/ios/RunnerTests/RunnerTests.swift" : {
+    "index-unit-output-path" : "/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/RunnerTests.o",
+    "llvm-bc" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/RunnerTests.bc",
+    "object" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/RunnerTests.o"
+  },
+  "/Users/icy/Code/Blackhole/voyager/ios/RunnerTests/TunnelRuntimeCoordinatorTests.swift" : {
+    "index-unit-output-path" : "/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/TunnelRuntimeCoordinatorTests.o",
+    "llvm-bc" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/TunnelRuntimeCoordinatorTests.bc",
+    "object" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/TunnelRuntimeCoordinatorTests.o"
+  },
+  "/Users/icy/Code/Blackhole/voyager/ios/VoyagerTunnel/DirectCandidatePlanner.swift" : {
+    "index-unit-output-path" : "/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/DirectCandidatePlanner.o",
+    "llvm-bc" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/DirectCandidatePlanner.bc",
+    "object" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/DirectCandidatePlanner.o"
+  },
+  "/Users/icy/Code/Blackhole/voyager/ios/VoyagerTunnel/DirectDatapathCoordinator.swift" : {
+    "index-unit-output-path" : "/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/DirectDatapathCoordinator.o",
+    "llvm-bc" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/DirectDatapathCoordinator.bc",
+    "object" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/DirectDatapathCoordinator.o"
+  },
+  "/Users/icy/Code/Blackhole/voyager/ios/VoyagerTunnel/TunnelRuntimeCoordinator.swift" : {
+    "index-unit-output-path" : "/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/TunnelRuntimeCoordinator.o",
+    "llvm-bc" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/TunnelRuntimeCoordinator.bc",
+    "object" : "/Users/icy/Code/Blackhole/voyager/ios/build/Runner.build/Release-iphonesimulator/RunnerTests.build/Objects-normal/arm64/TunnelRuntimeCoordinator.o"
+  }
+}

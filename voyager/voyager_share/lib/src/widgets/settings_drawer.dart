@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'design_tokens.dart';
 
 class SettingsDrawer extends StatelessWidget {
   const SettingsDrawer({
@@ -7,6 +8,7 @@ class SettingsDrawer extends StatelessWidget {
     required this.autoReconnect,
     required this.multiWindow,
     required this.showKeyboardTools,
+    required this.showCommandInput,
     required this.showHHKB,
     required this.urlController,
     required this.wormholeController,
@@ -16,6 +18,7 @@ class SettingsDrawer extends StatelessWidget {
     required this.onAutoReconnectChanged,
     required this.onMultiWindowChanged,
     required this.onShowKeyboardToolsChanged,
+    required this.onShowCommandInputChanged,
     required this.onShowHHKBChanged,
   });
 
@@ -23,6 +26,7 @@ class SettingsDrawer extends StatelessWidget {
   final bool autoReconnect;
   final bool multiWindow;
   final bool showKeyboardTools;
+  final bool showCommandInput;
   final bool showHHKB;
   final TextEditingController urlController;
   final TextEditingController wormholeController;
@@ -32,23 +36,24 @@ class SettingsDrawer extends StatelessWidget {
   final ValueChanged<bool> onAutoReconnectChanged;
   final ValueChanged<bool> onMultiWindowChanged;
   final ValueChanged<bool> onShowKeyboardToolsChanged;
+  final ValueChanged<bool> onShowCommandInputChanged;
   final ValueChanged<bool> onShowHHKBChanged;
 
   @override
   Widget build(BuildContext context) {
-    final fieldFill = Colors.white.withValues(alpha: 0.05);
-    final fieldBorder = Colors.white.withValues(alpha: 0.1);
+    const fieldFill = AppColors.borderSubtle;
+    const fieldBorder = AppColors.border;
     final titleStyle = Theme.of(context)
         .textTheme
         .titleMedium
-        ?.copyWith(color: Colors.white, fontSize: 18);
+        ?.copyWith(color: AppColors.textPrimary, fontSize: 18);
 
     return Drawer(
-      backgroundColor: const Color(0xFF0F141B),
-      shape: const RoundedRectangleBorder(
+      backgroundColor: AppColors.background,
+      shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.only(
-          topLeft: Radius.circular(20),
-          bottomLeft: Radius.circular(20),
+          topLeft: Radius.circular(AppRadius.lg + 4),
+          bottomLeft: Radius.circular(AppRadius.lg + 4),
         ),
       ),
       child: SafeArea(
@@ -57,7 +62,7 @@ class SettingsDrawer extends StatelessWidget {
           children: [
             Row(
               children: [
-                const Icon(Icons.settings_outlined, color: Color(0xFF9AA0A6)),
+                const Icon(Icons.settings_outlined, color: AppColors.accent),
                 const SizedBox(width: 12),
                 Text(
                   'VOYAGER SETTINGS',
@@ -78,7 +83,7 @@ class SettingsDrawer extends StatelessWidget {
                 fieldFill,
                 fieldBorder,
               ),
-              style: const TextStyle(color: Colors.white, fontSize: 14),
+              style: const TextStyle(color: AppColors.textPrimary, fontSize: 14),
             ),
             const SizedBox(height: 24),
             _buildDrawerSection('Modes & Behavior'),
@@ -108,6 +113,12 @@ class SettingsDrawer extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             _buildDrawerSwitch(
+              'Command Input',
+              showCommandInput,
+              onShowCommandInputChanged,
+            ),
+            const SizedBox(height: 6),
+            _buildDrawerSwitch(
               'HHKB Keyboard',
               showHHKB,
               onShowHHKBChanged,
@@ -126,7 +137,7 @@ class SettingsDrawer extends StatelessWidget {
                   hint: '6-digit code',
                 ),
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: AppColors.textPrimary,
                   letterSpacing: 4,
                   fontWeight: FontWeight.bold,
                 ),
@@ -139,15 +150,15 @@ class SettingsDrawer extends StatelessWidget {
                   fieldFill,
                   fieldBorder,
                 ),
-                style: const TextStyle(color: Colors.white, fontSize: 14),
+                style: const TextStyle(color: AppColors.textPrimary, fontSize: 14),
               ),
             ],
             const SizedBox(height: 40),
             Text(
               'Blackhole Voyager v1.0.0',
               textAlign: TextAlign.center,
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.2),
+              style: const TextStyle(
+                color: AppColors.textHint,
                 fontSize: 11,
               ),
             ),
@@ -161,7 +172,7 @@ class SettingsDrawer extends StatelessWidget {
     return Text(
       title.toUpperCase(),
       style: const TextStyle(
-        color: Color(0xFF9AA0A6),
+        color: AppColors.textTertiary,
         fontSize: 11,
         fontWeight: FontWeight.bold,
         letterSpacing: 0.5,
@@ -181,7 +192,7 @@ class SettingsDrawer extends StatelessWidget {
           Expanded(
             child: Text(
               label,
-              style: const TextStyle(color: Colors.white, fontSize: 14),
+              style: const TextStyle(color: AppColors.textPrimary, fontSize: 14),
             ),
           ),
           Switch(
@@ -202,23 +213,23 @@ class SettingsDrawer extends StatelessWidget {
     return InputDecoration(
       labelText: label,
       hintText: hint,
-      hintStyle: const TextStyle(color: Colors.white24, fontSize: 13),
+      hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
       filled: true,
       fillColor: fill,
       isDense: true,
-      labelStyle: const TextStyle(color: Color(0xFF9AA6B2), fontSize: 13),
+      labelStyle: const TextStyle(color: AppColors.textTertiary, fontSize: 13),
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(AppRadius.sm + 2),
         borderSide: BorderSide(color: border),
       ),
       enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(AppRadius.sm + 2),
         borderSide: BorderSide(color: border),
       ),
       focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(10),
-        borderSide: const BorderSide(color: Color(0xFF9AA0A6), width: 1.5),
+        borderRadius: BorderRadius.circular(AppRadius.sm + 2),
+        borderSide: const BorderSide(color: AppColors.accent, width: 1.5),
       ),
     );
   }

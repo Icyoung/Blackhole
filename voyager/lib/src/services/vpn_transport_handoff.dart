@@ -39,6 +39,7 @@ class VpnTunnelSnapshot {
     this.tunPacketsIn,
     this.udpPacketsIn,
     this.wgRxBytes,
+    this.directSessionReady,
     this.error,
   });
 
@@ -51,6 +52,7 @@ class VpnTunnelSnapshot {
   final int? tunPacketsIn;
   final int? udpPacketsIn;
   final int? wgRxBytes;
+  final bool? directSessionReady;
   final String? error;
 
   factory VpnTunnelSnapshot.fromJson(Map<String, dynamic> map) {
@@ -319,6 +321,41 @@ class VpnTransportHandoffCoordinator {
       }
     }
 
+    // Re-arm: a prior switch decision was consumed but the transport never
+    // actually changed (e.g., VPN briefly errored and recovered within the
+    // grace window). Retry after a cooldown to avoid rapid-fire.
+    if (snapshot.isConnected &&
+        _wasVpnConnected &&
+        !_pendingSwitch &&
+        endpoint != null &&
+        primaryConnectionConnected &&
+        !_isVpnTransport(activeTransportKind) &&
+        _needsTransportSwitch(
+          activeTransportKind: activeTransportKind,
+          desiredTransportKind: desiredTransportKind,
+        )) {
+      final lastSwitchAt = _lastTransportSwitchAt;
+      final cooldownElapsed = lastSwitchAt == null ||
+          timestamp.difference(lastSwitchAt) >= _fallbackSuppressionWindow;
+      if (cooldownElapsed) {
+        final readyForSwitch = _isReadyForTransportSwitch(
+          mode: snapshot.mode,
+          connectedAt: _connectedAt,
+          now: timestamp,
+          snapshot: snapshot,
+        );
+        _readyForTransportSwitch = readyForSwitch;
+        if (readyForSwitch) {
+          _lastTransportSwitchAt = timestamp;
+          return VpnTransportDecision.switchTransport(
+            endpoint: endpoint,
+            transportKind: desiredTransportKind,
+            reason: 'vpn_rearm_after_stale_switch',
+          );
+        }
+      }
+    }
+
     if (!snapshot.isConnected && _wasVpnConnected) {
       _disconnectObservedAt ??= timestamp;
       final disconnectedFor = timestamp.difference(_disconnectObservedAt!);
@@ -382,7 +419,12 @@ class VpnTransportHandoffCoordinator {
     final hasInboundUdp = (snapshot.udpPacketsIn ?? 0) > 0;
     final hasTunnelTraffic = (snapshot.tunPacketsIn ?? 0) > 0;
     final hasWireGuardRx = (snapshot.wgRxBytes ?? 0) > 0;
-    return hasInboundUdp && (hasTunnelTraffic || hasWireGuardRx);
+    // Primary gate: inbound UDP proves the WG handshake completed and the
+    // peer can reach us. Tunnel/WG data counters are a bonus signal but not
+    // required — Horizon's TUN routing may not produce data packets before
+    // the transport switch.
+    final nativeReady = snapshot.directSessionReady ?? false;
+    return hasInboundUdp && (hasTunnelTraffic || hasWireGuardRx || nativeReady);
   }
 
   bool _isReadyForTransportSwitch({
