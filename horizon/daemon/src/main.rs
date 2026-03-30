@@ -1376,26 +1376,28 @@ async fn list_session_ids(state: &Arc<AppState>) -> Vec<String> {
 }
 
 async fn create_session(state: &Arc<AppState>) -> std::io::Result<String> {
-    create_session_with_command(state, None, None).await
+    create_session_with_command(state, None, None, None).await
 }
 
 async fn create_session_in_group(
     state: &Arc<AppState>,
     group_id: Option<&str>,
 ) -> std::io::Result<String> {
-    create_session_with_command(state, group_id, None).await
+    create_session_with_command(state, group_id, None, None).await
 }
 
 async fn create_session_with_command(
     state: &Arc<AppState>,
     group_id: Option<&str>,
     startup_command: Option<&str>,
+    env_vars: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> std::io::Result<String> {
     let session_id = generate_session_id();
     let arc = Arc::new(spawn_pty_session(
         &session_id,
         &state.shell,
         startup_command,
+        env_vars,
     )?);
     start_output_thread(state.clone(), arc.clone());
     start_inject_socket(state, &session_id, arc.clone());
@@ -1658,8 +1660,9 @@ async fn handle_inject_request(
             if !data.is_empty() {
                 write_all_pty(session.master_fd, &data)
                     .map_err(|_| host_err("internal_error", "write to pty failed"))?;
+                let submit_delay_ms = compute_injected_submit_delay_ms(command);
                 tokio::time::sleep(std::time::Duration::from_millis(
-                    HOST_INJECT_SUBMIT_DELAY_MS,
+                    submit_delay_ms,
                 ))
                 .await;
             }
@@ -1869,6 +1872,8 @@ async fn handle_daemon_request(
                 .and_then(|v| v.as_str())
                 .map(str::trim)
                 .filter(|v| !v.is_empty());
+            // Parse env vars from request (e.g., UFOO_SUBSCRIBER_ID, UFOO_LAUNCH_MODE)
+            let env_vars = req.get("env").and_then(|v| v.as_object());
             let resolved_group_id = if let Some(group_id) = explicit_group_id {
                 Some(group_id.to_string())
             } else if let Some(session_id) = source_session_id {
@@ -1877,7 +1882,7 @@ async fn handle_daemon_request(
                 None
             };
             let session_id =
-                create_session_with_command(state, resolved_group_id.as_deref(), startup_command)
+                create_session_with_command(state, resolved_group_id.as_deref(), startup_command, env_vars)
                     .await
                     .map_err(|e| host_err("internal_error", &format!("spawn failed: {e}")))?;
             // Notify LAN + Wormhole clients so UI updates
@@ -2632,6 +2637,25 @@ fn maybe_inject_codex_startup_overrides(command: &str) -> String {
 const HOST_INJECT_SUBMIT_DELAY_MS: u64 = 180;
 
 #[cfg(unix)]
+fn compute_injected_submit_delay_ms(command: &str) -> u64 {
+    let text = command.trim_end_matches(['\r', '\n']);
+    if text.is_empty() {
+        return HOST_INJECT_SUBMIT_DELAY_MS;
+    }
+
+    let mut delay_ms = HOST_INJECT_SUBMIT_DELAY_MS;
+    if text.contains('\n') {
+        delay_ms += 250;
+    }
+    let len = text.len() as u64;
+    if len > 512 {
+        let extra_chunks = (len - 512).div_ceil(512);
+        delay_ms += (extra_chunks * 90).min(1200);
+    }
+    delay_ms.min(1800)
+}
+
+#[cfg(unix)]
 fn encode_injected_command_text(command: &str) -> Vec<u8> {
     command.as_bytes().to_vec()
 }
@@ -2694,8 +2718,10 @@ mod startup_command_tests {
 
 #[cfg(all(test, unix))]
 mod inject_command_tests {
+    use super::compute_injected_submit_delay_ms;
     use super::encode_injected_command_text;
     use super::injected_submit_bytes;
+    use super::HOST_INJECT_SUBMIT_DELAY_MS;
 
     #[test]
     fn host_inject_text_excludes_submit_terminator() {
@@ -2706,6 +2732,23 @@ mod inject_command_tests {
     #[test]
     fn host_inject_submit_uses_carriage_return() {
         assert_eq!(injected_submit_bytes(), b"\r");
+    }
+
+    #[test]
+    fn host_inject_submit_delay_scales_for_multiline_payloads() {
+        let short = compute_injected_submit_delay_ms("/ubus");
+        let multiline = compute_injected_submit_delay_ms("line1\nline2");
+        assert_eq!(short, HOST_INJECT_SUBMIT_DELAY_MS);
+        assert!(multiline > short);
+    }
+
+    #[test]
+    fn host_inject_submit_delay_scales_for_large_payloads() {
+        let small = compute_injected_submit_delay_ms(&"a".repeat(128));
+        let large = compute_injected_submit_delay_ms(&"a".repeat(2200));
+        assert_eq!(small, HOST_INJECT_SUBMIT_DELAY_MS);
+        assert!(large > small);
+        assert!(large <= 1800);
     }
 }
 
@@ -2741,6 +2784,7 @@ fn spawn_pty_session(
     session_id: &str,
     shell: &str,
     startup_command: Option<&str>,
+    env_vars: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> std::io::Result<PtySession> {
     use std::ffi::CString;
     use std::os::unix::io::FromRawFd;
@@ -2876,6 +2920,14 @@ fn spawn_pty_session(
             daemon_sock.to_string_lossy().as_ref(),
         );
     }
+    // Set additional env vars from the create_session request (e.g., UFOO_SUBSCRIBER_ID)
+    if let Some(env_map) = env_vars {
+        for (key, value) in env_map {
+            if let Some(value_str) = value.as_str() {
+                cmd.env(key, value_str);
+            }
+        }
+    }
     cmd.stdin(unsafe { Stdio::from_raw_fd(stdin_fd) });
     cmd.stdout(unsafe { Stdio::from_raw_fd(stdout_fd) });
     cmd.stderr(unsafe { Stdio::from_raw_fd(stderr_fd) });
@@ -2911,6 +2963,7 @@ fn spawn_pty_session(
     session_id: &str,
     shell: &str,
     _startup_command: Option<&str>,
+    _env_vars: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> std::io::Result<PtySession> {
     let conpty = winconpty::ConPty::spawn(shell, 24, 80)?;
     Ok(PtySession {
@@ -2926,6 +2979,7 @@ fn spawn_pty_session(
     _session_id: &str,
     _shell: &str,
     _startup_command: Option<&str>,
+    _env_vars: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> std::io::Result<PtySession> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
