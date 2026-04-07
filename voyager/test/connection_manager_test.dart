@@ -20,7 +20,7 @@ ConnectionManager createTestManager() {
       String? assignedKey,
       String? horizonPublicKey,
     }) {},
-    onSessionList: (_) {},
+    onSessionList: (_, {activeSessionId, activeGroupId}) {},
     onSessionCreated: (_) {},
     onSessionClosed: (_) {},
     onStdout: (_, __) {},
@@ -609,7 +609,7 @@ void main() {
           String? assignedKey,
           String? horizonPublicKey,
         }) {},
-        onSessionList: (_) {},
+        onSessionList: (_, {activeSessionId, activeGroupId}) {},
         onSessionCreated: (_) {},
         onSessionClosed: (_) {},
         onStdout: (_, __) {},
@@ -638,7 +638,7 @@ void main() {
           String? assignedKey,
           String? horizonPublicKey,
         }) {},
-        onSessionList: (_) {},
+        onSessionList: (_, {activeSessionId, activeGroupId}) {},
         onSessionCreated: (_) {},
         onSessionClosed: (_) {},
         onStdout: (_, __) {},
@@ -1599,7 +1599,7 @@ class CallbackTracker {
           horizonPublicKey: horizonPublicKey,
         ));
       },
-      onSessionList: (sessions) {
+      onSessionList: (sessions, {activeSessionId, activeGroupId}) {
         sessionLists.add(sessions);
       },
       onSessionCreated: (sessionId) {

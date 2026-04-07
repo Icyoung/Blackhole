@@ -20,12 +20,9 @@ const kTerminalFontFallback = <String>[
   'Noto Sans Mono CJK HK',
   'SF Pro',
   'Apple Symbols',
-  'Apple Color Emoji',
   'Segoe UI Symbol',
-  'Symbola',
   'Noto Sans Symbols 2',
   'Noto Sans Symbols',
-  'Noto Color Emoji',
   'monospace',
   'sans-serif',
 ];

@@ -224,10 +224,14 @@ class _QuickActionsBarState extends State<QuickActionsBar> {
       child: LayoutBuilder(
         builder: (context, constraints) {
           if (constraints.maxWidth >= QuickActionsBar._wrapBreakpoint) {
-            return Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: _buildButtons(),
+            final buttons = _buildButtons();
+            return Center(
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                alignment: WrapAlignment.center,
+                children: buttons,
+              ),
             );
           }
           return NotificationListener<ScrollNotification>(

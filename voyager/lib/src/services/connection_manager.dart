@@ -313,7 +313,7 @@ class ConnectionManager {
     String? horizonPublicKey,
   })
   onPairingResult;
-  final void Function(List<String> sessions) onSessionList;
+  final void Function(List<String> sessions, {String? activeSessionId, String? activeGroupId}) onSessionList;
   final void Function(String sessionId) onSessionCreated;
   final void Function(String sessionId) onSessionClosed;
   final void Function(String sessionId, Uint8List data) onStdout;
@@ -576,6 +576,9 @@ class ConnectionManager {
     }
     _shouldReconnect = shouldReconnect;
     _resetConnectionState(silent: silent);
+    if (shouldReconnect) {
+      _scheduleReconnect();
+    }
   }
 
   /// Update the cached reconnect URI, e.g. after receiving an assigned
@@ -604,6 +607,10 @@ class ConnectionManager {
 
   void sendSyncRequest(String sessionId) {
     sendCommand({'type': 'sync', 'sessionId': sessionId});
+  }
+
+  void sendSelectSession(String sessionId, String groupId) {
+    sendCommand({'type': 'select_session', 'sessionId': sessionId, 'groupId': groupId});
   }
 
   // Max chunk size to prevent PTY buffer overflow (1KB is safe for all platforms)
@@ -952,7 +959,11 @@ class ConnectionManager {
     if (type == 'session_list') {
       final sessions = decoded['sessions'];
       if (sessions is List) {
-        onSessionList(sessions.whereType<String>().toList());
+        onSessionList(
+          sessions.whereType<String>().toList(),
+          activeSessionId: decoded['activeSessionId'] as String?,
+          activeGroupId: decoded['activeGroupId'] as String?,
+        );
       }
       return;
     }

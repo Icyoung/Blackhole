@@ -123,8 +123,10 @@ class HorizonController extends ChangeNotifier {
   }) : _wsServer = WsServer(port: port, pingInterval: pingInterval),
        _devModeRequested = devModeRequested,
        _requireDevModeConfirmation = requireDevModeConfirmation,
-       _wormholeBaseUrl = Platform.environment['WORMHOLE_URL'] ?? _defaultWormholeUrl,
-       _wormholeToken = Platform.environment['WORMHOLE_TOKEN'] ??
+       _wormholeBaseUrl =
+           Platform.environment['WORMHOLE_URL'] ?? _defaultWormholeUrl,
+       _wormholeToken =
+           Platform.environment['WORMHOLE_TOKEN'] ??
            (_buildTimeToken.isNotEmpty ? _buildTimeToken : null),
        _wormholeEnabled =
            (Platform.environment['WORMHOLE_URL'] ?? '').isNotEmpty,
@@ -166,6 +168,11 @@ class HorizonController extends ChangeNotifier {
   WebSocket? _wormholeSocket;
   StreamSubscription? _wormholeSub;
   String? _wormholeSessionId;
+  // Per-client active session/group selection (survives reconnect)
+  final Map<WebSocket, ({String sessionId, String groupId})>
+  _clientActiveSession = {};
+  ({String sessionId, String groupId})? _wormholeActiveSession;
+  ({String sessionId, String groupId})? _mirroredActiveSession;
   Timer? _wormholeReconnectTimer;
   int _wormholeReconnectDelaySeconds = 2;
   String? _error;
@@ -204,6 +211,8 @@ class HorizonController extends ChangeNotifier {
   String get wormholeToken => _wormholeToken ?? '';
   String? get wormholeSessionId => _wormholeSessionId;
   String get wormholeSessionLabel => _wormholeSessionId ?? 'Connecting...';
+  String? get mirroredActiveSessionId => _mirroredActiveSession?.sessionId;
+  String? get mirroredActiveGroupId => _mirroredActiveSession?.groupId;
   String get hostDeviceName =>
       _hostDeviceName?.trim().isNotEmpty == true
           ? _hostDeviceName!.trim()
@@ -478,6 +487,10 @@ class HorizonController extends ChangeNotifier {
       await _createSession();
       _wsServer.onClientCount = (_) => notifyListeners();
       _wsServer.onClientConnected = (socket) {
+        final mirrored = _mirroredActiveSession;
+        if (mirrored != null) {
+          _clientActiveSession[socket] = mirrored;
+        }
         _transportTelemetry.emit(
           event: 'connection_opened',
           kind: TransportKind.lanDirect,
@@ -486,6 +499,9 @@ class HorizonController extends ChangeNotifier {
           connected: true,
         );
         _sendSessionList(socket);
+      };
+      _wsServer.onClientDisconnected = (socket) {
+        _clientActiveSession.remove(socket);
       };
       if (_lanEnabled) {
         await _wsServer.start(onMessage: _handleLanIngressMessage);
@@ -658,7 +674,6 @@ class HorizonController extends ChangeNotifier {
     );
   }
 
-
   Future<void> _handleDecodedLanMessage(
     WebSocket socket,
     Map<String, dynamic> decoded,
@@ -763,6 +778,14 @@ class HorizonController extends ChangeNotifier {
       final sessionId = decoded['sessionId'];
       if (sessionId is String) {
         _sendSessionSync(socket, sessionId);
+      }
+      return;
+    }
+    if (type == 'select_session') {
+      final sessionId = decoded['sessionId'];
+      final groupId = decoded['groupId'];
+      if (sessionId is String && groupId is String) {
+        _mirrorActiveSessionSelection(sessionId, groupId);
       }
       return;
     }
@@ -911,10 +934,16 @@ class HorizonController extends ChangeNotifier {
 
   void _sendSessionList(WebSocket socket) {
     final changed = _reconcileGroupSessions();
-    _wsServer.sendTo(
-      socket,
-      _encodeMessage({'type': 'session_list', 'sessions': _sessions.toList()}),
-    );
+    final payload = <String, dynamic>{
+      'type': 'session_list',
+      'sessions': _sessions.toList(),
+    };
+    final active = _clientActiveSession[socket];
+    if (active != null) {
+      payload['activeSessionId'] = active.sessionId;
+      payload['activeGroupId'] = active.groupId;
+    }
+    _wsServer.sendTo(socket, _encodeMessage(payload));
     _wsServer.sendTo(socket, _buildHostInfoMessage());
     if (changed) {
       _broadcastGroupSync();
@@ -1327,6 +1356,14 @@ class HorizonController extends ChangeNotifier {
       }
       return;
     }
+    if (type == 'select_session') {
+      final sessionId = decoded['sessionId'];
+      final groupId = decoded['groupId'];
+      if (sessionId is String && groupId is String) {
+        _mirrorActiveSessionSelection(sessionId, groupId);
+      }
+      return;
+    }
     if (type == 'create') {
       final groupId = decoded['groupId'];
       if (groupId is String && groupId.isNotEmpty) {
@@ -1487,14 +1524,36 @@ class HorizonController extends ChangeNotifier {
 
   void _sendSessionListToWormhole() {
     final changed = _reconcileGroupSessions();
-    _sendToWormhole(
-      _encodeMessage({'type': 'session_list', 'sessions': _sessions.toList()}),
-    );
+    final payload = <String, dynamic>{
+      'type': 'session_list',
+      'sessions': _sessions.toList(),
+    };
+    final active = _wormholeActiveSession;
+    if (active != null) {
+      payload['activeSessionId'] = active.sessionId;
+      payload['activeGroupId'] = active.groupId;
+    }
+    _sendToWormhole(_encodeMessage(payload));
     if (changed) {
       _broadcastGroupSync();
     } else {
       _sendGroupSync(toWormhole: true);
     }
+  }
+
+  void _mirrorActiveSessionSelection(String sessionId, String groupId) {
+    if (!_sessions.contains(sessionId)) {
+      return;
+    }
+    final selection = (sessionId: sessionId, groupId: groupId);
+    _mirroredActiveSession = selection;
+    for (final socket in _clientActiveSession.keys.toList()) {
+      _clientActiveSession[socket] = selection;
+      _sendSessionList(socket);
+    }
+    _wormholeActiveSession = selection;
+    _sendSessionListToWormhole();
+    notifyListeners();
   }
 
   void _sendSessionSyncToWormhole(String sessionId) {
@@ -2082,9 +2141,10 @@ class HorizonController extends ChangeNotifier {
       final savedBase = (settings['wormholeBaseUrl'] as String? ?? '').trim();
       _wormholeBaseUrl = savedBase.isNotEmpty ? savedBase : _defaultWormholeUrl;
       final savedToken = (settings['wormholeToken'] as String? ?? '').trim();
-      _wormholeToken = savedToken.isNotEmpty
-          ? savedToken
-          : (_buildTimeToken.isNotEmpty ? _buildTimeToken : null);
+      _wormholeToken =
+          savedToken.isNotEmpty
+              ? savedToken
+              : (_buildTimeToken.isNotEmpty ? _buildTimeToken : null);
 
       debugPrint('[Horizon] Loaded ${_pairedDevices.length} paired devices');
     } catch (e) {

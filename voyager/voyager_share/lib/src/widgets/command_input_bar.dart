@@ -90,9 +90,7 @@ class CommandInputBarState extends State<CommandInputBar> {
       width: double.infinity,
       decoration: const BoxDecoration(
         color: AppColors.surfaceDim,
-        border: Border(
-          top: BorderSide(color: AppColors.border),
-        ),
+        border: Border(top: BorderSide(color: AppColors.border)),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       child: Row(
@@ -112,7 +110,7 @@ class CommandInputBarState extends State<CommandInputBar> {
                   color: AppColors.textPrimary,
                 ),
                 decoration: InputDecoration(
-                  hintText: 'Say something...',
+                  hintText: 'Type to send...',
                   hintStyle: const TextStyle(
                     fontSize: 13,
                     color: AppColors.textMuted,
@@ -158,7 +156,6 @@ class CommandInputBarState extends State<CommandInputBar> {
               onPressed: _submit,
               padding: EdgeInsets.zero,
               style: IconButton.styleFrom(
-                backgroundColor: AppColors.accent,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(8),
                 ),
@@ -166,7 +163,7 @@ class CommandInputBarState extends State<CommandInputBar> {
               icon: const Icon(
                 Icons.send_rounded,
                 size: 16,
-                color: Colors.white,
+                color: AppColors.accent,
               ),
             ),
           ),

@@ -24,6 +24,8 @@ class HeaderChrome extends StatelessWidget {
         'Horizon may resume this device automatically or ask for approval if it is new',
     this.leadingWidget,
     this.trailingWidget,
+    this.multiWindow = false,
+    this.onToggleMultiWindow,
   });
 
   final Color color;
@@ -43,6 +45,11 @@ class HeaderChrome extends StatelessWidget {
   final String pairingSubtitle;
   final Widget? leadingWidget;
   final Widget? trailingWidget;
+  final bool multiWindow;
+  final VoidCallback? onToggleMultiWindow;
+
+  /// Minimum width to show the multi-window toggle (iPad-class screens).
+  static const double _multiWindowBreakpoint = 768;
 
   @override
   Widget build(BuildContext context) {
@@ -66,14 +73,17 @@ class HeaderChrome extends StatelessWidget {
                     padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
                     child: Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 10),
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
                       decoration: BoxDecoration(
-                        color: AppColors.textMuted
-                            .withValues(alpha: AppOpacity.light),
+                        color: AppColors.textMuted.withValues(
+                          alpha: AppOpacity.light,
+                        ),
                         borderRadius: BorderRadius.circular(AppRadius.sm),
                         border: Border.all(
-                            color: AppColors.textMuted
-                                .withValues(alpha: 0.2)),
+                          color: AppColors.textMuted.withValues(alpha: 0.2),
+                        ),
                       ),
                       child: Row(
                         children: [
@@ -118,25 +128,33 @@ class HeaderChrome extends StatelessWidget {
                     padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
                     child: Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 8),
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
                       decoration: BoxDecoration(
-                        color: AppColors.warning
-                            .withValues(alpha: AppOpacity.light),
+                        color: AppColors.warning.withValues(
+                          alpha: AppOpacity.light,
+                        ),
                         borderRadius: BorderRadius.circular(AppRadius.sm),
                         border: Border.all(
-                            color: AppColors.warning
-                                .withValues(alpha: 0.2)),
+                          color: AppColors.warning.withValues(alpha: 0.2),
+                        ),
                       ),
                       child: Row(
                         children: [
-                          const Icon(Icons.error_outline,
-                              size: 14, color: AppColors.warning),
+                          const Icon(
+                            Icons.error_outline,
+                            size: 14,
+                            color: AppColors.warning,
+                          ),
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
                               error!,
                               style: const TextStyle(
-                                  color: AppColors.warning, fontSize: 12),
+                                color: AppColors.warning,
+                                fontSize: 12,
+                              ),
                             ),
                           ),
                         ],
@@ -173,7 +191,7 @@ class HeaderChrome extends StatelessWidget {
                           itemCount: sessions.length,
                           itemBuilder: (context, index) {
                             final sessionId = sessions[index];
-                            return ReorderableDragStartListener(
+                            return ReorderableDelayedDragStartListener(
                               key: ValueKey(sessionId),
                               index: index,
                               child: ChromeTabPill(
@@ -192,10 +210,17 @@ class HeaderChrome extends StatelessWidget {
                           },
                         ),
                       ),
-                      _CircleIconButton(
-                        icon: Icons.add,
-                        onTap: onAddSession,
-                      ),
+                      _CircleIconButton(icon: Icons.add, onTap: onAddSession),
+                      if (onToggleMultiWindow != null &&
+                          MediaQuery.of(context).size.width >=
+                              _multiWindowBreakpoint)
+                        _CircleIconButton(
+                          icon:
+                              multiWindow
+                                  ? Icons.grid_view_rounded
+                                  : Icons.crop_square_rounded,
+                          onTap: onToggleMultiWindow!,
+                        ),
                     ],
                   ),
                 ),
@@ -247,10 +272,11 @@ class _CircleIconButtonState extends State<_CircleIconButton> {
 
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() {
-        _hovered = false;
-        _pressed = false;
-      }),
+      onExit:
+          (_) => setState(() {
+            _hovered = false;
+            _pressed = false;
+          }),
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTapDown: (_) => setState(() => _pressed = true),
@@ -262,11 +288,10 @@ class _CircleIconButtonState extends State<_CircleIconButton> {
           width: 24,
           height: 24,
           margin: const EdgeInsets.symmetric(horizontal: 4),
-          decoration: BoxDecoration(
-            color: bg,
-            shape: BoxShape.circle,
+          decoration: BoxDecoration(color: bg, shape: BoxShape.circle),
+          child: Center(
+            child: Icon(widget.icon, color: AppColors.textTertiary, size: 14),
           ),
-          child: Center(child: Icon(widget.icon, color: AppColors.textTertiary, size: 14)),
         ),
       ),
     );

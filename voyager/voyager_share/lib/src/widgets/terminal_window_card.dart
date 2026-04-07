@@ -145,26 +145,29 @@ class _TerminalWindowCardState extends State<TerminalWindowCard>
                       bottomLeft: Radius.circular(AppRadius.md),
                       bottomRight: Radius.circular(AppRadius.md),
                     ),
-                    child: TerminalView(
-                      widget.terminal,
-                      key: widget.viewKey,
-                      controller: widget.controller,
-                      scrollController: widget.scrollController,
-                      theme: kTerminalThemeLight,
-                      autoResize: true,
-                      autofocus: false,
-                      deleteDetection: true,
-                      hardwareKeyboardOnly: widget.hardwareKeyboardOnly,
-                      readOnly: widget.showHHKB,
-                      keyboardType:
-                          widget.showHHKB
-                              ? TextInputType.none
-                              : TextInputType.text,
-                      backgroundOpacity: 1.0,
-                      padding: const EdgeInsets.all(10),
-                      textStyle:
-                          widget.terminalStyle ??
-                          buildTerminalStyle(fontSize: 12),
+                    child: IgnorePointer(
+                      ignoring: !widget.isActive,
+                      child: TerminalView(
+                        widget.terminal,
+                        key: widget.viewKey,
+                        controller: widget.controller,
+                        scrollController: widget.scrollController,
+                        theme: kTerminalThemeLight,
+                        autoResize: true,
+                        autofocus: false,
+                        deleteDetection: true,
+                        hardwareKeyboardOnly: widget.hardwareKeyboardOnly,
+                        readOnly: widget.showHHKB,
+                        keyboardType:
+                            widget.showHHKB
+                                ? TextInputType.none
+                                : TextInputType.text,
+                        backgroundOpacity: 1.0,
+                        padding: const EdgeInsets.all(10),
+                        textStyle:
+                            widget.terminalStyle ??
+                            buildTerminalStyle(fontSize: 12),
+                      ),
                     ),
                   ),
                 ),

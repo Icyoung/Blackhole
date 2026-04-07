@@ -11,6 +11,7 @@ class WsServer {
   final Duration? _pingInterval;
   void Function(int count)? onClientCount;
   void Function(WebSocket socket)? onClientConnected;
+  void Function(WebSocket socket)? onClientDisconnected;
 
   Future<void> start({
     required Future<void> Function(WebSocket socket, dynamic message) onMessage,
@@ -51,10 +52,12 @@ class WsServer {
         (data) => onMessage(socket, data),
         onDone: () {
           _clients.remove(socket);
+          onClientDisconnected?.call(socket);
           _notifyClientCount();
         },
         onError: (_) {
           _clients.remove(socket);
+          onClientDisconnected?.call(socket);
           _notifyClientCount();
         },
       );

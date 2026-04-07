@@ -121,6 +121,7 @@ class VpnService extends ChangeNotifier {
     return switch (defaultTargetPlatform) {
       TargetPlatform.iOS => true,
       TargetPlatform.macOS => true,
+      TargetPlatform.android => true,
       _ => false,
     };
   }

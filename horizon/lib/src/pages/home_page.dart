@@ -84,6 +84,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   final Set<String> _collapsedGroupIds = {};
   String _sidebarSearchQuery = '';
   String? _hoveredGroupId;
+  String? _menuOpenGroupId;
   String? _hoveredSessionRowId;
   String? _hoveredTabId;
   final ScrollController _tabScrollController = ScrollController();
@@ -250,7 +251,13 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
           debugPrint('[Voyager] Pairing rejected');
         }
       },
-      onSessionList: _handleSessionList,
+      onSessionList: (sessions, {activeSessionId, activeGroupId}) {
+        _handleSessionList(
+          sessions,
+          activeSessionId: activeSessionId,
+          activeGroupId: activeGroupId,
+        );
+      },
       onSessionCreated: _handleRemoteSessionCreated,
       onSessionClosed: _handleRemoteSessionClosed,
       onStdout: _handleStdout,
@@ -709,6 +716,24 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       // Only auto-connect when acting as a client (Voyager mode).
       if (!_isHorizonMode) {
         _maybeAutoConnectLocal();
+      } else {
+        final mirroredSessionId = _hostController.mirroredActiveSessionId;
+        final mirroredGroupId = _hostController.mirroredActiveGroupId;
+        if (mirroredSessionId != null &&
+            _sessions.contains(mirroredSessionId)) {
+          if (mirroredGroupId != null && mirroredGroupId.isNotEmpty) {
+            _groupStore.setActiveGroup(mirroredGroupId);
+          }
+          if (_activeSessionId != mirroredSessionId) {
+            _activeSessionId = mirroredSessionId;
+            _terminalManager.activeSessionId = mirroredSessionId;
+            _terminalFor(mirroredSessionId);
+            setState(() {});
+            _scheduleActiveResize();
+            _restoreScrollOffset(mirroredSessionId);
+            _updateWindowTitle();
+          }
+        }
       }
       return;
     }
@@ -1409,7 +1434,11 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     }
   }
 
-  void _handleSessionList(List<String> sessions) {
+  void _handleSessionList(
+    List<String> sessions, {
+    String? activeSessionId,
+    String? activeGroupId,
+  }) {
     debugPrint(
       '[Mode] Received session list: ${sessions.length} sessions, isHorizonMode=$_isHorizonMode',
     );
@@ -1425,9 +1454,17 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       _sendCreateSession();
       return;
     }
+    // Restore active group before syncing active session
+    if (activeGroupId != null) {
+      _groupStore.setActiveGroup(activeGroupId);
+    }
     // Request sync for all sessions to get terminal history
     for (final sessionId in sessions) {
       _requestSyncIfNeeded(sessionId);
+    }
+    // Restore active session if provided and still valid
+    if (activeSessionId != null && _sessions.contains(activeSessionId)) {
+      _activeSessionId = activeSessionId;
     }
     // Try to sync with group, but fall back to first session if group not ready
     _syncActiveSessionWithGroup();
@@ -2455,9 +2492,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
           child: Center(
             child: CustomPaint(
               size: const Size(16, 12),
-              painter: _SidebarIconPainter(
-                color: HorizonColors.textSecondary,
-              ),
+              painter: _SidebarIconPainter(color: HorizonColors.textSecondary),
             ),
           ),
         ),
@@ -3182,6 +3217,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   Widget _buildGroupActions(TerminalGroup group, int index) {
     final show =
         _hoveredGroupId == group.id ||
+        _menuOpenGroupId == group.id ||
         (!kIsWeb && (Platform.isAndroid || Platform.isIOS));
     return _hoverReveal(
       show: show,
@@ -3234,18 +3270,26 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     return PopupMenuButton<String>(
       tooltip: 'Group actions',
       color: HorizonColors.surfaceBright,
+      onOpened: () => setState(() => _menuOpenGroupId = group.id),
+      onCanceled: () => setState(() => _menuOpenGroupId = null),
       onSelected: (value) {
-        switch (value) {
-          case 'rename':
-            _promptRenameGroup(group);
-            break;
-          case 'delete':
-            _confirmDeleteGroup(group, deleteSessions: false);
-            break;
-          case 'delete_all':
-            _confirmDeleteGroup(group, deleteSessions: true);
-            break;
-        }
+        setState(() => _menuOpenGroupId = null);
+        // Delay until the popup route is fully dismissed, otherwise
+        // showDialog can be swallowed by the closing popup transition.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          switch (value) {
+            case 'rename':
+              _promptRenameGroup(group);
+              break;
+            case 'delete':
+              _confirmDeleteGroup(group, deleteSessions: false);
+              break;
+            case 'delete_all':
+              _confirmDeleteGroup(group, deleteSessions: true);
+              break;
+          }
+        });
       },
       itemBuilder:
           (context) => [
@@ -3546,7 +3590,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
         keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
         backgroundOpacity: 1.0,
         padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-        textStyle: buildTerminalStyle(fontSize: 9),
+        textStyle: buildTerminalStyle(fontSize: 10),
       ),
     );
   }
@@ -3834,33 +3878,36 @@ class _SidebarIconPainter extends CustomPainter {
     final sy = size.height / 17.9785;
     canvas.scale(sx, sy);
 
-    final paint = Paint()
-      ..color = color
-      ..style = PaintingStyle.fill;
+    final paint =
+        Paint()
+          ..color = color
+          ..style = PaintingStyle.fill;
 
     // Outer rounded rect (border)
-    final outer = Path()
-      ..moveTo(4.12109, 17.9785)
-      ..lineTo(19.1504, 17.9785)
-      ..cubicTo(21.6113, 17.9785, 23.0273, 16.4941, 23.0273, 13.8574)
-      ..lineTo(23.0273, 4.13086)
-      ..cubicTo(23.0273, 1.49414, 21.6113, 0, 19.1504, 0)
-      ..lineTo(4.12109, 0)
-      ..cubicTo(1.49414, 0, 0, 1.49414, 0, 4.13086)
-      ..lineTo(0, 13.8574)
-      ..cubicTo(0, 16.4941, 1.49414, 17.9785, 4.12109, 17.9785)
-      ..close();
+    final outer =
+        Path()
+          ..moveTo(4.12109, 17.9785)
+          ..lineTo(19.1504, 17.9785)
+          ..cubicTo(21.6113, 17.9785, 23.0273, 16.4941, 23.0273, 13.8574)
+          ..lineTo(23.0273, 4.13086)
+          ..cubicTo(23.0273, 1.49414, 21.6113, 0, 19.1504, 0)
+          ..lineTo(4.12109, 0)
+          ..cubicTo(1.49414, 0, 0, 1.49414, 0, 4.13086)
+          ..lineTo(0, 13.8574)
+          ..cubicTo(0, 16.4941, 1.49414, 17.9785, 4.12109, 17.9785)
+          ..close();
     // Inner cutout
-    final inner = Path()
-      ..moveTo(4.13086, 16.4062)
-      ..cubicTo(2.50977, 16.4062, 1.57227, 15.4785, 1.57227, 13.8574)
-      ..lineTo(1.57227, 4.13086)
-      ..cubicTo(1.57227, 2.50977, 2.50977, 1.57227, 4.13086, 1.57227)
-      ..lineTo(18.8965, 1.57227)
-      ..cubicTo(20.5176, 1.57227, 21.4551, 2.50977, 21.4551, 4.13086)
-      ..lineTo(21.4551, 13.8574)
-      ..cubicTo(21.4551, 15.4785, 20.5176, 16.4062, 18.8965, 16.4062)
-      ..close();
+    final inner =
+        Path()
+          ..moveTo(4.13086, 16.4062)
+          ..cubicTo(2.50977, 16.4062, 1.57227, 15.4785, 1.57227, 13.8574)
+          ..lineTo(1.57227, 4.13086)
+          ..cubicTo(1.57227, 2.50977, 2.50977, 1.57227, 4.13086, 1.57227)
+          ..lineTo(18.8965, 1.57227)
+          ..cubicTo(20.5176, 1.57227, 21.4551, 2.50977, 21.4551, 4.13086)
+          ..lineTo(21.4551, 13.8574)
+          ..cubicTo(21.4551, 15.4785, 20.5176, 16.4062, 18.8965, 16.4062)
+          ..close();
     final border = Path.combine(PathOperation.difference, outer, inner);
     canvas.drawPath(border, paint);
 
@@ -3876,9 +3923,10 @@ class _SidebarIconPainter extends CustomPainter {
       Rect.fromLTWH(2.91992, 6.64062, 3.20313, 1.09375), // middle
       Rect.fromLTWH(2.91992, 9.16992, 3.20313, 1.09375), // bottom
     ];
-    final linePaint = Paint()
-      ..color = color
-      ..style = PaintingStyle.fill;
+    final linePaint =
+        Paint()
+          ..color = color
+          ..style = PaintingStyle.fill;
     for (final r in lineRects) {
       canvas.drawRRect(
         RRect.fromRectAndRadius(r, const Radius.circular(0.55)),

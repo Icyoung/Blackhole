@@ -48,11 +48,27 @@ class _GroupDrawerState extends State<GroupDrawer> {
   final _editController = TextEditingController();
   final _editFocusNode = FocusNode();
 
+  @override
+  void initState() {
+    super.initState();
+    _editFocusNode.addListener(_handleEditFocusChange);
+  }
+
+  void _handleEditFocusChange() {
+    if (_editFocusNode.hasFocus) return;
+    if (_editingGroupId != null) {
+      _submitGroupEdit(_editingGroupId!);
+    } else if (_editingSessionId != null) {
+      _submitSessionEdit(_editingSessionId!);
+    }
+  }
+
   static bool get _isMobile =>
       !kIsWeb && (Platform.isAndroid || Platform.isIOS);
 
   @override
   void dispose() {
+    _editFocusNode.removeListener(_handleEditFocusChange);
     _editController.dispose();
     _editFocusNode.dispose();
     super.dispose();
@@ -558,6 +574,7 @@ class _GroupDrawerState extends State<GroupDrawer> {
     }
 
     return MouseRegion(
+      key: ValueKey('session-hover-$sessionId'),
       onEnter: (_) => setState(() => _hoveredSessionId = sessionId),
       onExit: (_) => setState(() {
         if (_hoveredSessionId == sessionId) _hoveredSessionId = null;

@@ -298,7 +298,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
           debugPrint('[Voyager] Pairing rejected');
         }
       },
-      onSessionList: _handleSessionList,
+      onSessionList: (sessions, {activeSessionId, activeGroupId}) {
+        _handleSessionList(sessions, activeSessionId: activeSessionId, activeGroupId: activeGroupId);
+      },
       onSessionCreated: _handleSessionCreated,
       onSessionClosed: _handleSessionClosed,
       onStdout: _handleStdout,
@@ -346,7 +348,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       _tokenController.text =
           prefs.getString('token') ?? 'InGodWeTrust@Blackhole2026';
       _useWormhole = prefs.getBool('useWormhole') ?? false;
-      _vpnEnabled = prefs.getBool('vpnEnabled') ?? false;
+      _vpnEnabled =
+          prefs.getBool('vpnEnabled') ??
+          (_vpnAvailable && defaultTargetPlatform == TargetPlatform.android);
       _autoReconnect = prefs.getBool('autoReconnect') ?? true;
       _multiWindow = prefs.getBool('multiWindow') ?? false;
       _showKeyboardTools = prefs.getBool('showKeyboardTools') ?? true;
@@ -453,6 +457,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     setState(() {
       _syncActiveSessionWithGroup();
     });
+    _sendSelectSession();
   }
 
   void _syncActiveSessionWithGroup() {
@@ -651,7 +656,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     }
   }
 
-  void _handleSessionList(List<String> sessions) {
+  void _handleSessionList(List<String> sessions, {String? activeSessionId, String? activeGroupId}) {
     _sessions
       ..clear()
       ..addAll(sessions);
@@ -659,9 +664,17 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       _sendCreateSession();
       return;
     }
+    // Restore active group before syncing active session
+    if (activeGroupId != null) {
+      _groupStore.setActiveGroup(activeGroupId);
+    }
     // Request sync for all sessions to get terminal history
     for (final sessionId in sessions) {
       _requestSyncIfNeeded(sessionId);
+    }
+    // Restore active session if provided and still valid
+    if (activeSessionId != null && _sessions.contains(activeSessionId)) {
+      _activeSessionId = activeSessionId;
     }
     _syncActiveSessionWithGroup();
     _terminalManager.activeSessionId = _activeSessionId;
@@ -1042,6 +1055,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     _scheduleActiveResize();
     _restoreScrollOffset(sessionId);
     _updateWindowTitle();
+    _sendSelectSession();
     if (requestKeyboard && !_multiWindow && !_showHHKB) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _viewKeyFor(sessionId).currentState?.requestKeyboard();
@@ -1051,6 +1065,12 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
 
   void _reorderSessions(int oldIndex, int newIndex) {
     _groupStore.reorderSession(_groupStore.activeGroupId, oldIndex, newIndex);
+  }
+
+  void _sendSelectSession() {
+    final sessionId = _activeSessionId;
+    if (sessionId == null) return;
+    _connectionManager.sendSelectSession(sessionId, _groupStore.activeGroupId);
   }
 
   void _updateWindowTitle() {
@@ -1419,13 +1439,18 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     final scaffold = Scaffold(
       key: _scaffoldKey,
       backgroundColor: AppColors.surfaceVariant,
+      onDrawerChanged: (isOpened) {
+        if (!isOpened) {
+          _groupStore.setDeferredSync(false);
+        }
+      },
       drawer: _buildGroupDrawer(context),
       endDrawer: _buildSettingsDrawer(context),
       body: Stack(
         children: [
           Positioned.fill(child: Container(color: AppColors.surfaceVariant)),
           Positioned.fill(
-            top: terminalTopInset.toDouble(),
+            top: MediaQuery.of(context).padding.top + terminalTopInset.toDouble(),
             child: DropTarget(
               onDragDone: _handleFileDrop,
               onDragEntered: (details) {
@@ -1593,18 +1618,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                       ),
                     ),
                   if (_reconnecting)
-                    Positioned.fill(
-                      child: AbsorbPointer(
-                        child: Container(
-                          color: Colors.black.withValues(alpha: 0.45),
-                          alignment: Alignment.center,
-                          child: Icon(
-                            Icons.sync_rounded,
-                            size: 48,
-                            color: Colors.white.withValues(alpha: 0.6),
-                          ),
-                        ),
-                      ),
+                    const Positioned.fill(
+                      child: AbsorbPointer(),
                     ),
                 ],
               ),
@@ -1652,6 +1667,14 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
               onCloseSession: _sendCloseSession,
               onReorderSessions: _reorderSessions,
               connectionContent: _buildConnectionContent(context),
+              multiWindow: _multiWindow,
+              onToggleMultiWindow: () {
+                setState(() => _multiWindow = !_multiWindow);
+                _saveSettings();
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  _scheduleActiveResize();
+                });
+              },
             ),
           ),
           Positioned(

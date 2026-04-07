@@ -194,7 +194,10 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
                   fieldFill,
                   fieldBorder,
                 ),
-                style: const TextStyle(color: AppColors.textPrimary, fontSize: 14),
+                style: const TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 14,
+                ),
               ),
             ],
             if (widget.vpnService != null) ...[
@@ -223,7 +226,7 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
               widget.onShowKeyboardToolsChanged,
             ),
             _buildDrawerSwitch(
-              'Command Input',
+              'Quick Input',
               widget.showCommandInput,
               widget.onShowCommandInputChanged,
             ),
@@ -392,7 +395,10 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
           Expanded(
             child: Text(
               label,
-              style: const TextStyle(color: AppColors.textPrimary, fontSize: 14),
+              style: const TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 14,
+              ),
             ),
           ),
           Switch(value: value, onChanged: onChanged),
@@ -445,10 +451,7 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
                 children: [
                   Icon(
                     Icons.shield_outlined,
-                    color:
-                        isEnabled
-                            ? AppColors.statusGreen
-                            : AppColors.accent,
+                    color: isEnabled ? AppColors.statusGreen : AppColors.accent,
                     size: 18,
                   ),
                   const SizedBox(width: 8),

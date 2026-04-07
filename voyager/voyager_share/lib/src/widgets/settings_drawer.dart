@@ -43,10 +43,10 @@ class SettingsDrawer extends StatelessWidget {
   Widget build(BuildContext context) {
     const fieldFill = AppColors.borderSubtle;
     const fieldBorder = AppColors.border;
-    final titleStyle = Theme.of(context)
-        .textTheme
-        .titleMedium
-        ?.copyWith(color: AppColors.textPrimary, fontSize: 18);
+    final titleStyle = Theme.of(context).textTheme.titleMedium?.copyWith(
+      color: AppColors.textPrimary,
+      fontSize: 18,
+    );
 
     return Drawer(
       backgroundColor: AppColors.background,
@@ -66,10 +66,7 @@ class SettingsDrawer extends StatelessWidget {
                 const SizedBox(width: 12),
                 Text(
                   'VOYAGER SETTINGS',
-                  style: titleStyle?.copyWith(
-                    fontSize: 14,
-                    letterSpacing: 1,
-                  ),
+                  style: titleStyle?.copyWith(fontSize: 14, letterSpacing: 1),
                 ),
               ],
             ),
@@ -83,7 +80,10 @@ class SettingsDrawer extends StatelessWidget {
                 fieldFill,
                 fieldBorder,
               ),
-              style: const TextStyle(color: AppColors.textPrimary, fontSize: 14),
+              style: const TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 14,
+              ),
             ),
             const SizedBox(height: 24),
             _buildDrawerSection('Modes & Behavior'),
@@ -113,16 +113,12 @@ class SettingsDrawer extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             _buildDrawerSwitch(
-              'Command Input',
+              'Quick Input',
               showCommandInput,
               onShowCommandInputChanged,
             ),
             const SizedBox(height: 6),
-            _buildDrawerSwitch(
-              'HHKB Keyboard',
-              showHHKB,
-              onShowHHKBChanged,
-            ),
+            _buildDrawerSwitch('HHKB Keyboard', showHHKB, onShowHHKBChanged),
             if (useWormhole) ...[
               const SizedBox(height: 24),
               _buildDrawerSection('Wormhole Remote Options'),
@@ -150,17 +146,17 @@ class SettingsDrawer extends StatelessWidget {
                   fieldFill,
                   fieldBorder,
                 ),
-                style: const TextStyle(color: AppColors.textPrimary, fontSize: 14),
+                style: const TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 14,
+                ),
               ),
             ],
             const SizedBox(height: 40),
             Text(
               'Blackhole Voyager v1.0.0',
               textAlign: TextAlign.center,
-              style: const TextStyle(
-                color: AppColors.textHint,
-                fontSize: 11,
-              ),
+              style: const TextStyle(color: AppColors.textHint, fontSize: 11),
             ),
           ],
         ),
@@ -192,13 +188,13 @@ class SettingsDrawer extends StatelessWidget {
           Expanded(
             child: Text(
               label,
-              style: const TextStyle(color: AppColors.textPrimary, fontSize: 14),
+              style: const TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 14,
+              ),
             ),
           ),
-          Switch(
-            value: value,
-            onChanged: onChanged,
-          ),
+          Switch(value: value, onChanged: onChanged),
         ],
       ),
     );

@@ -57,7 +57,7 @@ class ConnectionManager {
   final void Function(String message) onGroupError;
   final void Function({required bool approved, String? assignedKey})
   onPairingResult;
-  final void Function(List<String> sessions) onSessionList;
+  final void Function(List<String> sessions, {String? activeSessionId, String? activeGroupId}) onSessionList;
   final void Function(String sessionId) onSessionCreated;
   final void Function(String sessionId) onSessionClosed;
   final void Function(String sessionId, Uint8List bytes) onStdoutBytes;
@@ -326,7 +326,11 @@ class ConnectionManager {
     if (type == 'session_list') {
       final sessions = decoded['sessions'];
       if (sessions is List) {
-        onSessionList(sessions.whereType<String>().toList());
+        onSessionList(
+          sessions.whereType<String>().toList(),
+          activeSessionId: decoded['activeSessionId'] as String?,
+          activeGroupId: decoded['activeGroupId'] as String?,
+        );
       }
       return;
     }

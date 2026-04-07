@@ -60,8 +60,9 @@ class TerminalManager {
         (cols, rows, pixelWidth, pixelHeight) =>
             onResize(sessionId, cols, rows, pixelWidth, pixelHeight);
     terminal.onTitleChange = (title) {
-      _titles[sessionId] = title;
-      onTitleChange?.call(sessionId, title);
+      final cleaned = _stripEmoji(title);
+      _titles[sessionId] = cleaned;
+      onTitleChange?.call(sessionId, cleaned);
     };
     return terminal;
   }
@@ -395,5 +396,17 @@ class TerminalManager {
     _disposed = true;
     clear();
     _idleScrollController.dispose();
+  }
+
+  static final _emojiPattern = RegExp(
+    r'[\u{1F600}-\u{1F64F}]|[\u{1F300}-\u{1F5FF}]|[\u{1F680}-\u{1F6FF}]|'
+    r'[\u{1F900}-\u{1F9FF}]|[\u{1FA00}-\u{1FA6F}]|[\u{1FA70}-\u{1FAFF}]|'
+    r'[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]|[\u{FE00}-\u{FE0F}]|'
+    r'[\u{E0020}-\u{E007F}]|\u{200D}|\u{20E3}|[\u{1F1E0}-\u{1F1FF}]',
+    unicode: true,
+  );
+
+  static String _stripEmoji(String text) {
+    return text.replaceAll(_emojiPattern, '').trim();
   }
 }

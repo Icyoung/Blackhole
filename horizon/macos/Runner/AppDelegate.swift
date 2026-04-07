@@ -661,7 +661,7 @@ class AppDelegate: FlutterAppDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     if let button = item.button {
       if let iconImage = NSImage(named: "StatusBarIcon") {
-        iconImage.isTemplate = false
+        iconImage.isTemplate = true
         iconImage.size = NSSize(width: 22, height: 22)
         button.image = iconImage
       } else if #available(macOS 11.0, *) {
