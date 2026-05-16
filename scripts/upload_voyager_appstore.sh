@@ -30,7 +30,7 @@ TEAM_ID="${VOYAGER_APPSTORE_TEAM_ID:-J3N394FG8K}"
 APP_BUNDLE_ID="${VOYAGER_IOS_BUNDLE_ID:-dev.icyou.blackhole.voyager}"
 TUNNEL_BUNDLE_ID="${VOYAGER_IOS_TUNNEL_BUNDLE_ID:-dev.icyou.blackhole.voyager.tunnel}"
 SIGNING_STYLE="${VOYAGER_APPSTORE_SIGNING_STYLE:-automatic}"
-EXPORT_METHOD="${VOYAGER_APPSTORE_EXPORT_METHOD:-app-store}"
+EXPORT_METHOD="${VOYAGER_APPSTORE_EXPORT_METHOD:-app-store-connect}"
 
 API_KEY_ID="${VOYAGER_APPSTORE_API_KEY_ID:-${APPSTORE_API_KEY_ID:-}}"
 API_ISSUER_ID="${VOYAGER_APPSTORE_API_ISSUER_ID:-${APPSTORE_API_ISSUER_ID:-}}"
@@ -339,6 +339,22 @@ build_ipa() {
     fi
     rm -rf "$VOYAGER_DIR/build/ios/ipa"
     xcodebuild -exportArchive \
+      $(xcode_auth_args) \
+      -archivePath "$archive_path" \
+      -exportPath "$VOYAGER_DIR/build/ios/ipa" \
+      -exportOptionsPlist "$export_plist"
+  fi
+
+  if [ ! -d "$VOYAGER_DIR/build/ios/ipa" ] || ! find "$VOYAGER_DIR/build/ios/ipa" -name "*.ipa" -type f | grep -q .; then
+    log_warn "flutter did not produce an IPA; trying xcodebuild -exportArchive from existing archive"
+    local archive_path="$VOYAGER_DIR/build/ios/archive/Runner.xcarchive"
+    if [ ! -d "$archive_path" ]; then
+      log_error "Archive not found: $archive_path"
+      exit 1
+    fi
+    rm -rf "$VOYAGER_DIR/build/ios/ipa"
+    xcodebuild -exportArchive \
+      $(xcode_auth_args) \
       -archivePath "$archive_path" \
       -exportPath "$VOYAGER_DIR/build/ios/ipa" \
       -exportOptionsPlist "$export_plist"
@@ -376,6 +392,15 @@ check_api_key() {
     log_info "Expected AuthKey_${API_KEY_ID}.p8 in ~/.private_keys or set VOYAGER_APPSTORE_API_KEY_PATH"
     exit 1
   fi
+}
+
+xcode_auth_args() {
+  check_api_key
+  printf "%s\n" \
+    "-allowProvisioningUpdates" \
+    "-authenticationKeyPath" "$API_KEY_PATH" \
+    "-authenticationKeyID" "$API_KEY_ID" \
+    "-authenticationKeyIssuerID" "$API_ISSUER_ID"
 }
 
 upload_ipa() {
