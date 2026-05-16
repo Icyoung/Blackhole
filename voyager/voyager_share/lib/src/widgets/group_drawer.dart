@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 
 import '../models/terminal_group.dart';
 import '../services/group_store.dart';
-import 'common/status_dot.dart';
 import 'design_tokens.dart';
 
 class GroupDrawer extends StatefulWidget {
@@ -598,11 +597,6 @@ class _GroupDrawerState extends State<GroupDrawer> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              StatusDot(
-                connected: isActive,
-                size: 6,
-              ),
-              const SizedBox(width: 8),
               Expanded(
                 child: GestureDetector(
                   onDoubleTap: () =>
