@@ -31,6 +31,7 @@ APP_BUNDLE_ID="${VOYAGER_IOS_BUNDLE_ID:-dev.icyou.blackhole.voyager}"
 TUNNEL_BUNDLE_ID="${VOYAGER_IOS_TUNNEL_BUNDLE_ID:-dev.icyou.blackhole.voyager.tunnel}"
 SIGNING_STYLE="${VOYAGER_APPSTORE_SIGNING_STYLE:-automatic}"
 EXPORT_METHOD="${VOYAGER_APPSTORE_EXPORT_METHOD:-app-store-connect}"
+FLUTTER_CODESIGN="${VOYAGER_APPSTORE_FLUTTER_CODESIGN:-false}"
 
 API_KEY_ID="${VOYAGER_APPSTORE_API_KEY_ID:-${APPSTORE_API_KEY_ID:-}}"
 API_ISSUER_ID="${VOYAGER_APPSTORE_API_ISSUER_ID:-${APPSTORE_API_ISSUER_ID:-}}"
@@ -69,6 +70,7 @@ Environment:
   VOYAGER_APPSTORE_API_KEY_PATH     Optional, defaults to ~/.private_keys/AuthKey_<key-id>.p8
   VOYAGER_APPSTORE_TEAM_ID          Default: $TEAM_ID
   VOYAGER_APPSTORE_SIGNING_STYLE    automatic|manual, default: automatic
+  VOYAGER_APPSTORE_FLUTTER_CODESIGN true|false, default: false
   VOYAGER_IOS_PROFILE_NAME          Required when signing style is manual
   VOYAGER_IOS_TUNNEL_PROFILE_NAME   Required when signing style is manual
   IOS_KEYCHAIN_PATH                 Optional keychain path for non-interactive signing
@@ -316,48 +318,68 @@ build_ipa() {
 
   local export_plist="$VOYAGER_DIR/ios/ExportOptions.appstore.generated.plist"
   write_export_options "$export_plist"
+  local archive_path="$VOYAGER_DIR/build/ios/archive/Runner.xcarchive"
+  rm -rf "$archive_path" "$VOYAGER_DIR/build/ios/ipa"
 
-  local flutter_args=(
-    build ipa
-    --release
-    --export-options-plist="$export_plist"
-  )
+  if [ "$FLUTTER_CODESIGN" != "true" ]; then
+    log_info "xcodebuild archive with App Store Connect API key"
+    xcodebuild archive \
+      $(xcode_auth_args) \
+      -workspace "$VOYAGER_DIR/ios/Runner.xcworkspace" \
+      -scheme Runner \
+      -configuration Release \
+      -destination "generic/platform=iOS" \
+      -archivePath "$archive_path" \
+      MARKETING_VERSION="$(version_name)" \
+      CURRENT_PROJECT_VERSION="$(version_code)"
 
-  if [ -n "$BUILD_NAME" ]; then
-    flutter_args+=(--build-name "$BUILD_NAME")
-  fi
-  if [ -n "$BUILD_NUMBER" ]; then
-    flutter_args+=(--build-number "$BUILD_NUMBER")
-  fi
-
-  if ! flutter "${flutter_args[@]}"; then
-    log_warn "flutter build ipa failed; trying xcodebuild -exportArchive from existing archive"
-    local archive_path="$VOYAGER_DIR/build/ios/archive/Runner.xcarchive"
-    if [ ! -d "$archive_path" ]; then
-      log_error "Archive not found: $archive_path"
-      exit 1
-    fi
-    rm -rf "$VOYAGER_DIR/build/ios/ipa"
     xcodebuild -exportArchive \
       $(xcode_auth_args) \
       -archivePath "$archive_path" \
       -exportPath "$VOYAGER_DIR/build/ios/ipa" \
       -exportOptionsPlist "$export_plist"
-  fi
+  else
 
-  if [ ! -d "$VOYAGER_DIR/build/ios/ipa" ] || ! find "$VOYAGER_DIR/build/ios/ipa" -name "*.ipa" -type f | grep -q .; then
-    log_warn "flutter did not produce an IPA; trying xcodebuild -exportArchive from existing archive"
-    local archive_path="$VOYAGER_DIR/build/ios/archive/Runner.xcarchive"
-    if [ ! -d "$archive_path" ]; then
-      log_error "Archive not found: $archive_path"
-      exit 1
+    local flutter_args=(
+      build ipa
+      --release
+      --export-options-plist="$export_plist"
+    )
+
+    if [ -n "$BUILD_NAME" ]; then
+      flutter_args+=(--build-name "$BUILD_NAME")
     fi
-    rm -rf "$VOYAGER_DIR/build/ios/ipa"
-    xcodebuild -exportArchive \
-      $(xcode_auth_args) \
-      -archivePath "$archive_path" \
-      -exportPath "$VOYAGER_DIR/build/ios/ipa" \
-      -exportOptionsPlist "$export_plist"
+    if [ -n "$BUILD_NUMBER" ]; then
+      flutter_args+=(--build-number "$BUILD_NUMBER")
+    fi
+
+    if ! flutter "${flutter_args[@]}"; then
+      log_warn "flutter build ipa failed; trying xcodebuild -exportArchive from existing archive"
+      if [ ! -d "$archive_path" ]; then
+        log_error "Archive not found: $archive_path"
+        exit 1
+      fi
+      rm -rf "$VOYAGER_DIR/build/ios/ipa"
+      xcodebuild -exportArchive \
+        $(xcode_auth_args) \
+        -archivePath "$archive_path" \
+        -exportPath "$VOYAGER_DIR/build/ios/ipa" \
+        -exportOptionsPlist "$export_plist"
+    fi
+
+    if [ ! -d "$VOYAGER_DIR/build/ios/ipa" ] || ! find "$VOYAGER_DIR/build/ios/ipa" -name "*.ipa" -type f | grep -q .; then
+      log_warn "flutter did not produce an IPA; trying xcodebuild -exportArchive from existing archive"
+      if [ ! -d "$archive_path" ]; then
+        log_error "Archive not found: $archive_path"
+        exit 1
+      fi
+      rm -rf "$VOYAGER_DIR/build/ios/ipa"
+      xcodebuild -exportArchive \
+        $(xcode_auth_args) \
+        -archivePath "$archive_path" \
+        -exportPath "$VOYAGER_DIR/build/ios/ipa" \
+        -exportOptionsPlist "$export_plist"
+    fi
   fi
 
   local src
@@ -428,11 +450,21 @@ upload_ipa() {
     log_info "Uploading $(basename "$ipa_path")"
   fi
 
-  xcrun altool "$action" \
+  local altool_log
+  altool_log="$(mktemp -t voyager-altool.XXXXXX.log)"
+  if ! xcrun altool "$action" \
     --type ios \
     -f "$ipa_path" \
     --apiKey "$API_KEY_ID" \
-    --apiIssuer "$API_ISSUER_ID"
+    --apiIssuer "$API_ISSUER_ID" 2>&1 | tee "$altool_log"; then
+    log_error "App Store Connect command failed"
+    exit 1
+  fi
+
+  if grep -E "UPLOAD FAILED|VALIDATION FAILED|Validation failed|Failed to upload package|Failed to validate package" "$altool_log" >/dev/null; then
+    log_error "App Store Connect rejected the IPA"
+    exit 1
+  fi
 
   if [ "$VALIDATE_ONLY" = true ]; then
     log_ok "Validation completed"
