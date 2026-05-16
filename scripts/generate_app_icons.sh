@@ -112,8 +112,8 @@ generate_voyager_macos() {
 generate_horizon_macos_status_bar() {
   local icon_dir="$ROOT_DIR/horizon/macos/Runner/Assets.xcassets/StatusBarIcon.imageset"
 
-  rsvg-convert --width 22 --height 22 "$BRAND_MARK_SVG" --output "$icon_dir/statusbar_18.png"
-  rsvg-convert --width 44 --height 44 "$BRAND_MARK_SVG" --output "$icon_dir/statusbar_36.png"
+  rsvg-convert --width 18 --height 18 "$BRAND_MARK_SVG" --output "$icon_dir/statusbar_18.png"
+  rsvg-convert --width 36 --height 36 "$BRAND_MARK_SVG" --output "$icon_dir/statusbar_36.png"
 }
 
 generate_voyager_windows() {
