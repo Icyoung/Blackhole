@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="120 120 784 784" role="img" aria-labelledby="title desc">
+  <title id="title">Blackhole brand mark</title>
+  <desc id="desc">Canonical transparent brand mark for template icons and inline logos.</desc>
+  <defs>
+    <clipPath id="upper-half">
+      <rect x="0" y="0" width="1024" height="614.4"/>
+    </clipPath>
+  </defs>
+  <circle cx="512" cy="512" r="358" fill="none" stroke="#000000" stroke-width="48"/>
+  <line x1="169" y1="614.4" x2="855" y2="614.4" stroke="#000000" stroke-width="48"/>
+  <circle cx="512" cy="512" r="128" fill="#000000" clip-path="url(#upper-half)"/>
+</svg>

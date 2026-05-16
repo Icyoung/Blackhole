@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Blackhole app icon</title>
+  <desc id="desc">Canonical full-bleed Blackhole icon source. Platform masks, shadows, and corner radius are applied by each OS, not drawn into this asset.</desc>
+  <defs>
+    <clipPath id="upper-half">
+      <rect x="0" y="0" width="1024" height="614.4"/>
+    </clipPath>
+  </defs>
+  <rect width="1024" height="1024" fill="#ffffff"/>
+  <circle cx="512" cy="512" r="358" fill="none" stroke="#0a0a0a" stroke-width="48"/>
+  <line x1="169" y1="614.4" x2="855" y2="614.4" stroke="#0a0a0a" stroke-width="48"/>
+  <circle cx="512" cy="512" r="128" fill="#0a0a0a" clip-path="url(#upper-half)"/>
+</svg>
