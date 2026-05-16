@@ -2560,6 +2560,30 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     }
   }
 
+  String _sidebarConnectionTitle(_SidebarConnectionState state) {
+    switch (state) {
+      case _SidebarConnectionState.connected:
+        return 'Connected';
+      case _SidebarConnectionState.connecting:
+        return 'Connecting';
+      case _SidebarConnectionState.disconnect:
+        return 'Disconnected';
+    }
+  }
+
+  String _sidebarConnectionDetail(_SidebarConnectionState state) {
+    if (_isHorizonMode) {
+      return state == _SidebarConnectionState.connecting
+          ? 'opening remote access'
+          : 'remote';
+    }
+
+    if (_clientPairingPending) {
+      return 'waiting for pairing';
+    }
+    return _useWormhole ? 'Wormhole relay' : 'Local network';
+  }
+
   Future<void> _reconnectCurrentMode() async {
     if (mounted) {
       setState(() {
@@ -2577,21 +2601,24 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   Widget _buildTopStatusPill({required bool showLabel}) {
     final state = _sidebarConnectionState();
     final color = _sidebarConnectionColor(state);
-    final label = state.name;
-    final scope = _sidebarConnectionScopeLabel();
+    final title = _sidebarConnectionTitle(state);
+    final detail = _sidebarConnectionDetail(state);
     final canReconnect = state == _SidebarConnectionState.disconnect;
     if (!showLabel) {
       return Tooltip(
-        message: canReconnect ? 'Reconnect $scope' : '$scope $label',
+        message:
+            canReconnect
+                ? 'Reconnect ${_sidebarConnectionScopeLabel()}'
+                : '$title - $detail',
         child: InkWell(
           onTap: canReconnect ? () => unawaited(_reconnectCurrentMode()) : null,
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(10),
           child: Container(
             width: 32,
             height: 32,
             decoration: BoxDecoration(
               color: HorizonColors.surfaceBright,
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(10),
               border: Border.all(color: HorizonColors.borderSubtle),
             ),
             child: Center(
@@ -2622,20 +2649,19 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       );
     }
     final child = Container(
-      constraints: const BoxConstraints(minHeight: 34, maxHeight: 42),
+      width: double.infinity,
       margin: const EdgeInsets.symmetric(horizontal: 16),
-      padding: EdgeInsets.symmetric(
-        horizontal: showLabel ? 10 : 7,
-        vertical: 6,
-      ),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
       decoration: BoxDecoration(
-        color: HorizonColors.surfaceBright,
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: HorizonColors.borderSubtle),
+        border: Border(
+          top: BorderSide(
+            color: HorizonColors.borderSubtle.withValues(alpha: 0.7),
+            width: 0.5,
+          ),
+        ),
       ),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Container(
             width: 8,
@@ -2652,45 +2678,54 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
               ],
             ),
           ),
-          if (showLabel) ...[
-            const SizedBox(width: 8),
-            Flexible(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: HorizonColors.textSecondary,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  Text(
-                    scope,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: HorizonColors.textMuted,
-                      fontSize: 9,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
+          const SizedBox(width: 10),
+          Text(
+            title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: HorizonColors.textPrimary,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              height: 1,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              detail,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: HorizonColors.textMuted,
+                fontSize: 11,
+                fontWeight: FontWeight.w500,
+                height: 1,
               ),
             ),
-          ],
-          if (canReconnect) ...[
-            SizedBox(width: showLabel ? 8 : 6),
-            const Icon(
-              Icons.refresh_rounded,
-              size: 14,
-              color: HorizonColors.textMuted,
+          ),
+          const Spacer(),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 24,
+            height: 24,
+            child: Center(
+              child:
+                  canReconnect
+                      ? const Icon(
+                        Icons.refresh_rounded,
+                        size: 15,
+                        color: HorizonColors.textMuted,
+                      )
+                      : Icon(
+                        state == _SidebarConnectionState.connecting
+                            ? Icons.sync_rounded
+                            : Icons.check_rounded,
+                        size: 15,
+                        color: color,
+                      ),
             ),
-          ],
+          ),
         ],
       ),
     );
@@ -2699,10 +2734,10 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       message:
           canReconnect
               ? 'Reconnect ${_sidebarConnectionScopeLabel()}'
-              : '${_sidebarConnectionScopeLabel()} $label',
+              : '$title - $detail',
       child: InkWell(
         onTap: canReconnect ? () => unawaited(_reconnectCurrentMode()) : null,
-        borderRadius: BorderRadius.circular(999),
+        borderRadius: BorderRadius.circular(12),
         child: child,
       ),
     );

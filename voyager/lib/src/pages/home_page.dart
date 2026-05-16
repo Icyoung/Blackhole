@@ -100,6 +100,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   final Set<String> _syncedSessions = {};
   final Map<String, int> _sessionSyncOffsets = {};
   String? _activeSessionId;
+  String? _pendingReconnectActiveSessionId;
+  String? _pendingReconnectActiveGroupId;
   late final GroupStore _groupStore;
 
   bool _ctrl = false;
@@ -460,6 +462,15 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     if (!mounted) {
       return;
     }
+    if (_reconnecting && _pendingReconnectActiveSessionId != null) {
+      final sessionId = _pendingReconnectActiveSessionId!;
+      setState(() {
+        _activeSessionId = sessionId;
+        _terminalManager.activeSessionId = sessionId;
+        _terminalFor(sessionId);
+      });
+      return;
+    }
     _restoreActiveGroupForCurrentSession();
     // Request sync for all sessions in the new group
     for (final sessionId in _visibleSessions) {
@@ -468,7 +479,34 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     setState(() {
       _syncActiveSessionWithGroup();
     });
+    _clearPendingReconnectSelectionIfRestored();
     _sendSelectSession();
+  }
+
+  bool _groupContainsSession(String groupId, String sessionId) {
+    for (final group in _groupStore.groups) {
+      if (group.id == groupId) {
+        return group.sessionIds.contains(sessionId);
+      }
+    }
+    return false;
+  }
+
+  void _clearPendingReconnectSelectionIfRestored() {
+    final sessionId = _pendingReconnectActiveSessionId;
+    if (sessionId == null || _activeSessionId != sessionId) {
+      return;
+    }
+    final groupId = _pendingReconnectActiveGroupId;
+    final groupHasSession = _groupStore.groups.any(
+      (group) => group.sessionIds.contains(sessionId),
+    );
+    if (groupId == null ||
+        _groupContainsSession(groupId, sessionId) ||
+        groupHasSession) {
+      _pendingReconnectActiveSessionId = null;
+      _pendingReconnectActiveGroupId = null;
+    }
   }
 
   void _restoreActiveGroupForCurrentSession() {
@@ -677,6 +715,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     final passive = _connectionManager.shouldReconnect;
     if (passive && _sessions.isNotEmpty) {
       _reconnecting = true;
+      _pendingReconnectActiveSessionId = _activeSessionId;
+      _pendingReconnectActiveGroupId = _groupStore.activeGroupId;
       _groupStore.onDisconnected();
       _pinyinEngine.clear();
       if (mounted) {
@@ -692,6 +732,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     _syncedSessions.clear();
     _sessionSyncOffsets.clear();
     _activeSessionId = null;
+    _pendingReconnectActiveSessionId = null;
+    _pendingReconnectActiveGroupId = null;
     _terminalManager.activeSessionId = null;
     _terminalManager.clear();
     if (mounted) {
@@ -704,7 +746,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     String? activeSessionId,
     String? activeGroupId,
   }) {
-    final preferredActiveSessionId = _activeSessionId;
+    final preferredActiveSessionId =
+        _pendingReconnectActiveSessionId ?? _activeSessionId;
     _sessions
       ..clear()
       ..addAll(sessions);
@@ -721,20 +764,19 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       _requestSyncIfNeeded(sessionId);
     }
     // Restore active session if provided and still valid
-    if (activeSessionId != null && _sessions.contains(activeSessionId)) {
+    if (preferredActiveSessionId != null &&
+        _sessions.contains(preferredActiveSessionId)) {
+      _activeSessionId = preferredActiveSessionId;
+    } else if (activeSessionId != null && _sessions.contains(activeSessionId)) {
       _activeSessionId = activeSessionId;
-    } else if (preferredActiveSessionId != null &&
-        _sessions.contains(preferredActiveSessionId)) {
-      _activeSessionId = preferredActiveSessionId;
     }
-    _syncActiveSessionWithGroup();
-    if ((_activeSessionId == null || !_sessions.contains(_activeSessionId)) &&
-        preferredActiveSessionId != null &&
-        _sessions.contains(preferredActiveSessionId)) {
-      _activeSessionId = preferredActiveSessionId;
-      _terminalFor(preferredActiveSessionId);
+    if (_activeSessionId == null || !_sessions.contains(_activeSessionId)) {
+      _syncActiveSessionWithGroup();
+    } else {
+      _terminalFor(_activeSessionId!);
     }
     _terminalManager.activeSessionId = _activeSessionId;
+    _clearPendingReconnectSelectionIfRestored();
     if (mounted) {
       setState(() {});
     }
@@ -1124,6 +1166,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       !kIsWeb && (Platform.isMacOS || Platform.isLinux || Platform.isWindows);
 
   void _setActiveSession(String sessionId, {bool requestKeyboard = false}) {
+    _pendingReconnectActiveSessionId = null;
+    _pendingReconnectActiveGroupId = null;
     if (_activeSessionId == sessionId) {
       if (requestKeyboard && !_multiWindow && !_showHHKB) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
