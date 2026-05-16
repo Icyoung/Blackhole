@@ -2,9 +2,11 @@
 library voyager_share;
 
 // Models
+export 'src/models/multi_window_layout.dart';
 export 'src/models/terminal_group.dart';
 
 // Services
+export 'src/controllers/multi_window_layout_controller.dart';
 export 'src/services/crypto_service.dart';
 export 'src/services/terminal_manager.dart';
 export 'src/services/group_storage_migrator.dart';
@@ -40,3 +42,4 @@ export 'src/widgets/quick_actions_bar.dart';
 export 'src/widgets/settings_drawer.dart';
 export 'src/widgets/terminal_style.dart';
 export 'src/widgets/terminal_window_card.dart';
+export 'src/widgets/multi_window_grid.dart';

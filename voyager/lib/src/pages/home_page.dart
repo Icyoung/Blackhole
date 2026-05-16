@@ -18,6 +18,8 @@ import 'package:voyager_share/voyager_share.dart'
         CandidateBar,
         CommandInputBar,
         CommandInputBarState,
+        MultiWindowGrid,
+        MultiWindowLayoutController,
         VpnStatusRing,
         VpnRingState;
 import 'package:xterm/xterm.dart';
@@ -68,6 +70,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
 
   late final ConnectionManager _connectionManager;
   late final TerminalManager _terminalManager;
+  final MultiWindowLayoutController _multiWindowLayoutController =
+      MultiWindowLayoutController();
 
   bool _connected = false;
   bool _reconnecting = false;
@@ -324,6 +328,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       onChanged: _handleGroupChange,
       sendCommand: _connectionManager.sendCommand,
     );
+    _multiWindowLayoutController.addListener(_handleMultiWindowLayoutChanged);
+    unawaited(_loadAndSyncMultiWindowLayout());
     unawaited(_groupStore.loadLocalOrder());
     _pinyinEngine.addListener(_onPinyinChanged);
     _urlController.addListener(_handleAddressChange);
@@ -462,6 +468,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     if (!mounted) {
       return;
     }
+    unawaited(_loadAndSyncMultiWindowLayout());
     if (_reconnecting && _pendingReconnectActiveSessionId != null) {
       final sessionId = _pendingReconnectActiveSessionId!;
       setState(() {
@@ -481,6 +488,38 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     });
     _clearPendingReconnectSelectionIfRestored();
     _sendSelectSession();
+  }
+
+  Future<void> _loadAndSyncMultiWindowLayout() async {
+    await _multiWindowLayoutController.loadFor(_groupStore.activeGroupId);
+    if (!mounted) {
+      return;
+    }
+    _syncMultiWindowLayout();
+  }
+
+  void _syncMultiWindowLayout() {
+    if (!mounted) {
+      return;
+    }
+    final sessions = _visibleSessions;
+    if (sessions.isEmpty) {
+      return;
+    }
+    final columns = _currentVoyagerMultiWindowColumns();
+    _multiWindowLayoutController.syncSessions(
+      sessions,
+      defaultColumns: columns,
+      maxCellsPerRow: columns,
+    );
+  }
+
+  void _handleMultiWindowLayoutChanged() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
+    _scheduleActiveResize();
   }
 
   bool _groupContainsSession(String groupId, String sessionId) {
@@ -654,6 +693,10 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     _tokenController.dispose();
     _metricsDebounce?.cancel();
     _terminalManager.dispose();
+    _multiWindowLayoutController.removeListener(
+      _handleMultiWindowLayoutChanged,
+    );
+    _multiWindowLayoutController.dispose();
     if (_vpnAvailable) {
       _vpnService.dispose();
     }
@@ -679,6 +722,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       }
       _lastMetricsInsetsBottom = bottom;
       _lastMetricsSize = size;
+      if (!sameSize) {
+        _syncMultiWindowLayout();
+      }
       _scheduleActiveResize();
     });
   }
@@ -1624,16 +1670,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                       ? LayoutBuilder(
                         builder: (context, constraints) {
                           final width = constraints.maxWidth;
-                          var columns = 1;
-                          if (width >= 2500) {
-                            columns = 5;
-                          } else if (width >= 2000) {
-                            columns = 4;
-                          } else if (width >= 1500) {
-                            columns = 3;
-                          } else if (width >= 1000) {
-                            columns = 2;
-                          }
+                          final columns = _voyagerMultiWindowColumnsForWidth(
+                            width,
+                          );
                           final sessions =
                               _visibleSessions.isNotEmpty
                                   ? _visibleSessions
@@ -1642,14 +1681,6 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                                       : <String>[]);
                           final displaySessions =
                               sessions.isEmpty ? <String>[] : sessions;
-                          final aspectRatio =
-                              columns == 1
-                                  ? 1.4
-                                  : (columns == 2
-                                      ? 1.5
-                                      : (columns == 3
-                                          ? 1.6
-                                          : (columns == 4 ? 1.7 : 1.8)));
                           final padding = EdgeInsets.fromLTRB(
                             16,
                             12,
@@ -1682,24 +1713,34 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                             );
                           }
 
-                          return GridView.builder(
+                          final layout = _multiWindowLayoutController
+                              .effectiveLayout(
+                                displaySessions,
+                                defaultColumns: columns,
+                              );
+
+                          return MultiWindowGrid(
                             padding: padding,
-                            physics: const BouncingScrollPhysics(),
-                            gridDelegate:
-                                SliverGridDelegateWithFixedCrossAxisCount(
-                                  crossAxisCount: columns,
-                                  crossAxisSpacing: 12,
-                                  mainAxisSpacing: 12,
-                                  childAspectRatio: aspectRatio,
+                            gap: 0,
+                            desktopHitSize: 8,
+                            mobileBreakpoint: 600,
+                            scrollPhysics: const BouncingScrollPhysics(),
+                            layout: layout,
+                            onResizeColumn:
+                                _multiWindowLayoutController.resizeColumn,
+                            onResizeRow: _multiWindowLayoutController.resizeRow,
+                            onResizeEnd:
+                                () => unawaited(
+                                  _multiWindowLayoutController.commit(),
                                 ),
-                            itemCount: displaySessions.length + 1,
-                            itemBuilder: (context, index) {
-                              if (index == displaySessions.length) {
-                                return AddTerminalCard(
-                                  onTap: _sendCreateSession,
-                                );
-                              }
-                              final sessionId = displaySessions[index];
+                            onMoveCell: (from, to, side) => unawaited(
+                              _multiWindowLayoutController.moveCell(
+                                fromSessionId: from,
+                                toSessionId: to,
+                                side: side,
+                              ),
+                            ),
+                            cellBuilder: (context, sessionId, index) {
                               return TerminalWindowCard(
                                 key: _terminalCardKeyFor(sessionId),
                                 sessionId: sessionId,
@@ -2098,6 +2139,37 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     );
   }
 
+  int _voyagerMultiWindowColumnsForWidth(double width) {
+    if (width >= 2500) {
+      return 5;
+    }
+    if (width >= 2000) {
+      return 4;
+    }
+    if (width >= 1500) {
+      return 3;
+    }
+    if (width >= 1000) {
+      return 2;
+    }
+    return 1;
+  }
+
+  int _currentVoyagerMultiWindowColumns() {
+    return _voyagerMultiWindowColumnsForWidth(MediaQuery.sizeOf(context).width);
+  }
+
+  void _resetMultiWindowLayout({required bool keepPaneOrder}) {
+    unawaited(
+      _multiWindowLayoutController.resetToFallback(
+        sessionIds: _visibleSessions,
+        columns: _currentVoyagerMultiWindowColumns(),
+        keepPaneOrder: keepPaneOrder,
+      ),
+    );
+    _scheduleActiveResize();
+  }
+
   Widget _buildSettingsDrawer(BuildContext context) {
     return SettingsDrawer(
       useWormhole: _useWormhole,
@@ -2126,6 +2198,10 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
           _scheduleActiveResize();
         });
       },
+      onResetMultiWindowLayout:
+          () => _resetMultiWindowLayout(keepPaneOrder: false),
+      onEqualizeMultiWindowLayout:
+          () => _resetMultiWindowLayout(keepPaneOrder: true),
       onShowKeyboardToolsChanged: (value) {
         setState(() {
           _showKeyboardTools = value;

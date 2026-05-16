@@ -19,6 +19,8 @@ class SettingsDrawer extends StatefulWidget {
     required this.onUseWormholeChanged,
     required this.onAutoReconnectChanged,
     required this.onMultiWindowChanged,
+    this.onResetMultiWindowLayout,
+    this.onEqualizeMultiWindowLayout,
     required this.onShowKeyboardToolsChanged,
     required this.onShowCommandInputChanged,
     required this.onShowHHKBChanged,
@@ -40,6 +42,8 @@ class SettingsDrawer extends StatefulWidget {
   final ValueChanged<bool> onUseWormholeChanged;
   final ValueChanged<bool> onAutoReconnectChanged;
   final ValueChanged<bool> onMultiWindowChanged;
+  final VoidCallback? onResetMultiWindowLayout;
+  final VoidCallback? onEqualizeMultiWindowLayout;
   final ValueChanged<bool> onShowKeyboardToolsChanged;
   final ValueChanged<bool> onShowCommandInputChanged;
   final ValueChanged<bool> onShowHHKBChanged;
@@ -217,6 +221,23 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
               widget.multiWindow,
               widget.onMultiWindowChanged,
             ),
+            if (widget.multiWindow &&
+                (widget.onResetMultiWindowLayout != null ||
+                    widget.onEqualizeMultiWindowLayout != null)) ...[
+              const SizedBox(height: 8),
+              if (widget.onResetMultiWindowLayout != null)
+                _buildDrawerAction(
+                  'Reset Layout',
+                  Icons.restart_alt_rounded,
+                  widget.onResetMultiWindowLayout!,
+                ),
+              if (widget.onEqualizeMultiWindowLayout != null)
+                _buildDrawerAction(
+                  'Equalize Pane Sizes',
+                  Icons.grid_view_rounded,
+                  widget.onEqualizeMultiWindowLayout!,
+                ),
+            ],
             const SizedBox(height: 24),
             _buildDrawerSection('Input'),
             const SizedBox(height: 8),
@@ -403,6 +424,23 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
           ),
           Switch(value: value, onChanged: onChanged),
         ],
+      ),
+    );
+  }
+
+  Widget _buildDrawerAction(String label, IconData icon, VoidCallback onTap) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: TextButton.icon(
+        onPressed: onTap,
+        icon: Icon(icon, size: 16),
+        label: Text(label),
+        style: TextButton.styleFrom(
+          foregroundColor: AppColors.textPrimary,
+          alignment: Alignment.centerLeft,
+          padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 10),
+          textStyle: const TextStyle(fontSize: 14),
+        ),
       ),
     );
   }

@@ -10,7 +10,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:voyager_share/voyager_share.dart' show buildTerminalStyle;
+import 'package:voyager_share/voyager_share.dart'
+    show MultiWindowGrid, MultiWindowLayoutController, buildTerminalStyle;
 import 'package:xterm/xterm.dart';
 
 import '../controllers/horizon_controller.dart';
@@ -70,6 +71,8 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
 
   late final ConnectionManager _connectionManager;
   late final TerminalManager _terminalManager;
+  final MultiWindowLayoutController _multiWindowLayoutController =
+      MultiWindowLayoutController();
 
   bool _connected = false;
   bool _connectionAttempting = false;
@@ -275,6 +278,8 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       onChanged: _handleGroupChange,
       sendCommand: _sendGroupCommand,
     );
+    _multiWindowLayoutController.addListener(_handleMultiWindowLayoutChanged);
+    unawaited(_loadAndSyncMultiWindowLayout());
     unawaited(_groupStore.loadLocalOrder());
     _hostWormholeUrlController = TextEditingController(
       text: _hostController.wormholeBaseUrl,
@@ -679,6 +684,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     if (!mounted) {
       return;
     }
+    unawaited(_loadAndSyncMultiWindowLayout());
     _collapsedGroupIds.removeWhere(
       (id) => !_groupStore.groups.any((group) => group.id == id),
     );
@@ -689,6 +695,38 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     setState(() {
       _syncActiveSessionWithGroup();
     });
+  }
+
+  Future<void> _loadAndSyncMultiWindowLayout() async {
+    await _multiWindowLayoutController.loadFor(_groupStore.activeGroupId);
+    if (!mounted) {
+      return;
+    }
+    _syncMultiWindowLayout();
+  }
+
+  void _syncMultiWindowLayout() {
+    if (!mounted) {
+      return;
+    }
+    final sessions = _visibleSessions;
+    if (sessions.isEmpty) {
+      return;
+    }
+    final columns = _currentHorizonMultiWindowColumns();
+    _multiWindowLayoutController.syncSessions(
+      sessions,
+      defaultColumns: columns,
+      maxCellsPerRow: columns,
+    );
+  }
+
+  void _handleMultiWindowLayoutChanged() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
+    _scheduleActiveResize();
   }
 
   void _handleHostChange() {
@@ -1316,6 +1354,10 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _hostController.dispose();
     _tabScrollController.dispose();
     _groupScrollController.dispose();
+    _multiWindowLayoutController.removeListener(
+      _handleMultiWindowLayoutChanged,
+    );
+    _multiWindowLayoutController.dispose();
     super.dispose();
   }
 
@@ -1410,6 +1452,9 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       }
       _lastMetricsInsetsBottom = bottom;
       _lastMetricsSize = size;
+      if (!sameSize) {
+        _syncMultiWindowLayout();
+      }
       _scheduleActiveResize();
     });
   }
@@ -2764,6 +2809,8 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       message: _multiWindow ? 'Multi session' : 'Single session',
       child: InkWell(
         onTap: _toggleMultiWindow,
+        onLongPress: _multiWindow ? _showMultiWindowLayoutMenu : null,
+        onSecondaryTap: _multiWindow ? _showMultiWindowLayoutMenu : null,
         borderRadius: BorderRadius.circular(10),
         child: Container(
           width: 32,
@@ -2777,6 +2824,37 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
         ),
       ),
     );
+  }
+
+  Future<void> _showMultiWindowLayoutMenu() async {
+    final overlayRender = Overlay.of(context).context.findRenderObject();
+    if (overlayRender is! RenderBox) {
+      return;
+    }
+    final selected = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        overlayRender.size.width - 220,
+        72,
+        16,
+        overlayRender.size.height - 72,
+      ),
+      items: const [
+        PopupMenuItem(
+          value: 'reset',
+          child: Text('Reset layout to sidebar order'),
+        ),
+        PopupMenuItem(value: 'equalize', child: Text('Equalize pane sizes')),
+      ],
+    );
+    if (!mounted) {
+      return;
+    }
+    if (selected == 'reset') {
+      _resetMultiWindowLayout(keepPaneOrder: false);
+    } else if (selected == 'equalize') {
+      _resetMultiWindowLayout(keepPaneOrder: true);
+    }
   }
 
   Widget _buildTabStrip(List<String> sessions) {
@@ -3707,41 +3785,41 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     return LayoutBuilder(
       builder: (context, constraints) {
         final width = constraints.maxWidth;
-        var columns = 1;
-        if (width >= 2400) {
-          columns = 4;
-        } else if (width >= 1800) {
-          columns = 3;
-        } else if (width >= 1200) {
-          columns = 2;
-        }
+        final columns = _horizonMultiWindowColumnsForWidth(width);
         final sessions =
             _visibleSessions.isNotEmpty
                 ? _visibleSessions
                 : (_activeSessionId != null ? [_activeSessionId!] : <String>[]);
         final displaySessions = sessions.isEmpty ? <String>[] : sessions;
-        final aspectRatio = columns == 1 ? 1.35 : (columns == 2 ? 1.45 : 1.55);
         final padding = EdgeInsets.fromLTRB(18, 16, 18, _bottomBarHeight + 20);
 
         if (displaySessions.isEmpty) {
           return _buildEmptySessionState(padding);
         }
 
-        return GridView.builder(
+        final layout = _multiWindowLayoutController.effectiveLayout(
+          displaySessions,
+          defaultColumns: columns,
+        );
+
+        return MultiWindowGrid(
           padding: padding,
-          physics: const BouncingScrollPhysics(),
-          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: columns,
-            crossAxisSpacing: 14,
-            mainAxisSpacing: 14,
-            childAspectRatio: aspectRatio,
+          gap: 0,
+          desktopHitSize: 9,
+          mobileBreakpoint: 0,
+          scrollPhysics: const BouncingScrollPhysics(),
+          layout: layout,
+          onResizeColumn: _multiWindowLayoutController.resizeColumn,
+          onResizeRow: _multiWindowLayoutController.resizeRow,
+          onResizeEnd: () => unawaited(_multiWindowLayoutController.commit()),
+          onMoveCell: (from, to, side) => unawaited(
+            _multiWindowLayoutController.moveCell(
+              fromSessionId: from,
+              toSessionId: to,
+              side: side,
+            ),
           ),
-          itemCount: displaySessions.length + 1,
-          itemBuilder: (context, index) {
-            if (index == displaySessions.length) {
-              return _buildAddSessionCard();
-            }
-            final sessionId = displaySessions[index];
+          cellBuilder: (context, sessionId, index) {
             final label = _getSessionLabel(sessionId, index);
             return HorizonSessionCard(
               key: _terminalCardKeyFor(sessionId),
@@ -3764,6 +3842,35 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
         );
       },
     );
+  }
+
+  int _horizonMultiWindowColumnsForWidth(double width) {
+    if (width >= 2400) {
+      return 4;
+    }
+    if (width >= 1800) {
+      return 3;
+    }
+    if (width >= 1200) {
+      return 2;
+    }
+    return 1;
+  }
+
+  int _currentHorizonMultiWindowColumns() {
+    final width = MediaQuery.sizeOf(context).width;
+    return _horizonMultiWindowColumnsForWidth(width);
+  }
+
+  void _resetMultiWindowLayout({required bool keepPaneOrder}) {
+    unawaited(
+      _multiWindowLayoutController.resetToFallback(
+        sessionIds: _visibleSessions,
+        columns: _currentHorizonMultiWindowColumns(),
+        keepPaneOrder: keepPaneOrder,
+      ),
+    );
+    _scheduleActiveResize();
   }
 
   Widget _buildSingleSessionView(bool deleteDetection) {

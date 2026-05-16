@@ -17,6 +17,8 @@ class SettingsDrawer extends StatelessWidget {
     required this.onUseWormholeChanged,
     required this.onAutoReconnectChanged,
     required this.onMultiWindowChanged,
+    this.onResetMultiWindowLayout,
+    this.onEqualizeMultiWindowLayout,
     required this.onShowKeyboardToolsChanged,
     required this.onShowCommandInputChanged,
     required this.onShowHHKBChanged,
@@ -35,6 +37,8 @@ class SettingsDrawer extends StatelessWidget {
   final ValueChanged<bool> onUseWormholeChanged;
   final ValueChanged<bool> onAutoReconnectChanged;
   final ValueChanged<bool> onMultiWindowChanged;
+  final VoidCallback? onResetMultiWindowLayout;
+  final VoidCallback? onEqualizeMultiWindowLayout;
   final ValueChanged<bool> onShowKeyboardToolsChanged;
   final ValueChanged<bool> onShowCommandInputChanged;
   final ValueChanged<bool> onShowHHKBChanged;
@@ -103,6 +107,23 @@ class SettingsDrawer extends StatelessWidget {
               multiWindow,
               onMultiWindowChanged,
             ),
+            if (multiWindow &&
+                (onResetMultiWindowLayout != null ||
+                    onEqualizeMultiWindowLayout != null)) ...[
+              const SizedBox(height: 8),
+              if (onResetMultiWindowLayout != null)
+                _buildDrawerAction(
+                  'Reset Layout',
+                  Icons.restart_alt_rounded,
+                  onResetMultiWindowLayout!,
+                ),
+              if (onEqualizeMultiWindowLayout != null)
+                _buildDrawerAction(
+                  'Equalize Pane Sizes',
+                  Icons.grid_view_rounded,
+                  onEqualizeMultiWindowLayout!,
+                ),
+            ],
             const SizedBox(height: 24),
             _buildDrawerSection('Input'),
             const SizedBox(height: 8),
@@ -196,6 +217,23 @@ class SettingsDrawer extends StatelessWidget {
           ),
           Switch(value: value, onChanged: onChanged),
         ],
+      ),
+    );
+  }
+
+  Widget _buildDrawerAction(String label, IconData icon, VoidCallback onTap) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: TextButton.icon(
+        onPressed: onTap,
+        icon: Icon(icon, size: 16),
+        label: Text(label),
+        style: TextButton.styleFrom(
+          foregroundColor: AppColors.textPrimary,
+          alignment: Alignment.centerLeft,
+          padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 10),
+          textStyle: const TextStyle(fontSize: 14),
+        ),
       ),
     );
   }
