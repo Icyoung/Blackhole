@@ -90,8 +90,8 @@ class _HorizonSessionCardState extends State<HorizonSessionCard>
                   decoration: BoxDecoration(
                     color: headerColor,
                     borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(15),
-                      topRight: Radius.circular(15),
+                      topLeft: Radius.circular(12),
+                      topRight: Radius.circular(12),
                     ),
                   ),
                   child: Row(
