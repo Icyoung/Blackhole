@@ -313,11 +313,23 @@ class ConnectionManager {
     String? horizonPublicKey,
   })
   onPairingResult;
-  final void Function(List<String> sessions, {String? activeSessionId, String? activeGroupId}) onSessionList;
+  final void Function(
+    List<String> sessions, {
+    String? activeSessionId,
+    String? activeGroupId,
+  })
+  onSessionList;
   final void Function(String sessionId) onSessionCreated;
   final void Function(String sessionId) onSessionClosed;
   final void Function(String sessionId, Uint8List data) onStdout;
-  final void Function(String sessionId, String content)? onSessionSync;
+  final void Function(
+    String sessionId,
+    String content, {
+    int? offset,
+    int? nextOffset,
+    bool reset,
+  })?
+  onSessionSync;
 
   /// Called when Wormhole provides Horizon's WireGuard endpoint info.
   final void Function(EndpointInfo info)? onEndpointInfo;
@@ -605,12 +617,20 @@ class ConnectionManager {
     channel.sink.add(_encodeMessage(payload));
   }
 
-  void sendSyncRequest(String sessionId) {
-    sendCommand({'type': 'sync', 'sessionId': sessionId});
+  void sendSyncRequest(String sessionId, {int? offset}) {
+    sendCommand({
+      'type': 'sync',
+      'sessionId': sessionId,
+      if (offset != null) 'offset': offset,
+    });
   }
 
   void sendSelectSession(String sessionId, String groupId) {
-    sendCommand({'type': 'select_session', 'sessionId': sessionId, 'groupId': groupId});
+    sendCommand({
+      'type': 'select_session',
+      'sessionId': sessionId,
+      'groupId': groupId,
+    });
   }
 
   // Max chunk size to prevent PTY buffer overflow (1KB is safe for all platforms)
@@ -971,7 +991,13 @@ class ConnectionManager {
       final sessionId = decoded['sessionId'];
       final content = decoded['content'];
       if (sessionId is String && content is String) {
-        onSessionSync?.call(sessionId, content);
+        onSessionSync?.call(
+          sessionId,
+          content,
+          offset: _readInt(decoded['offset']),
+          nextOffset: _readInt(decoded['nextOffset']),
+          reset: decoded['reset'] as bool? ?? true,
+        );
       }
       return;
     }
@@ -1009,6 +1035,19 @@ class ConnectionManager {
     }
   }
 
+  int? _readInt(Object? value) {
+    if (value is int) {
+      return value;
+    }
+    if (value is num) {
+      return value.toInt();
+    }
+    if (value is String) {
+      return int.tryParse(value);
+    }
+    return null;
+  }
+
   int _heartbeatMisses = 0;
   static const int _maxHeartbeatMisses = 3;
 
@@ -1032,7 +1071,9 @@ class ConnectionManager {
           '(silent ${silence.inSeconds}s)',
         );
         if (_heartbeatMisses >= _maxHeartbeatMisses) {
-          debugPrint('[Connection] heartbeat exceeded max misses, reconnecting silently');
+          debugPrint(
+            '[Connection] heartbeat exceeded max misses, reconnecting silently',
+          );
           _heartbeatMisses = 0;
           disconnect(shouldReconnect: true);
         }

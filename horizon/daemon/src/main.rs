@@ -115,6 +115,7 @@ struct PtySession {
     master_fd: std::os::fd::RawFd,
     child_pid: i32,
     history: std::sync::Mutex<Vec<u8>>,
+    history_base_offset: std::sync::Mutex<usize>,
     closed: std::sync::atomic::AtomicBool,
 }
 
@@ -123,6 +124,7 @@ struct PtySession {
     session_id: String,
     conpty: winconpty::ConPty,
     history: std::sync::Mutex<Vec<u8>>,
+    history_base_offset: std::sync::Mutex<usize>,
     closed: std::sync::atomic::AtomicBool,
 }
 
@@ -130,6 +132,7 @@ struct PtySession {
 struct PtySession {
     session_id: String,
     history: std::sync::Mutex<Vec<u8>>,
+    history_base_offset: std::sync::Mutex<usize>,
 }
 
 const MAX_HISTORY_BYTES: usize = 1024 * 1024;
@@ -1213,12 +1216,26 @@ async fn handle_lan_incoming(
                     let Some(session_id) = value.get("sessionId").and_then(|v| v.as_str()) else {
                         return Ok(());
                     };
-                    let content = get_history(state, session_id).await.unwrap_or_default();
+                    let requested_offset = value
+                        .get("offset")
+                        .and_then(|v| v.as_u64())
+                        .and_then(|v| usize::try_from(v).ok());
+                    let delta = get_history_delta(state, session_id, requested_offset)
+                        .await
+                        .unwrap_or(HistoryDelta {
+                            offset: 0,
+                            next_offset: 0,
+                            reset: true,
+                            content: String::new(),
+                        });
                     let _ = sink
                         .send(AxumMessage::Text(encode_json(json!({
                             "type": "session_sync",
                             "sessionId": session_id,
-                            "content": content,
+                            "offset": delta.offset,
+                            "nextOffset": delta.next_offset,
+                            "reset": delta.reset,
+                            "content": delta.content,
                         }))))
                         .await;
                 }
@@ -1661,10 +1678,7 @@ async fn handle_inject_request(
                 write_all_pty(session.master_fd, &data)
                     .map_err(|_| host_err("internal_error", "write to pty failed"))?;
                 let submit_delay_ms = compute_injected_submit_delay_ms(command);
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    submit_delay_ms,
-                ))
-                .await;
+                tokio::time::sleep(std::time::Duration::from_millis(submit_delay_ms)).await;
             }
             if write_all_pty(session.master_fd, injected_submit_bytes()).is_err() {
                 Err(host_err("internal_error", "write to pty failed"))
@@ -1881,10 +1895,14 @@ async fn handle_daemon_request(
             } else {
                 None
             };
-            let session_id =
-                create_session_with_command(state, resolved_group_id.as_deref(), startup_command, env_vars)
-                    .await
-                    .map_err(|e| host_err("internal_error", &format!("spawn failed: {e}")))?;
+            let session_id = create_session_with_command(
+                state,
+                resolved_group_id.as_deref(),
+                startup_command,
+                env_vars,
+            )
+            .await
+            .map_err(|e| host_err("internal_error", &format!("spawn failed: {e}")))?;
             // Notify LAN + Wormhole clients so UI updates
             let msg = encode_json(json!({
                 "type": "session_created",
@@ -2065,13 +2083,39 @@ async fn resize_session(state: &Arc<AppState>, session_id: &str, rows: u16, cols
 #[cfg(not(any(unix, windows)))]
 async fn resize_session(_state: &Arc<AppState>, _session_id: &str, _rows: u16, _cols: u16) {}
 
-async fn get_history(state: &Arc<AppState>, session_id: &str) -> Option<String> {
+#[derive(Debug)]
+struct HistoryDelta {
+    offset: usize,
+    next_offset: usize,
+    reset: bool,
+    content: String,
+}
+
+async fn get_history_delta(
+    state: &Arc<AppState>,
+    session_id: &str,
+    requested_offset: Option<usize>,
+) -> Option<HistoryDelta> {
     let sessions = state.sessions.lock().await;
     let session = sessions.get(session_id)?.clone();
     drop(sessions);
 
     let bytes = session.history.lock().ok()?.clone();
-    Some(String::from_utf8_lossy(&bytes).to_string())
+    let base_offset = *session.history_base_offset.lock().ok()?;
+    let next_offset = base_offset.saturating_add(bytes.len());
+    let mut reset = false;
+    let mut offset = requested_offset.unwrap_or(base_offset);
+    if offset < base_offset || offset > next_offset {
+        reset = true;
+        offset = base_offset;
+    }
+    let relative_start = offset.saturating_sub(base_offset).min(bytes.len());
+    Some(HistoryDelta {
+        offset,
+        next_offset,
+        reset,
+        content: String::from_utf8_lossy(&bytes[relative_start..]).to_string(),
+    })
 }
 
 fn encode_json(value: serde_json::Value) -> String {
@@ -2438,7 +2482,11 @@ fn build_stdout_message(session_id: &str, payload: &[u8]) -> Vec<u8> {
     encode_binary(BinaryType::Stdout, session_id, payload)
 }
 
-fn append_history(history: &std::sync::Mutex<Vec<u8>>, data: &[u8]) {
+fn append_history(
+    history: &std::sync::Mutex<Vec<u8>>,
+    history_base_offset: &std::sync::Mutex<usize>,
+    data: &[u8],
+) {
     let Ok(mut buf) = history.lock() else {
         return;
     };
@@ -2455,6 +2503,9 @@ fn append_history(history: &std::sync::Mutex<Vec<u8>>, data: &[u8]) {
         }
     }
     buf.drain(0..cut);
+    if let Ok(mut base_offset) = history_base_offset.lock() {
+        *base_offset = base_offset.saturating_add(cut);
+    }
 }
 
 #[cfg(unix)]
@@ -2473,7 +2524,7 @@ fn start_output_thread(state: Arc<AppState>, session: Arc<PtySession>) {
                 break;
             }
             let chunk = &buf[..n as usize];
-            append_history(&session.history, chunk);
+            append_history(&session.history, &session.history_base_offset, chunk);
             let msg = BroadcastMsg::Binary(build_stdout_message(&session.session_id, chunk));
             let _ = state.lan_broadcast.send(msg.clone());
             let _ = state.wormhole_broadcast.send(msg);
@@ -2494,7 +2545,7 @@ fn start_output_thread(state: Arc<AppState>, session: Arc<PtySession>) {
                 break;
             }
             let chunk = &buf[..n];
-            append_history(&session.history, chunk);
+            append_history(&session.history, &session.history_base_offset, chunk);
             let msg = BroadcastMsg::Binary(build_stdout_message(&session.session_id, chunk));
             let _ = state.lan_broadcast.send(msg.clone());
             let _ = state.wormhole_broadcast.send(msg);
@@ -2954,6 +3005,7 @@ fn spawn_pty_session(
         master_fd,
         child_pid: pid,
         history: std::sync::Mutex::new(Vec::<u8>::new()),
+        history_base_offset: std::sync::Mutex::new(0),
         closed: std::sync::atomic::AtomicBool::new(false),
     })
 }
@@ -2970,6 +3022,7 @@ fn spawn_pty_session(
         session_id: session_id.to_string(),
         conpty,
         history: std::sync::Mutex::new(Vec::<u8>::new()),
+        history_base_offset: std::sync::Mutex::new(0),
         closed: std::sync::atomic::AtomicBool::new(false),
     })
 }
@@ -4494,8 +4547,6 @@ async fn wait_for_wormhole_session(state: &Arc<AppState>) -> Option<String> {
     }
 }
 
-
-
 fn configured_wg_netcheck_endpoint(state: &Arc<AppState>) -> (Option<String>, Option<u16>) {
     let configured_host = std::env::var("WORMHOLE_NETCHECK_HOST")
         .ok()
@@ -4751,11 +4802,29 @@ async fn handle_wormhole_incoming(
                     let Some(session_id) = value.get("sessionId").and_then(|v| v.as_str()) else {
                         return Ok(());
                     };
-                    let content = get_history(state, session_id).await.unwrap_or_default();
+                    let requested_offset = value
+                        .get("offset")
+                        .and_then(|v| v.as_u64())
+                        .and_then(|v| usize::try_from(v).ok());
+                    let delta = get_history_delta(state, session_id, requested_offset)
+                        .await
+                        .unwrap_or(HistoryDelta {
+                            offset: 0,
+                            next_offset: 0,
+                            reset: true,
+                            content: String::new(),
+                        });
                     let _ = write
-                        .send(tokio_tungstenite::tungstenite::Message::Text(
-                            encode_json(json!({"type":"session_sync","sessionId": session_id, "content": content})),
-                        ))
+                        .send(tokio_tungstenite::tungstenite::Message::Text(encode_json(
+                            json!({
+                                "type": "session_sync",
+                                "sessionId": session_id,
+                                "offset": delta.offset,
+                                "nextOffset": delta.next_offset,
+                                "reset": delta.reset,
+                                "content": delta.content,
+                            }),
+                        )))
                         .await;
                 }
                 "create" => {

@@ -57,13 +57,25 @@ class ConnectionManager {
   final void Function(String message) onGroupError;
   final void Function({required bool approved, String? assignedKey})
   onPairingResult;
-  final void Function(List<String> sessions, {String? activeSessionId, String? activeGroupId}) onSessionList;
+  final void Function(
+    List<String> sessions, {
+    String? activeSessionId,
+    String? activeGroupId,
+  })
+  onSessionList;
   final void Function(String sessionId) onSessionCreated;
   final void Function(String sessionId) onSessionClosed;
   final void Function(String sessionId, Uint8List bytes) onStdoutBytes;
   final void Function(String sessionId, String text) onStdout;
   final void Function(String sessionId, String cwd)? onCwd;
-  final void Function(String sessionId, String content)? onSessionSync;
+  final void Function(
+    String sessionId,
+    String content, {
+    int? offset,
+    int? nextOffset,
+    bool reset,
+  })?
+  onSessionSync;
 
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
@@ -152,8 +164,12 @@ class ConnectionManager {
     channel.sink.add(_encodeMessage(payload));
   }
 
-  void sendSyncRequest(String sessionId) {
-    sendCommand({'type': 'sync', 'sessionId': sessionId});
+  void sendSyncRequest(String sessionId, {int? offset}) {
+    sendCommand({
+      'type': 'sync',
+      'sessionId': sessionId,
+      if (offset != null) 'offset': offset,
+    });
   }
 
   void sendRaw(String sessionId, String data) {
@@ -338,7 +354,13 @@ class ConnectionManager {
       final sessionId = decoded['sessionId'];
       final content = decoded['content'];
       if (sessionId is String && content is String) {
-        onSessionSync?.call(sessionId, content);
+        onSessionSync?.call(
+          sessionId,
+          content,
+          offset: _readInt(decoded['offset']),
+          nextOffset: _readInt(decoded['nextOffset']),
+          reset: decoded['reset'] as bool? ?? true,
+        );
       }
       return;
     }
@@ -374,6 +396,19 @@ class ConnectionManager {
     }
   }
 
+  int? _readInt(Object? value) {
+    if (value is int) {
+      return value;
+    }
+    if (value is num) {
+      return value.toInt();
+    }
+    if (value is String) {
+      return int.tryParse(value);
+    }
+    return null;
+  }
+
   int _heartbeatMisses = 0;
   static const int _maxHeartbeatMisses = 3;
 
@@ -397,7 +432,9 @@ class ConnectionManager {
           '(silent ${silence.inSeconds}s)',
         );
         if (_heartbeatMisses >= _maxHeartbeatMisses) {
-          debugPrint('[Connection] heartbeat exceeded max misses, reconnecting silently');
+          debugPrint(
+            '[Connection] heartbeat exceeded max misses, reconnecting silently',
+          );
           _heartbeatMisses = 0;
           disconnect(shouldReconnect: true);
         }

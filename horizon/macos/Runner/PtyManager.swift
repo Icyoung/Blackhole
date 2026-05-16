@@ -12,7 +12,7 @@ final class PtyManager {
   private var sessions: [String: Session] = [:]
   var outputHandler: ((String, Data) -> Void)?
 
-  func startShell(rows: Int, cols: Int, shellPath: String?) throws -> String {
+  func startShell(rows: Int, cols: Int, shellPath: String?, cwd: String?) throws -> String {
     var masterFd: Int32 = 0
     var win = winsize(
       ws_row: UInt16(rows),
@@ -57,8 +57,15 @@ final class PtyManager {
     let cShell = strdup(shell)
     let cPath  = strdup(bootstrapPath)
     let cUser  = strdup(userName)
-    // Shell command: cd to home first, then exec interactive login shell
-    let cCdExec = strdup("cd && exec \(shell) -il")
+    // Shell command: cd to target directory, then exec interactive login shell
+    let cdTarget = cwd ?? ""
+    let cCdExec: UnsafeMutablePointer<CChar>?
+    if cdTarget.isEmpty {
+      cCdExec = strdup("cd && exec \(shell) -il")
+    } else {
+      let escaped = cdTarget.replacingOccurrences(of: "'", with: "'\\''")
+      cCdExec = strdup("cd '\(escaped)' && exec \(shell) -il")
+    }
 
     let pid = forkpty(&masterFd, nil, nil, &win)
     if pid < 0 {

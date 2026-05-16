@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:desktop_drop/desktop_drop.dart';
@@ -9,7 +10,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:voyager_share/voyager_share.dart'
-    show AppColors, buildTerminalStyle, kTerminalThemeLight, PinyinEngine, CandidateBar, CommandInputBar, CommandInputBarState, VpnStatusRing, VpnRingState;
+    show
+        AppColors,
+        buildTerminalStyle,
+        kTerminalThemeLight,
+        PinyinEngine,
+        CandidateBar,
+        CommandInputBar,
+        CommandInputBarState,
+        VpnStatusRing,
+        VpnRingState;
 import 'package:xterm/xterm.dart';
 
 import '../models/terminal_group.dart';
@@ -26,7 +36,6 @@ import '../services/transport_models.dart';
 import '../services/transport_rollout.dart';
 import '../widgets/add_terminal_card.dart';
 import '../widgets/chrome/header_chrome.dart';
-import '../widgets/common/status_dot.dart';
 import '../widgets/group_drawer.dart';
 import '../widgets/keyboard/hhkb_keyboard.dart';
 import '../widgets/quick_actions_bar.dart';
@@ -43,7 +52,8 @@ class VoyagerHome extends StatefulWidget {
 class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final GlobalKey _quickBarKey = GlobalKey();
-  final GlobalKey<CommandInputBarState> _commandInputKey = GlobalKey<CommandInputBarState>();
+  final GlobalKey<CommandInputBarState> _commandInputKey =
+      GlobalKey<CommandInputBarState>();
   final TextEditingController _urlController = TextEditingController(
     text: 'ws://127.0.0.1:9527/ws',
   );
@@ -88,6 +98,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
 
   final List<String> _sessions = [];
   final Set<String> _syncedSessions = {};
+  final Map<String, int> _sessionSyncOffsets = {};
   String? _activeSessionId;
   late final GroupStore _groupStore;
 
@@ -102,11 +113,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   // GlobalKeys for terminal cards in multi-window mode (for hit testing)
   final Map<String, GlobalKey> _terminalCardKeys = {};
 
-  String? _error;
-
   void _showError(String message) {
     if (!mounted) return;
-    setState(() { _error = null; }); // Clear inline error
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Row(
@@ -187,9 +195,11 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
         final wasReconnecting = _reconnecting;
         if (_reconnecting) {
           _reconnecting = false;
-          // Re-sync existing sessions after passive reconnect.
+          _syncedSessions.clear();
+          // Re-sync existing sessions after passive reconnect from the last
+          // rendered byte offset so cached terminals do not duplicate history.
           for (final sid in _sessions) {
-            _connectionManager.sendSyncRequest(sid);
+            _requestSyncIfNeeded(sid);
           }
         }
         if (!waitForPairing) {
@@ -266,10 +276,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
             // original URI (which lacked device_key) and Horizon treats
             // every reconnect as a new device.
             if (_useWormhole) {
-              final refreshed = _buildWormholeUri();
-              if (refreshed != null) {
-                _connectionManager.updateReconnectUri(refreshed);
-              }
+              _connectionManager.updateReconnectUri(_buildWormholeUri());
             }
           }
           // Setup encryption if Horizon provided public key
@@ -279,7 +286,6 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
           if (mounted) {
             setState(() {
               _pairingPending = false;
-              _error = null;
             });
           }
           debugPrint(
@@ -299,7 +305,11 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
         }
       },
       onSessionList: (sessions, {activeSessionId, activeGroupId}) {
-        _handleSessionList(sessions, activeSessionId: activeSessionId, activeGroupId: activeGroupId);
+        _handleSessionList(
+          sessions,
+          activeSessionId: activeSessionId,
+          activeGroupId: activeGroupId,
+        );
       },
       onSessionCreated: _handleSessionCreated,
       onSessionClosed: _handleSessionClosed,
@@ -450,6 +460,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     if (!mounted) {
       return;
     }
+    _restoreActiveGroupForCurrentSession();
     // Request sync for all sessions in the new group
     for (final sessionId in _visibleSessions) {
       _requestSyncIfNeeded(sessionId);
@@ -458,6 +469,23 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       _syncActiveSessionWithGroup();
     });
     _sendSelectSession();
+  }
+
+  void _restoreActiveGroupForCurrentSession() {
+    final activeSessionId = _activeSessionId;
+    if (activeSessionId == null) {
+      return;
+    }
+    final activeGroup = _groupStore.activeGroup;
+    if (activeGroup?.sessionIds.contains(activeSessionId) == true) {
+      return;
+    }
+    for (final group in _groupStore.groups) {
+      if (group.sessionIds.contains(activeSessionId)) {
+        _groupStore.setActiveGroup(group.id);
+        return;
+      }
+    }
   }
 
   void _syncActiveSessionWithGroup() {
@@ -556,6 +584,20 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) {
+      return;
+    }
+    if (_connected || !_autoReconnect || !_connectionManager.shouldReconnect) {
+      return;
+    }
+    if (_sessions.isNotEmpty) {
+      _reconnecting = true;
+    }
+    unawaited(_connect(resetVpnUpgrade: false));
+  }
+
+  @override
   void dispose() {
     if (_vpnAvailable) {
       _vpnService.removeListener(_onVpnStatusChanged);
@@ -648,6 +690,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     _remoteDeviceName = null;
     _sessions.clear();
     _syncedSessions.clear();
+    _sessionSyncOffsets.clear();
     _activeSessionId = null;
     _terminalManager.activeSessionId = null;
     _terminalManager.clear();
@@ -656,7 +699,12 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     }
   }
 
-  void _handleSessionList(List<String> sessions, {String? activeSessionId, String? activeGroupId}) {
+  void _handleSessionList(
+    List<String> sessions, {
+    String? activeSessionId,
+    String? activeGroupId,
+  }) {
+    final preferredActiveSessionId = _activeSessionId;
     _sessions
       ..clear()
       ..addAll(sessions);
@@ -675,8 +723,17 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     // Restore active session if provided and still valid
     if (activeSessionId != null && _sessions.contains(activeSessionId)) {
       _activeSessionId = activeSessionId;
+    } else if (preferredActiveSessionId != null &&
+        _sessions.contains(preferredActiveSessionId)) {
+      _activeSessionId = preferredActiveSessionId;
     }
     _syncActiveSessionWithGroup();
+    if ((_activeSessionId == null || !_sessions.contains(_activeSessionId)) &&
+        preferredActiveSessionId != null &&
+        _sessions.contains(preferredActiveSessionId)) {
+      _activeSessionId = preferredActiveSessionId;
+      _terminalFor(preferredActiveSessionId);
+    }
     _terminalManager.activeSessionId = _activeSessionId;
     if (mounted) {
       setState(() {});
@@ -693,7 +750,10 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       return;
     }
     _syncedSessions.add(sessionId);
-    _connectionManager.sendSyncRequest(sessionId);
+    _connectionManager.sendSyncRequest(
+      sessionId,
+      offset: _sessionSyncOffsets[sessionId],
+    );
   }
 
   void _handleSessionCreated(String sessionId) {
@@ -716,6 +776,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     _sessions.remove(sessionId);
     _terminalManager.removeSession(sessionId);
     _terminalCardKeys.remove(sessionId);
+    _sessionSyncOffsets.remove(sessionId);
+    _syncedSessions.remove(sessionId);
     if (_activeSessionId == sessionId) {
       final sessions = _visibleSessions;
       _activeSessionId = sessions.isNotEmpty ? sessions.first : null;
@@ -730,16 +792,47 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     _updateWindowTitle();
   }
 
-  void _handleSessionSync(String sessionId, String content) {
-    if (content.isEmpty) {
+  void _handleSessionSync(
+    String sessionId,
+    String content, {
+    int? offset,
+    int? nextOffset,
+    bool reset = true,
+  }) {
+    if (reset) {
+      _terminalManager.resetTerminal(sessionId);
+    }
+    final currentOffset = reset ? null : _sessionSyncOffsets[sessionId];
+    final startOffset = offset ?? (reset ? 0 : currentOffset ?? 0);
+    final contentBytes = content.isEmpty ? Uint8List(0) : utf8.encode(content);
+    final responseNextOffset =
+        nextOffset ?? (startOffset + contentBytes.length);
+    var writeBytes = contentBytes;
+    if (!reset && currentOffset != null && startOffset < currentOffset) {
+      final alreadyRendered = currentOffset - startOffset;
+      if (alreadyRendered >= contentBytes.length) {
+        _sessionSyncOffsets[sessionId] =
+            currentOffset > responseNextOffset
+                ? currentOffset
+                : responseNextOffset;
+        return;
+      }
+      writeBytes = Uint8List.fromList(contentBytes.sublist(alreadyRendered));
+    }
+    _sessionSyncOffsets[sessionId] =
+        (_sessionSyncOffsets[sessionId] ?? 0) > responseNextOffset
+            ? _sessionSyncOffsets[sessionId]!
+            : responseNextOffset;
+    if (writeBytes.isEmpty) {
       return;
     }
-    // Write synced content to terminal
-    _terminalManager.writeToTerminal(sessionId, content);
+    _terminalManager.writeToTerminalBytes(sessionId, writeBytes);
     // Note: No setState needed - TerminalView auto-updates via Terminal's notifyListeners
   }
 
   void _handleStdout(String sessionId, Uint8List data) {
+    _sessionSyncOffsets[sessionId] =
+        (_sessionSyncOffsets[sessionId] ?? 0) + data.length;
     _terminalManager.writeToTerminalBytes(sessionId, data);
     // Note: No setState needed - TerminalView auto-updates via Terminal's notifyListeners
   }
@@ -751,7 +844,6 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     );
     if (mounted) {
       setState(() {
-        _error = null;
         _pairingPending = false;
       });
     }
@@ -1450,7 +1542,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
         children: [
           Positioned.fill(child: Container(color: AppColors.surfaceVariant)),
           Positioned.fill(
-            top: MediaQuery.of(context).padding.top + terminalTopInset.toDouble(),
+            top:
+                MediaQuery.of(context).padding.top +
+                terminalTopInset.toDouble(),
             child: DropTarget(
               onDragDone: _handleFileDrop,
               onDragEntered: (details) {
@@ -1618,9 +1712,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                       ),
                     ),
                   if (_reconnecting)
-                    const Positioned.fill(
-                      child: AbsorbPointer(),
-                    ),
+                    const Positioned.fill(child: AbsorbPointer()),
                 ],
               ),
             ),
@@ -1846,7 +1938,11 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
         child: Row(
           children: [
             IconButton(
-              icon: const Icon(Icons.menu, color: AppColors.textSecondary, size: 20),
+              icon: const Icon(
+                Icons.menu,
+                color: AppColors.textSecondary,
+                size: 20,
+              ),
               onPressed: () {
                 _scaffoldKey.currentState?.openDrawer();
                 _groupStore.setDeferredSync(true);
@@ -2217,7 +2313,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
               // through the physical interface. LAN candidates are passed
               // separately via directCandidates for the PacketTunnelProvider
               // to choose from.
-              serverAddr: mergedInfo.horizonAddr ?? _resolveVpnServerHost(mergedInfo),
+              serverAddr:
+                  mergedInfo.horizonAddr ?? _resolveVpnServerHost(mergedInfo),
               serverPort: mergedInfo.wgUdpPort ?? 51820,
               clientIp: mergedInfo.clientIp ?? '10.13.37.2',
               serverIp: mergedInfo.serverIp ?? '10.13.37.1',
@@ -2555,7 +2652,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       endpoint: handoffEndpoint,
     );
     if (handoffDecision.shouldSwitch || snapshot.directSessionReady == true) {
-      debugPrint('[VPN-Handoff] shouldSwitch=${handoffDecision.shouldSwitch} shouldFallback=${handoffDecision.shouldFallback} endpoint=${handoffEndpoint?.websocketUri} gate=${VpnTransportHandoffCoordinator.satisfiesDirectReadinessGate(snapshot)} udpIn=${snapshot.udpPacketsIn} tunIn=${snapshot.tunPacketsIn} wgRx=${snapshot.wgRxBytes} directReady=${snapshot.directSessionReady} transportKind=${_connectionManager.activeTransportKind}');
+      debugPrint(
+        '[VPN-Handoff] shouldSwitch=${handoffDecision.shouldSwitch} shouldFallback=${handoffDecision.shouldFallback} endpoint=${handoffEndpoint?.websocketUri} gate=${VpnTransportHandoffCoordinator.satisfiesDirectReadinessGate(snapshot)} udpIn=${snapshot.udpPacketsIn} tunIn=${snapshot.tunPacketsIn} wgRx=${snapshot.wgRxBytes} directReady=${snapshot.directSessionReady} transportKind=${_connectionManager.activeTransportKind}',
+      );
     }
     if (handoffDecision.shouldSwitch) {
       _switchToVpnTransport(decision: handoffDecision);

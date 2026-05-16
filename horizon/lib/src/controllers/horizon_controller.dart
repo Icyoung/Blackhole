@@ -159,6 +159,7 @@ class HorizonController extends ChangeNotifier {
 
   final Set<String> _sessions = {};
   final Map<String, BytesBuilder> _sessionHistoryBytes = {};
+  final Map<String, int> _sessionHistoryBaseOffsets = {};
   final Map<String, List<int>> _sessionHistoryUtf8Buffer = {};
   static const int _maxHistoryBytes = 1024 * 1024; // 1MB per session
   final bool _devModeRequested;
@@ -188,6 +189,19 @@ class HorizonController extends ChangeNotifier {
   bool _customSessionEnabled = false;
   String _customSessionId = '';
   static const _uuid = Uuid();
+
+  int? _readInt(Object? value) {
+    if (value is int) {
+      return value;
+    }
+    if (value is num) {
+      return value.toInt();
+    }
+    if (value is String) {
+      return int.tryParse(value);
+    }
+    return null;
+  }
 
   // E2E encryption
   final CryptoService _crypto = CryptoService();
@@ -306,7 +320,18 @@ class HorizonController extends ChangeNotifier {
     if (!_running) {
       return null;
     }
-    final sessionId = await _terminal.startShell(rows: 24, cols: 80);
+    String? cwd;
+    if (groupId != null && groupId.isNotEmpty) {
+      final group =
+          _groupManager.groups.where((g) => g.id == groupId).firstOrNull;
+      if (group != null && group.sessionIds.isNotEmpty) {
+        final firstSessionId = group.sessionIds.first;
+        if (_sessions.contains(firstSessionId)) {
+          cwd = await _terminal.getCwd(firstSessionId);
+        }
+      }
+    }
+    final sessionId = await _terminal.startShell(rows: 24, cols: 80, cwd: cwd);
     _sessions.add(sessionId);
     var changed = false;
     if (groupId != null && groupId.isNotEmpty) {
@@ -332,6 +357,7 @@ class HorizonController extends ChangeNotifier {
     await _terminal.kill(sessionId);
     _sessions.remove(sessionId);
     _sessionHistoryBytes.remove(sessionId);
+    _sessionHistoryBaseOffsets.remove(sessionId);
     _sessionHistoryUtf8Buffer.remove(sessionId);
     final changed = _groupManager.onSessionClosed(sessionId);
     unawaited(_groupManager.save());
@@ -777,7 +803,11 @@ class HorizonController extends ChangeNotifier {
     if (type == 'sync') {
       final sessionId = decoded['sessionId'];
       if (sessionId is String) {
-        _sendSessionSync(socket, sessionId);
+        _sendSessionSync(
+          socket,
+          sessionId,
+          offset: _readInt(decoded['offset']),
+        );
       }
       return;
     }
@@ -912,6 +942,8 @@ class HorizonController extends ChangeNotifier {
         }
       }
       bytesBuilder.add(allBytes.sublist(safePoint));
+      _sessionHistoryBaseOffsets[sessionId] =
+          (_sessionHistoryBaseOffsets[sessionId] ?? 0) + safePoint;
     }
   }
 
@@ -930,6 +962,30 @@ class HorizonController extends ChangeNotifier {
     }
     // Decode complete bytes, any remaining incomplete sequence is in utf8Buffer
     return utf8.decode(bytesBuilder.toBytes(), allowMalformed: true);
+  }
+
+  Map<String, dynamic> getSessionHistoryDelta(String sessionId, int? offset) {
+    final bytesBuilder = _sessionHistoryBytes[sessionId];
+    final historyBytes = bytesBuilder?.toBytes() ?? Uint8List(0);
+    final baseOffset = _sessionHistoryBaseOffsets[sessionId] ?? 0;
+    final endOffset = baseOffset + historyBytes.length;
+    var reset = false;
+    var startOffset = offset ?? baseOffset;
+    if (startOffset < baseOffset || startOffset > endOffset) {
+      reset = true;
+      startOffset = baseOffset;
+    }
+    final relativeStart = (startOffset - baseOffset).clamp(
+      0,
+      historyBytes.length,
+    );
+    final contentBytes = historyBytes.sublist(relativeStart);
+    return {
+      'offset': startOffset,
+      'nextOffset': endOffset,
+      'reset': reset,
+      'content': utf8.decode(contentBytes, allowMalformed: true),
+    };
   }
 
   void _sendSessionList(WebSocket socket) {
@@ -952,14 +1008,14 @@ class HorizonController extends ChangeNotifier {
     }
   }
 
-  void _sendSessionSync(WebSocket socket, String sessionId) {
-    final history = getSessionHistory(sessionId);
+  void _sendSessionSync(WebSocket socket, String sessionId, {int? offset}) {
+    final delta = getSessionHistoryDelta(sessionId, offset);
     _wsServer.sendTo(
       socket,
       _encodeMessage({
         'type': 'session_sync',
         'sessionId': sessionId,
-        'content': history ?? '',
+        ...delta,
       }),
     );
   }
@@ -975,7 +1031,16 @@ class HorizonController extends ChangeNotifier {
   }
 
   Future<String?> _createSessionInGroup(String groupId) async {
-    final sessionId = await _terminal.startShell(rows: 24, cols: 80);
+    String? cwd;
+    final group =
+        _groupManager.groups.where((g) => g.id == groupId).firstOrNull;
+    if (group != null && group.sessionIds.isNotEmpty) {
+      final firstSessionId = group.sessionIds.first;
+      if (_sessions.contains(firstSessionId)) {
+        cwd = await _terminal.getCwd(firstSessionId);
+      }
+    }
+    final sessionId = await _terminal.startShell(rows: 24, cols: 80, cwd: cwd);
     _sessions.add(sessionId);
     final result = _groupManager.moveSession(sessionId, groupId);
     if (!result.ok) {
@@ -994,6 +1059,7 @@ class HorizonController extends ChangeNotifier {
     await _terminal.kill(sessionId);
     _sessions.remove(sessionId);
     _sessionHistoryBytes.remove(sessionId);
+    _sessionHistoryBaseOffsets.remove(sessionId);
     _sessionHistoryUtf8Buffer.remove(sessionId);
     if (_groupManager.onSessionClosed(sessionId)) {
       unawaited(_groupManager.save());
@@ -1352,7 +1418,10 @@ class HorizonController extends ChangeNotifier {
     if (type == 'sync') {
       final sessionId = decoded['sessionId'];
       if (sessionId is String) {
-        _sendSessionSyncToWormhole(sessionId);
+        _sendSessionSyncToWormhole(
+          sessionId,
+          offset: _readInt(decoded['offset']),
+        );
       }
       return;
     }
@@ -1556,13 +1625,13 @@ class HorizonController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _sendSessionSyncToWormhole(String sessionId) {
-    final history = getSessionHistory(sessionId);
+  void _sendSessionSyncToWormhole(String sessionId, {int? offset}) {
+    final delta = getSessionHistoryDelta(sessionId, offset);
     _sendToWormhole(
       _encodeMessage({
         'type': 'session_sync',
         'sessionId': sessionId,
-        'content': history ?? '',
+        ...delta,
       }),
     );
   }

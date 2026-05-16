@@ -140,13 +140,15 @@ class GroupStore {
   }
 
   void deleteGroup(String groupId) {
-    _sendOrQueue(<String, dynamic>{
-      'type': 'group_delete',
-      'groupId': groupId,
-    });
+    _sendOrQueue(<String, dynamic>{'type': 'group_delete', 'groupId': groupId});
   }
 
-  void moveSession(String sessionId, String targetGroupId, {int? oldIndex, int? newIndex}) {
+  void moveSession(
+    String sessionId,
+    String targetGroupId, {
+    int? oldIndex,
+    int? newIndex,
+  }) {
     _sendOrQueue(<String, dynamic>{
       'type': 'group_move_session',
       'sessionId': sessionId,
@@ -164,8 +166,28 @@ class GroupStore {
     if (oldIndex < 0 || oldIndex >= group.sessionIds.length) {
       return;
     }
+    final requestedNewIndex = newIndex;
     final sessionId = group.sessionIds[oldIndex];
-    moveSession(sessionId, groupId, oldIndex: oldIndex, newIndex: newIndex);
+    if (newIndex > oldIndex) {
+      newIndex -= 1;
+    }
+    if (newIndex < 0) {
+      newIndex = 0;
+    }
+    if (newIndex >= group.sessionIds.length) {
+      newIndex = group.sessionIds.length - 1;
+    }
+    if (newIndex != oldIndex) {
+      final moved = group.sessionIds.removeAt(oldIndex);
+      group.sessionIds.insert(newIndex, moved);
+      onChanged();
+    }
+    moveSession(
+      sessionId,
+      groupId,
+      oldIndex: oldIndex,
+      newIndex: requestedNewIndex,
+    );
   }
 
   void renameSession(String sessionId, String name) {
@@ -235,7 +257,9 @@ class GroupStore {
   void onDisconnected() {
     _pendingCommands.clear();
     _deferSync = false;
-    if (_groups.isEmpty && _sessionNames.isEmpty && _activeGroupId == TerminalGroup.defaultGroupId) {
+    if (_groups.isEmpty &&
+        _sessionNames.isEmpty &&
+        _activeGroupId == TerminalGroup.defaultGroupId) {
       return;
     }
     _groups.clear();

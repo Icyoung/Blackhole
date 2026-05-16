@@ -59,8 +59,9 @@ class AppDelegate: FlutterAppDelegate {
         let rows = args?["rows"] as? Int ?? 24
         let cols = args?["cols"] as? Int ?? 80
         let shellPath = args?["shellPath"] as? String
+        let cwd = args?["cwd"] as? String
         do {
-          let sessionId = try self.ptyManager.startShell(rows: rows, cols: cols, shellPath: shellPath)
+          let sessionId = try self.ptyManager.startShell(rows: rows, cols: cols, shellPath: shellPath, cwd: cwd)
           result(sessionId)
         } catch {
           result(FlutterError(code: "PTY_START", message: error.localizedDescription, details: nil))

@@ -25,11 +25,13 @@ class TerminalPlugin {
     required int rows,
     required int cols,
     String? shellPath,
+    String? cwd,
   }) async {
     final sessionId = await _channel.invokeMethod<String>('startShell', {
       'rows': rows,
       'cols': cols,
       if (shellPath != null) 'shellPath': shellPath,
+      if (cwd != null) 'cwd': cwd,
     });
     if (sessionId == null || sessionId.isEmpty) {
       throw StateError('Failed to start shell session');

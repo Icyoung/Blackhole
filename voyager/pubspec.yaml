@@ -43,7 +43,7 @@ dependencies:
     git:
       url: https://github.com/Icyoung/xterm.dart.git
       ref: 7afd5c9
-  desktop_drop: ^0.5.0
+  desktop_drop: ^0.6.0
   shared_preferences: ^2.3.3
   google_fonts: ^6.2.1
   device_info_plus: ^11.2.0

@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:characters/characters.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:device_info_plus/device_info_plus.dart';
@@ -27,6 +26,8 @@ import '../widgets/keyboard/hhkb_keyboard.dart';
 import '../widgets/quick_actions_bar.dart';
 import '../widgets/session_card.dart';
 import '../app.dart';
+
+enum _SidebarConnectionState { connected, connecting, disconnect }
 
 class HorizonHome extends StatefulWidget {
   const HorizonHome({super.key, required this.devModeConfig});
@@ -71,6 +72,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   late final TerminalManager _terminalManager;
 
   bool _connected = false;
+  bool _connectionAttempting = false;
   bool _autoReconnect = true;
   bool _useWormhole = false;
   bool _isHorizonMode = true; // true = Horizon (host), false = Voyager (client)
@@ -192,6 +194,9 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
         }
         setState(() {
           _connected = connected;
+          if (connected) {
+            _connectionAttempting = false;
+          }
         });
       },
       onDisconnected: _handleDisconnected,
@@ -213,6 +218,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
         setState(() {
           _error = message;
           _clientPairingPending = false;
+          _connectionAttempting = false;
         });
       },
       onGroupSync: (payload) {
@@ -1418,6 +1424,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
 
   void _handleDisconnected() {
     _groupStore.onDisconnected();
+    _connectionAttempting = false;
 
     // If using network backend (daemon / remote host), clear the network-driven UI state.
     if (!_usingDirectLocalPty) {
@@ -1581,12 +1588,21 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _updateWindowTitle();
   }
 
-  void _handleSessionSync(String sessionId, String content) {
+  void _handleSessionSync(
+    String sessionId,
+    String content, {
+    int? offset,
+    int? nextOffset,
+    bool reset = true,
+  }) {
     if (_usingDirectLocalPty || _useLocalOutputMirror) {
       return;
     }
     if (content.isEmpty) {
       return;
+    }
+    if (reset) {
+      _terminalManager.resetTerminal(sessionId);
     }
     _terminalManager.writeToTerminal(sessionId, content);
     // Note: No setState needed - TerminalView auto-updates via Terminal's notifyListeners
@@ -1633,7 +1649,10 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       setState(() {
         _error = null;
         _clientPairingPending = false;
+        _connectionAttempting = true;
       });
+    } else {
+      _connectionAttempting = true;
     }
     if (_useWormhole) {
       await _ensureDeviceNameReady();
@@ -1647,6 +1666,9 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       waitForPairing: _useWormhole,
       autoReconnect: _autoReconnect,
     );
+    if (mounted && !_connected && !_clientPairingPending) {
+      setState(() => _connectionAttempting = false);
+    }
   }
 
   void _maybeAutoConnectLocal() {
@@ -2143,10 +2165,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _createSessionInFlight = true;
     final requestId = ++_createSessionRequestId;
     final groupId = _groupStore.activeGroupId;
-    _sendCommand({
-      'type': 'create',
-      if (groupId != TerminalGroup.defaultGroupId) 'groupId': groupId,
-    });
+    _sendCommand({'type': 'create', 'groupId': groupId});
     Future.delayed(const Duration(milliseconds: 900), () {
       if (!mounted || _usingDirectLocalPty) {
         return;
@@ -2172,7 +2191,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   Future<void> _createLocalSession() async {
     final groupId = _groupStore.activeGroupId;
     final sessionId = await _hostController.createLocalSession(
-      groupId: groupId != TerminalGroup.defaultGroupId ? groupId : null,
+      groupId: groupId,
     );
     if (sessionId != null) {
       _handleLocalSessionCreated(sessionId);
@@ -2435,7 +2454,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
 
   Widget _markTopBarInteractive({required Widget child}) {
     return Listener(
-      behavior: HitTestBehavior.deferToChild,
+      behavior: HitTestBehavior.opaque,
       onPointerDown: (event) {
         _topBarInteractivePointers.add(event.pointer);
       },
@@ -2454,8 +2473,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     final tabs = _visibleSessions;
 
     return GestureDetector(
-      // Keep the immersive titlebar draggable, but never steal drags that
-      // started on interactive controls such as tab buttons or window toggles.
       onPanStart: _handleTopBarPanStart,
       behavior: HitTestBehavior.translucent,
       child: Container(
@@ -2464,9 +2481,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
         decoration: const BoxDecoration(color: HorizonColors.surface),
         child: Row(
           children: [
-            Expanded(
-              child: _markTopBarInteractive(child: _buildTabStrip(tabs)),
-            ),
+            Expanded(child: _buildTabStrip(tabs)),
             const SizedBox(width: 12),
             _markTopBarInteractive(child: _buildViewModeToggleButton()),
           ],
@@ -2500,57 +2515,119 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildGroupBadge(String name) {
-    return Container(
-      height: 32,
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(
-        color: HorizonColors.surfaceBright,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: HorizonColors.borderSubtle),
-      ),
-      child: Row(
-        children: [
-          const Icon(
-            Icons.folder_open_rounded,
-            size: 16,
-            color: HorizonColors.textSecondary,
-          ),
-          const SizedBox(width: 8),
-          Text(
-            name,
-            style: const TextStyle(
-              color: HorizonColors.textPrimary,
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
-      ),
-    );
+  _SidebarConnectionState _sidebarConnectionState() {
+    if (_isHorizonMode) {
+      final daemonStatus = _daemonStatus;
+      if (daemonStatus != null) {
+        if (daemonStatus.wormholeConnected) {
+          return _SidebarConnectionState.connected;
+        }
+        return _SidebarConnectionState.disconnect;
+      }
+      if (_hostController.wormholeConnected) {
+        return _SidebarConnectionState.connected;
+      }
+      if (_hostController.wormholeConnecting) {
+        return _SidebarConnectionState.connecting;
+      }
+      return _SidebarConnectionState.disconnect;
+    }
+
+    if (_connected) {
+      return _SidebarConnectionState.connected;
+    }
+    if (_connectionAttempting || _clientPairingPending) {
+      return _SidebarConnectionState.connecting;
+    }
+    return _SidebarConnectionState.disconnect;
+  }
+
+  String _sidebarConnectionScopeLabel() {
+    if (_isHorizonMode) {
+      return 'remote';
+    }
+    return _useWormhole ? 'remote network' : 'local network';
+  }
+
+  Color _sidebarConnectionColor(_SidebarConnectionState state) {
+    switch (state) {
+      case _SidebarConnectionState.connected:
+        return HorizonColors.success;
+      case _SidebarConnectionState.connecting:
+        return HorizonColors.statusAmber;
+      case _SidebarConnectionState.disconnect:
+        return HorizonColors.textMuted;
+    }
+  }
+
+  Future<void> _reconnectCurrentMode() async {
+    if (mounted) {
+      setState(() {
+        _error = null;
+        _connectionAttempting = true;
+      });
+    }
+    await _reloadAppMode();
+    if (mounted &&
+        _sidebarConnectionState() == _SidebarConnectionState.disconnect) {
+      setState(() => _connectionAttempting = false);
+    }
   }
 
   Widget _buildTopStatusPill({required bool showLabel}) {
-    final bool hasError = _error != null && _error!.isNotEmpty;
-    final bool pairing = _clientPairingPending;
-    final bool active = _isSystemActive;
-    String label;
-    Color color;
-    if (hasError) {
-      label = _error!;
-      color = HorizonColors.error;
-    } else if (pairing) {
-      label = 'Pairing pending';
-      color = HorizonColors.statusAmber;
-    } else {
-      label = active ? 'Connected' : 'Offline';
-      color = active ? HorizonColors.success : HorizonColors.textMuted;
+    final state = _sidebarConnectionState();
+    final color = _sidebarConnectionColor(state);
+    final label = state.name;
+    final scope = _sidebarConnectionScopeLabel();
+    final canReconnect = state == _SidebarConnectionState.disconnect;
+    if (!showLabel) {
+      return Tooltip(
+        message: canReconnect ? 'Reconnect $scope' : '$scope $label',
+        child: InkWell(
+          onTap: canReconnect ? () => unawaited(_reconnectCurrentMode()) : null,
+          borderRadius: BorderRadius.circular(12),
+          child: Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color: HorizonColors.surfaceBright,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: HorizonColors.borderSubtle),
+            ),
+            child: Center(
+              child:
+                  canReconnect
+                      ? const Icon(
+                        Icons.refresh_rounded,
+                        size: 16,
+                        color: HorizonColors.textMuted,
+                      )
+                      : Container(
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          color: color,
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: color.withValues(alpha: 0.35),
+                              blurRadius: 6,
+                            ),
+                          ],
+                        ),
+                      ),
+            ),
+          ),
+        ),
+      );
     }
-
-    return Container(
-      constraints: BoxConstraints(minHeight: 32, maxHeight: 32),
-      margin: EdgeInsets.symmetric(horizontal: 16),
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+    final child = Container(
+      constraints: const BoxConstraints(minHeight: 34, maxHeight: 42),
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: EdgeInsets.symmetric(
+        horizontal: showLabel ? 10 : 7,
+        vertical: 6,
+      ),
       decoration: BoxDecoration(
         color: HorizonColors.surfaceBright,
         borderRadius: BorderRadius.circular(999),
@@ -2558,6 +2635,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
+        mainAxisSize: MainAxisSize.min,
         children: [
           Container(
             width: 8,
@@ -2574,19 +2652,58 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
               ],
             ),
           ),
-          if (showLabel) const SizedBox(width: 8),
-          if (showLabel)
-            Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: HorizonColors.textSecondary,
-                fontSize: 11,
-                fontWeight: FontWeight.w500,
+          if (showLabel) ...[
+            const SizedBox(width: 8),
+            Flexible(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: HorizonColors.textSecondary,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  Text(
+                    scope,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: HorizonColors.textMuted,
+                      fontSize: 9,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
               ),
             ),
+          ],
+          if (canReconnect) ...[
+            SizedBox(width: showLabel ? 8 : 6),
+            const Icon(
+              Icons.refresh_rounded,
+              size: 14,
+              color: HorizonColors.textMuted,
+            ),
+          ],
         ],
+      ),
+    );
+
+    return Tooltip(
+      message:
+          canReconnect
+              ? 'Reconnect ${_sidebarConnectionScopeLabel()}'
+              : '${_sidebarConnectionScopeLabel()} $label',
+      child: InkWell(
+        onTap: canReconnect ? () => unawaited(_reconnectCurrentMode()) : null,
+        borderRadius: BorderRadius.circular(999),
+        child: child,
       ),
     );
   }
@@ -2631,10 +2748,12 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     if (sessions.isEmpty) {
       return Align(
         alignment: Alignment.centerLeft,
-        child: TextButton.icon(
-          onPressed: _sendCreateSession,
-          icon: const Icon(Icons.add_rounded, size: 16),
-          label: const Text('New session'),
+        child: _markTopBarInteractive(
+          child: TextButton.icon(
+            onPressed: _sendCreateSession,
+            icon: const Icon(Icons.add_rounded, size: 16),
+            label: const Text('New session'),
+          ),
         ),
       );
     }
@@ -2673,7 +2792,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                         sessionId: sessionId,
                         label: label,
                         isActive: isActive,
-                        index: index,
                       ),
                     );
                   },
@@ -2699,23 +2817,25 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
           ),
         ),
         const SizedBox(width: 6),
-        Tooltip(
-          message: 'New tab',
-          child: InkWell(
-            onTap: _sendCreateSession,
-            borderRadius: BorderRadius.circular(10),
-            child: Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                color: HorizonColors.surfaceBright,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: HorizonColors.borderSubtle),
-              ),
-              child: const Icon(
-                Icons.add_rounded,
-                size: 16,
-                color: HorizonColors.textSecondary,
+        _markTopBarInteractive(
+          child: Tooltip(
+            message: 'New tab',
+            child: InkWell(
+              onTap: _sendCreateSession,
+              borderRadius: BorderRadius.circular(10),
+              child: Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: HorizonColors.surfaceBright,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: HorizonColors.borderSubtle),
+                ),
+                child: const Icon(
+                  Icons.add_rounded,
+                  size: 16,
+                  color: HorizonColors.textSecondary,
+                ),
               ),
             ),
           ),
@@ -2728,65 +2848,66 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     required String sessionId,
     required String label,
     required bool isActive,
-    required int index,
   }) {
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hoveredTabId = sessionId),
-      onExit:
-          (_) => setState(() {
-            if (_hoveredTabId == sessionId) {
-              _hoveredTabId = null;
-            }
-          }),
-      child: InkWell(
-        onTap: () => _setActiveSession(sessionId, requestKeyboard: true),
-        borderRadius: BorderRadius.circular(12),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          height: 32,
-          padding: const EdgeInsets.symmetric(horizontal: 10),
-          decoration: BoxDecoration(
-            color:
-                isActive
-                    ? HorizonColors.surfaceBright
-                    : HorizonColors.surfaceVariant,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
+    return _markTopBarInteractive(
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hoveredTabId = sessionId),
+        onExit:
+            (_) => setState(() {
+              if (_hoveredTabId == sessionId) {
+                _hoveredTabId = null;
+              }
+            }),
+        child: InkWell(
+          onTap: () => _setActiveSession(sessionId, requestKeyboard: true),
+          borderRadius: BorderRadius.circular(12),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            height: 32,
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            decoration: BoxDecoration(
               color:
                   isActive
-                      ? HorizonColors.accent.withValues(alpha: 0.5)
-                      : HorizonColors.borderSubtle,
+                      ? HorizonColors.surfaceBright
+                      : HorizonColors.surfaceVariant,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color:
+                    isActive
+                        ? HorizonColors.accent.withValues(alpha: 0.5)
+                        : HorizonColors.borderSubtle,
+              ),
             ),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 140),
-                child: Text(
-                  label,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color:
-                        isActive
-                            ? HorizonColors.textPrimary
-                            : HorizonColors.textSecondary,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 140),
+                  child: Text(
+                    label,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color:
+                          isActive
+                              ? HorizonColors.textPrimary
+                              : HorizonColors.textSecondary,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              _buildTabActions(sessionId, index),
-            ],
+                const SizedBox(width: 8),
+                _buildTabActions(sessionId),
+              ],
+            ),
           ),
         ),
       ),
     );
   }
 
-  Widget _buildTabActions(String sessionId, int index) {
+  Widget _buildTabActions(String sessionId) {
     final show =
         _hoveredTabId == sessionId ||
         (!kIsWeb && (Platform.isAndroid || Platform.isIOS));
@@ -2804,21 +2925,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
               child: Center(
                 child: Icon(
                   Icons.close_rounded,
-                  size: 14,
-                  color: HorizonColors.textMuted,
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 2),
-          ReorderableDragStartListener(
-            index: index,
-            child: const SizedBox(
-              width: 24,
-              height: 32,
-              child: Center(
-                child: Icon(
-                  Icons.drag_indicator_rounded,
                   size: 14,
                   color: HorizonColors.textMuted,
                 ),
@@ -2941,9 +3047,23 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
             SizedBox(height: chromeTopPad + 8),
             _buildSidebarToggle(),
             const SizedBox(height: 12),
-            if (_groupStore.activeGroup != null)
-              _buildCollapsedGroupAvatar(_groupStore.activeGroup!.name),
-            const Spacer(),
+            Expanded(
+              child: ListView.separated(
+                padding: EdgeInsets.zero,
+                itemCount: _groupStore.groups.length,
+                separatorBuilder: (_, _) => const SizedBox(height: 8),
+                itemBuilder: (context, index) {
+                  final group = _groupStore.groups[index];
+                  return Center(
+                    child: _buildCollapsedGroupAvatar(
+                      group,
+                      group.id == _groupStore.activeGroupId,
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 12),
             Tooltip(
               message: 'New group',
               child: InkWell(
@@ -2974,22 +3094,41 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildCollapsedGroupAvatar(String name) {
+  Widget _buildCollapsedGroupAvatar(TerminalGroup group, bool isActive) {
+    final name = group.name;
     final letter = name.isNotEmpty ? name.characters.first : 'G';
-    return Container(
-      width: 32,
-      height: 32,
-      decoration: BoxDecoration(
-        color: HorizonColors.surfaceBright,
+    return Tooltip(
+      message: name,
+      child: InkWell(
+        onTap: () => _groupStore.setActiveGroup(group.id),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: HorizonColors.borderSubtle),
-      ),
-      child: Center(
-        child: Text(
-          letter.toUpperCase(),
-          style: const TextStyle(
-            color: HorizonColors.textSecondary,
-            fontWeight: FontWeight.w700,
+        child: Container(
+          width: 32,
+          height: 32,
+          decoration: BoxDecoration(
+            color:
+                isActive
+                    ? HorizonColors.surfaceBright
+                    : HorizonColors.surfaceVariant,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color:
+                  isActive
+                      ? HorizonColors.accent.withValues(alpha: 0.45)
+                      : HorizonColors.borderSubtle,
+            ),
+          ),
+          child: Center(
+            child: Text(
+              letter.toUpperCase(),
+              style: TextStyle(
+                color:
+                    isActive
+                        ? HorizonColors.textPrimary
+                        : HorizonColors.textSecondary,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
           ),
         ),
       ),
@@ -3330,20 +3469,28 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       );
     }
 
-    return ListView.builder(
+    return ReorderableListView.builder(
       padding: const EdgeInsets.fromLTRB(8, 0, 8, 10),
       shrinkWrap: true,
+      buildDefaultDragHandles: false,
       physics: const NeverScrollableScrollPhysics(),
+      onReorder: (oldIndex, newIndex) {
+        _groupStore.reorderSession(group.id, oldIndex, newIndex);
+      },
       itemCount: group.sessionIds.length,
       itemBuilder: (context, index) {
         final sessionId = group.sessionIds[index];
         final label = _getSessionLabel(sessionId, index);
         final isActive = sessionId == _activeSessionId && isActiveGroup;
-        return _buildSessionRow(
-          groupId: group.id,
-          sessionId: sessionId,
-          label: label,
-          isActive: isActive,
+        return KeyedSubtree(
+          key: ValueKey('session-${group.id}-$sessionId'),
+          child: _buildSessionRow(
+            groupId: group.id,
+            sessionId: sessionId,
+            label: label,
+            isActive: isActive,
+            index: index,
+          ),
         );
       },
     );
@@ -3354,6 +3501,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     required String sessionId,
     required String label,
     required bool isActive,
+    required int index,
   }) {
     return MouseRegion(
       onEnter: (_) => setState(() => _hoveredSessionRowId = sessionId),
@@ -3401,7 +3549,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                 ),
               ),
               const SizedBox(width: 6),
-              _buildSessionRowClose(sessionId),
+              _buildSessionRowActions(sessionId, index),
             ],
           ),
         ),
@@ -3409,26 +3557,45 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildSessionRowClose(String sessionId) {
+  Widget _buildSessionRowActions(String sessionId, int index) {
     final show =
         _hoveredSessionRowId == sessionId ||
         (!kIsWeb && (Platform.isAndroid || Platform.isIOS));
     return _hoverReveal(
       show: show,
-      child: InkWell(
-        onTap: () => _sendCloseSession(sessionId),
-        borderRadius: BorderRadius.circular(8),
-        child: const SizedBox(
-          width: 24,
-          height: 32,
-          child: Center(
-            child: Icon(
-              Icons.close_rounded,
-              size: 14,
-              color: HorizonColors.textMuted,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            onTap: () => _sendCloseSession(sessionId),
+            borderRadius: BorderRadius.circular(8),
+            child: const SizedBox(
+              width: 24,
+              height: 32,
+              child: Center(
+                child: Icon(
+                  Icons.close_rounded,
+                  size: 14,
+                  color: HorizonColors.textMuted,
+                ),
+              ),
             ),
           ),
-        ),
+          ReorderableDragStartListener(
+            index: index,
+            child: const SizedBox(
+              width: 24,
+              height: 32,
+              child: Center(
+                child: Icon(
+                  Icons.drag_indicator_rounded,
+                  size: 14,
+                  color: HorizonColors.textMuted,
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
