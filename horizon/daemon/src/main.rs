@@ -1393,14 +1393,28 @@ async fn list_session_ids(state: &Arc<AppState>) -> Vec<String> {
 }
 
 async fn create_session(state: &Arc<AppState>) -> std::io::Result<String> {
-    create_session_with_command(state, None, None, None).await
+    create_session_with_command(state, None, None, None, None).await
 }
 
 async fn create_session_in_group(
     state: &Arc<AppState>,
     group_id: Option<&str>,
 ) -> std::io::Result<String> {
-    create_session_with_command(state, group_id, None, None).await
+    // Inherit cwd from the first existing session in the same group so that
+    // a cd inside any pane carries to a newly-created sibling pane.
+    let mut seed_cwd: Option<String> = None;
+    if let Some(gid) = group_id {
+        let groups = state.groups.lock().await;
+        let seed_session = groups
+            .iter()
+            .find(|g| g.id == gid)
+            .and_then(|g| g.session_ids.first().cloned());
+        drop(groups);
+        if let Some(seed) = seed_session {
+            seed_cwd = get_session_cwd(state, &seed).await;
+        }
+    }
+    create_session_with_command(state, group_id, None, None, seed_cwd.as_deref()).await
 }
 
 async fn create_session_with_command(
@@ -1408,6 +1422,7 @@ async fn create_session_with_command(
     group_id: Option<&str>,
     startup_command: Option<&str>,
     env_vars: Option<&serde_json::Map<String, serde_json::Value>>,
+    cwd: Option<&str>,
 ) -> std::io::Result<String> {
     let session_id = generate_session_id();
     let arc = Arc::new(spawn_pty_session(
@@ -1415,6 +1430,7 @@ async fn create_session_with_command(
         &state.shell,
         startup_command,
         env_vars,
+        cwd,
     )?);
     start_output_thread(state.clone(), arc.clone());
     start_inject_socket(state, &session_id, arc.clone());
@@ -1900,6 +1916,7 @@ async fn handle_daemon_request(
                 resolved_group_id.as_deref(),
                 startup_command,
                 env_vars,
+                None,
             )
             .await
             .map_err(|e| host_err("internal_error", &format!("spawn failed: {e}")))?;
@@ -2836,6 +2853,7 @@ fn spawn_pty_session(
     shell: &str,
     startup_command: Option<&str>,
     env_vars: Option<&serde_json::Map<String, serde_json::Value>>,
+    cwd: Option<&str>,
 ) -> std::io::Result<PtySession> {
     use std::ffi::CString;
     use std::os::unix::io::FromRawFd;
@@ -2937,9 +2955,15 @@ fn spawn_pty_session(
     }
     if let Some(home) = home_dir.as_ref() {
         cmd.env("HOME", home);
-        if home.is_dir() {
-            cmd.current_dir(home);
-        }
+    }
+    // Prefer caller-provided cwd (carries cd state from a sibling pane in
+    // the same group). Fall back to HOME so the shell still starts in a
+    // sensible place when no seed is available.
+    let cwd_path = cwd.map(std::path::PathBuf::from).filter(|p| p.is_dir());
+    if let Some(c) = cwd_path.as_ref() {
+        cmd.current_dir(c);
+    } else if let Some(home) = home_dir.as_ref().filter(|h| h.is_dir()) {
+        cmd.current_dir(home);
     }
     // Clean up inherited env that interferes with nested tools
     cmd.env_remove("CLAUDECODE");
@@ -3016,6 +3040,7 @@ fn spawn_pty_session(
     shell: &str,
     _startup_command: Option<&str>,
     _env_vars: Option<&serde_json::Map<String, serde_json::Value>>,
+    _cwd: Option<&str>,
 ) -> std::io::Result<PtySession> {
     let conpty = winconpty::ConPty::spawn(shell, 24, 80)?;
     Ok(PtySession {
@@ -3033,6 +3058,7 @@ fn spawn_pty_session(
     _shell: &str,
     _startup_command: Option<&str>,
     _env_vars: Option<&serde_json::Map<String, serde_json::Value>>,
+    _cwd: Option<&str>,
 ) -> std::io::Result<PtySession> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,

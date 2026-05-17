@@ -2237,6 +2237,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     final groupId = _groupStore.activeGroupId;
     final sessionId = await _hostController.createLocalSession(
       groupId: groupId,
+      seedSessionId: _activeSessionId,
     );
     if (sessionId != null) {
       _handleLocalSessionCreated(sessionId);

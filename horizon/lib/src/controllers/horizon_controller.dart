@@ -316,7 +316,7 @@ class HorizonController extends ChangeNotifier {
   }
 
   /// Create a new local session (without network broadcast)
-  Future<String?> createLocalSession({String? groupId}) async {
+  Future<String?> createLocalSession({String? groupId, String? seedSessionId}) async {
     if (!_running) {
       return null;
     }
@@ -325,9 +325,18 @@ class HorizonController extends ChangeNotifier {
       final group =
           _groupManager.groups.where((g) => g.id == groupId).firstOrNull;
       if (group != null && group.sessionIds.isNotEmpty) {
-        final firstSessionId = group.sessionIds.first;
-        if (_sessions.contains(firstSessionId)) {
-          cwd = await _terminal.getCwd(firstSessionId);
+        // Prefer the caller-provided seed (typically the active session in
+        // this group) so cd-ing inside one pane carries to a newly added
+        // pane. Fall back to the group's first session if the seed isn't
+        // in this group anymore.
+        final preferred = seedSessionId != null &&
+                group.sessionIds.contains(seedSessionId) &&
+                _sessions.contains(seedSessionId)
+            ? seedSessionId
+            : null;
+        final source = preferred ?? group.sessionIds.first;
+        if (_sessions.contains(source)) {
+          cwd = await _terminal.getCwd(source);
         }
       }
     }
