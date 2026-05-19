@@ -2,6 +2,7 @@
 ///
 /// On macOS this uses the utun kernel control interface via PF_SYSTEM sockets.
 /// On Linux this uses the /dev/net/tun character device with TUNSETIFF.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::process::Command;
 
 // ---------------------------------------------------------------------------
@@ -26,6 +27,7 @@ pub struct TunDevice {
 
 impl Drop for TunDevice {
     fn drop(&mut self) {
+        #[cfg(unix)]
         if self.fd >= 0 {
             unsafe {
                 libc::close(self.fd);
@@ -40,6 +42,7 @@ impl Drop for TunDevice {
 // ---------------------------------------------------------------------------
 
 /// Set the `O_NONBLOCK` flag on a file descriptor.
+#[cfg(unix)]
 fn set_nonblocking(fd: i32) -> Result<(), String> {
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);

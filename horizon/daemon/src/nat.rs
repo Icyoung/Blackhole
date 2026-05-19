@@ -51,7 +51,7 @@ pub fn teardown_nat() -> Result<(), String> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = subnet;
+        let _ = _subnet;
         Err("NAT not supported on this platform".to_string())
     }
 }

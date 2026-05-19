@@ -1,9 +1,15 @@
 use std::env;
+#[cfg(unix)]
 use std::io::Write;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
+#[cfg(not(unix))]
+use crate::tun_device::TunDevice;
+#[cfg(unix)]
 use crate::tun_device::{TunDevice, TunTransport};
 use crate::vpn_helper_protocol::{
     HelperRequest, HelperResponse, DEFAULT_SOCKET_NAME, HELPER_ALREADY_ACTIVE_MESSAGE,
@@ -16,16 +22,25 @@ pub struct PreparedTun {
 }
 
 pub struct HelperSession {
+    #[cfg(unix)]
     socket_path: PathBuf,
 }
 
 impl HelperSession {
     pub fn stop(self) -> Result<(), String> {
-        let response = send_request(&self.socket_path, &HelperRequest::stop_vpn())?;
-        match response {
-            HelperResponse::Stopped { .. } => Ok(()),
-            HelperResponse::Error { message, .. } => Err(message),
-            other => Err(format!("unexpected helper response: {:?}", other)),
+        #[cfg(unix)]
+        {
+            let response = send_request(&self.socket_path, &HelperRequest::stop_vpn())?;
+            match response {
+                HelperResponse::Stopped { .. } => Ok(()),
+                HelperResponse::Error { message, .. } => Err(message),
+                other => Err(format!("unexpected helper response: {:?}", other)),
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            Err("VPN helper is not supported on this platform".to_string())
         }
     }
 }
@@ -41,7 +56,16 @@ pub fn socket_path(data_dir: &Path) -> PathBuf {
 }
 
 pub fn is_available(data_dir: &Path) -> bool {
-    socket_path(data_dir).exists()
+    #[cfg(unix)]
+    {
+        return socket_path(data_dir).exists();
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = data_dir;
+        false
+    }
 }
 
 pub fn start_vpn(
@@ -51,28 +75,38 @@ pub fn start_vpn(
     netmask: &str,
     app_port: u16,
 ) -> Result<PreparedTun, String> {
-    let socket_path = socket_path(data_dir);
-    match start_vpn_once(&socket_path, server_ip, subnet, netmask, app_port) {
-        Ok(prepared) => Ok(prepared),
-        Err(message) if message == HELPER_ALREADY_ACTIVE_MESSAGE => {
-            let response = send_request(&socket_path, &HelperRequest::stop_vpn())?;
-            match response {
-                HelperResponse::Stopped { .. } => {
-                    start_vpn_once(&socket_path, server_ip, subnet, netmask, app_port)
+    #[cfg(unix)]
+    {
+        let socket_path = socket_path(data_dir);
+        match start_vpn_once(&socket_path, server_ip, subnet, netmask, app_port) {
+            Ok(prepared) => Ok(prepared),
+            Err(message) if message == HELPER_ALREADY_ACTIVE_MESSAGE => {
+                let response = send_request(&socket_path, &HelperRequest::stop_vpn())?;
+                match response {
+                    HelperResponse::Stopped { .. } => {
+                        start_vpn_once(&socket_path, server_ip, subnet, netmask, app_port)
+                    }
+                    HelperResponse::Error { message, .. } => Err(format!(
+                        "failed to recover stale helper-backed VPN: {message}"
+                    )),
+                    other => Err(format!(
+                        "unexpected helper response while recovering stale VPN: {:?}",
+                        other
+                    )),
                 }
-                HelperResponse::Error { message, .. } => Err(format!(
-                    "failed to recover stale helper-backed VPN: {message}"
-                )),
-                other => Err(format!(
-                    "unexpected helper response while recovering stale VPN: {:?}",
-                    other
-                )),
             }
+            Err(message) => Err(message),
         }
-        Err(message) => Err(message),
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (data_dir, server_ip, subnet, netmask, app_port);
+        Err("VPN helper is not supported on this platform".to_string())
     }
 }
 
+#[cfg(unix)]
 fn start_vpn_once(
     socket_path: &Path,
     server_ip: &str,
@@ -111,11 +145,13 @@ fn start_vpn_once(
     }
 }
 
+#[cfg(unix)]
 fn send_request(socket_path: &Path, request: &HelperRequest) -> Result<HelperResponse, String> {
     let (response, _) = send_request_with_optional_fd(socket_path, request)?;
     Ok(response)
 }
 
+#[cfg(unix)]
 fn send_request_with_optional_fd(
     socket_path: &Path,
     request: &HelperRequest,
@@ -169,6 +205,7 @@ fn send_request_with_optional_fd(
     Ok((response, fd))
 }
 
+#[cfg(unix)]
 fn set_nonblocking(fd: RawFd) -> Result<(), String> {
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
@@ -188,6 +225,7 @@ fn set_nonblocking(fd: RawFd) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 unsafe fn extract_fd(msg: &libc::msghdr) -> Option<RawFd> {
     let mut header = libc::CMSG_FIRSTHDR(msg);
     while !header.is_null() {

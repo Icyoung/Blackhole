@@ -1,15 +1,19 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
+#[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::tun_device::TunTransport;
 use tunnel::{IpPool, TunnelResult, WgConfig, WgTunnel};
+
+#[cfg(not(unix))]
+type RawFd = i32;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -88,6 +92,7 @@ enum InboundPacket {
 
 impl Drop for WgServer {
     fn drop(&mut self) {
+        #[cfg(unix)]
         if self.tun_fd >= 0 {
             unsafe {
                 libc::close(self.tun_fd);
@@ -459,6 +464,7 @@ impl WgServer {
     ///    the correct peer, encapsulate, and send over UDP.
     /// 3. **Timer tick** -- call `update_timers` on every tunnel so keepalives
     ///    and handshake retries are sent on schedule.
+    #[cfg(unix)]
     pub async fn run(&mut self) -> Result<(), String> {
         let tun = AsyncTun::new(self.tun_fd, self.tun_transport)?;
         let mut timer = tokio::time::interval(TIMER_TICK);
@@ -516,6 +522,7 @@ impl WgServer {
     /// Same as [`run`] but also listens for peer add/remove commands from
     /// an `mpsc` channel. This allows the HTTP/wormhole layer to dynamically
     /// register peers while the event loop is running.
+    #[cfg(unix)]
     pub async fn run_with_peer_commands(
         &mut self,
         mut peer_rx: mpsc::UnboundedReceiver<super::WgPeerCommand>,
@@ -583,11 +590,20 @@ impl WgServer {
         }
     }
 
+    #[cfg(not(unix))]
+    pub async fn run_with_peer_commands(
+        &mut self,
+        _peer_rx: mpsc::UnboundedReceiver<super::WgPeerCommand>,
+    ) -> Result<(), String> {
+        Err("WireGuard server is not supported on this platform".to_string())
+    }
+
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
 
     /// Process a WireGuard packet received from UDP.
+    #[cfg(unix)]
     async fn handle_udp_packet(
         &mut self,
         packet: &[u8],
@@ -699,6 +715,7 @@ impl WgServer {
 
     /// After a handshake completes the tunnel may have buffered decrypted
     /// packets. Drain them to the TUN device.
+    #[cfg(unix)]
     async fn drain_tunnel(&mut self, peer_pk: &str, dst: &mut [u8], tun: &AsyncTun) {
         // Feed an empty slice to get any queued data.
         let empty: &[u8] = &[];
@@ -883,7 +900,7 @@ impl WgServer {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

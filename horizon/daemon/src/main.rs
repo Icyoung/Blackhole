@@ -2150,7 +2150,6 @@ fn start_inject_socket(state: &Arc<AppState>, session_id: &str, session: Arc<Pty
     });
 }
 
-#[cfg(unix)]
 fn host_err(code: &str, msg: &str) -> (String, String) {
     (code.to_string(), msg.to_string())
 }
