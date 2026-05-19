@@ -43,7 +43,9 @@ class _GroupDrawerState extends State<GroupDrawer> {
   String? _editingSessionId;
   String? _hoveredGroupId;
   String? _hoveredSessionId;
+  String? _renameNextSessionInGroupId;
   String _searchQuery = '';
+  final Map<String, Set<String>> _knownSessionIdsByGroup = {};
   final _editController = TextEditingController();
   final _editFocusNode = FocusNode();
 
@@ -132,6 +134,53 @@ class _GroupDrawerState extends State<GroupDrawer> {
     }
   }
 
+  void _createSessionInGroup(TerminalGroup group) {
+    final callback = widget.onAddSession;
+    if (callback == null) {
+      return;
+    }
+    _knownSessionIdsByGroup[group.id] = group.sessionIds.toSet();
+    _renameNextSessionInGroupId = group.id;
+    widget.manager.setActiveGroup(group.id);
+    callback(group.id);
+  }
+
+  void _trackNewSessionForRename(List<TerminalGroup> groups) {
+    for (final group in groups) {
+      final known = _knownSessionIdsByGroup[group.id];
+      if (known == null) {
+        _knownSessionIdsByGroup[group.id] = group.sessionIds.toSet();
+        continue;
+      }
+      if (_renameNextSessionInGroupId == group.id) {
+        final newSessionIds = group.sessionIds.where(
+          (sessionId) => !known.contains(sessionId),
+        );
+        if (newSessionIds.isNotEmpty) {
+          final sessionId = newSessionIds.last;
+          _renameNextSessionInGroupId = null;
+          _knownSessionIdsByGroup[group.id] = group.sessionIds.toSet();
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) {
+              return;
+            }
+            final index = group.sessionIds.indexOf(sessionId);
+            final label = widget.manager.getSessionName(
+              sessionId,
+              index < 0 ? group.sessionIds.length - 1 : index,
+            );
+            _startEditingSession(sessionId, label);
+          });
+          continue;
+        }
+      }
+      _knownSessionIdsByGroup[group.id] = group.sessionIds.toSet();
+    }
+    _knownSessionIdsByGroup.removeWhere(
+      (groupId, _) => groups.every((group) => group.id != groupId),
+    );
+  }
+
   void _toggleCollapse(String groupId) {
     setState(() {
       if (_collapsedGroupIds.contains(groupId)) {
@@ -172,15 +221,17 @@ class _GroupDrawerState extends State<GroupDrawer> {
           ),
         );
       },
-      child: show
-          ? KeyedSubtree(key: const ValueKey('show'), child: child)
-          : const SizedBox.shrink(),
+      child:
+          show
+              ? KeyedSubtree(key: const ValueKey('show'), child: child)
+              : const SizedBox.shrink(),
     );
   }
 
   @override
   Widget build(BuildContext context) {
     final groups = _filteredGroups();
+    _trackNewSessionForRename(widget.manager.groups);
 
     final content = SafeArea(
       child: Column(
@@ -218,7 +269,9 @@ class _GroupDrawerState extends State<GroupDrawer> {
                         fillColor: AppColors.background,
                         isDense: true,
                         contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 8),
+                          horizontal: 8,
+                          vertical: 8,
+                        ),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(10),
                           borderSide: BorderSide.none,
@@ -229,8 +282,7 @@ class _GroupDrawerState extends State<GroupDrawer> {
                         ),
                         focusedBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(10),
-                          borderSide: BorderSide(
-                              color: AppColors.border),
+                          borderSide: BorderSide(color: AppColors.border),
                         ),
                       ),
                       onChanged: (v) => setState(() => _searchQuery = v),
@@ -283,9 +335,8 @@ class _GroupDrawerState extends State<GroupDrawer> {
                   // Moved to the end of the filtered list → place after the
                   // last visible group in the full list.
                   final lastVisibleId = groups.last.id;
-                  targetIndex = allGroups.indexWhere(
-                    (g) => g.id == lastVisibleId,
-                  ) + 1;
+                  targetIndex =
+                      allGroups.indexWhere((g) => g.id == lastVisibleId) + 1;
                 }
                 if (targetIndex >= 0) {
                   widget.manager.reorderGroup(movedGroupId, targetIndex);
@@ -319,18 +370,20 @@ class _GroupDrawerState extends State<GroupDrawer> {
 
     return MouseRegion(
       onEnter: (_) => setState(() => _hoveredGroupId = group.id),
-      onExit: (_) => setState(() {
-        if (_hoveredGroupId == group.id) _hoveredGroupId = null;
-      }),
+      onExit:
+          (_) => setState(() {
+            if (_hoveredGroupId == group.id) _hoveredGroupId = null;
+          }),
       child: AnimatedContainer(
         duration: AppDurations.normal,
         decoration: BoxDecoration(
-          color: isActive ? AppColors.background : AppColors.surfaceVariant,
+          color: isActive ? AppColors.surfaceBright : AppColors.surfaceVariant,
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
-            color: isActive
-                ? AppColors.border
-                : Colors.transparent,
+            color:
+                isActive
+                    ? AppColors.accent.withValues(alpha: 0.45)
+                    : Colors.transparent,
           ),
         ),
         child: Column(
@@ -371,41 +424,43 @@ class _GroupDrawerState extends State<GroupDrawer> {
               ),
               const SizedBox(width: 6),
               Expanded(
-                child: isEditing
-                    ? TextField(
-                        controller: _editController,
-                        focusNode: _editFocusNode,
-                        style: const TextStyle(
-                          color: AppColors.textPrimary,
-                          fontSize: 12,
-                        ),
-                        decoration: const InputDecoration(
-                          isDense: true,
-                          contentPadding: EdgeInsets.symmetric(
-                              horizontal: 6, vertical: 4),
-                          border: InputBorder.none,
-                        ),
-                        onSubmitted: (_) => _submitGroupEdit(group.id),
-                        onTapOutside: (_) => _cancelEdit(),
-                      )
-                    : GestureDetector(
-                        onDoubleTap: () =>
-                            _startEditingGroup(group.id, group.name),
-                        child: Text(
-                          group.name,
+                child:
+                    isEditing
+                        ? TextField(
+                          controller: _editController,
+                          focusNode: _editFocusNode,
                           style: const TextStyle(
                             color: AppColors.textPrimary,
                             fontSize: 12,
-                            fontWeight: FontWeight.w600,
                           ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            contentPadding: EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 4,
+                            ),
+                            border: InputBorder.none,
+                          ),
+                          onSubmitted: (_) => _submitGroupEdit(group.id),
+                          onTapOutside: (_) => _cancelEdit(),
+                        )
+                        : GestureDetector(
+                          onDoubleTap:
+                              () => _startEditingGroup(group.id, group.name),
+                          child: Text(
+                            group.name,
+                            style: const TextStyle(
+                              color: AppColors.textPrimary,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
-                      ),
               ),
               // Hover-revealed group actions
-              if (!isEditing)
-                _buildGroupActions(group, index),
+              if (!isEditing) _buildGroupActions(group, index),
             ],
           ),
         ),
@@ -429,7 +484,7 @@ class _GroupDrawerState extends State<GroupDrawer> {
               Tooltip(
                 message: 'New session',
                 child: InkWell(
-                  onTap: () => widget.onAddSession!(group.id),
+                  onTap: () => _createSessionInGroup(group),
                   borderRadius: BorderRadius.circular(8),
                   child: const SizedBox(
                     width: 28,
@@ -480,18 +535,23 @@ class _GroupDrawerState extends State<GroupDrawer> {
             break;
         }
       },
-      itemBuilder: (context) => [
-        const PopupMenuItem(
-          value: 'rename',
-          child: Text('Rename group',
-              style: TextStyle(color: AppColors.textPrimary, fontSize: 13)),
-        ),
-        const PopupMenuItem(
-          value: 'delete',
-          child: Text('Delete group',
-              style: TextStyle(color: AppColors.textPrimary, fontSize: 13)),
-        ),
-      ],
+      itemBuilder:
+          (context) => [
+            const PopupMenuItem(
+              value: 'rename',
+              child: Text(
+                'Rename group',
+                style: TextStyle(color: AppColors.textPrimary, fontSize: 13),
+              ),
+            ),
+            const PopupMenuItem(
+              value: 'delete',
+              child: Text(
+                'Delete group',
+                style: TextStyle(color: AppColors.textPrimary, fontSize: 13),
+              ),
+            ),
+          ],
       child: const SizedBox(
         width: 28,
         height: 32,
@@ -523,23 +583,30 @@ class _GroupDrawerState extends State<GroupDrawer> {
       );
     }
 
-    return Padding(
+    return ReorderableListView.builder(
       padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-      child: Column(
-        children: [
-          for (var i = 0; i < group.sessionIds.length; i++)
-            _buildSessionRow(
-              groupId: group.id,
-              sessionId: group.sessionIds[i],
-              label: widget.sessionLabelBuilder
-                      ?.call(group.sessionIds[i], i) ??
-                  widget.manager.getSessionName(group.sessionIds[i], i),
-              isActive:
-                  group.sessionIds[i] == widget.activeSessionId &&
-                  isActiveGroup,
-            ),
-        ],
-      ),
+      shrinkWrap: true,
+      buildDefaultDragHandles: false,
+      physics: const NeverScrollableScrollPhysics(),
+      onReorder: (oldIndex, newIndex) {
+        widget.manager.reorderSession(group.id, oldIndex, newIndex);
+      },
+      itemCount: group.sessionIds.length,
+      itemBuilder: (context, index) {
+        final sessionId = group.sessionIds[index];
+        return KeyedSubtree(
+          key: ValueKey('session-${group.id}-$sessionId'),
+          child: _buildSessionRow(
+            groupId: group.id,
+            sessionId: sessionId,
+            label:
+                widget.sessionLabelBuilder?.call(sessionId, index) ??
+                widget.manager.getSessionName(sessionId, index),
+            isActive: sessionId == widget.activeSessionId && isActiveGroup,
+            index: index,
+          ),
+        );
+      },
     );
   }
 
@@ -548,6 +615,7 @@ class _GroupDrawerState extends State<GroupDrawer> {
     required String sessionId,
     required String label,
     required bool isActive,
+    required int index,
   }) {
     final isEditing = _editingSessionId == sessionId;
 
@@ -562,8 +630,7 @@ class _GroupDrawerState extends State<GroupDrawer> {
           style: const TextStyle(color: AppColors.textPrimary, fontSize: 12),
           decoration: const InputDecoration(
             isDense: true,
-            contentPadding:
-                EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+            contentPadding: EdgeInsets.symmetric(horizontal: 6, vertical: 4),
             border: InputBorder.none,
           ),
           onSubmitted: (_) => _submitSessionEdit(sessionId),
@@ -575,9 +642,10 @@ class _GroupDrawerState extends State<GroupDrawer> {
     return MouseRegion(
       key: ValueKey('session-hover-$sessionId'),
       onEnter: (_) => setState(() => _hoveredSessionId = sessionId),
-      onExit: (_) => setState(() {
-        if (_hoveredSessionId == sessionId) _hoveredSessionId = null;
-      }),
+      onExit:
+          (_) => setState(() {
+            if (_hoveredSessionId == sessionId) _hoveredSessionId = null;
+          }),
       child: InkWell(
         onTap: () => _selectSession(groupId, sessionId),
         borderRadius: BorderRadius.circular(10),
@@ -589,9 +657,10 @@ class _GroupDrawerState extends State<GroupDrawer> {
             color: isActive ? AppColors.surface : Colors.transparent,
             borderRadius: BorderRadius.circular(10),
             border: Border.all(
-              color: isActive
-                  ? AppColors.border
-                  : Colors.transparent,
+              color:
+                  isActive
+                      ? AppColors.accent.withValues(alpha: 0.45)
+                      : Colors.transparent,
             ),
           ),
           child: Row(
@@ -599,16 +668,16 @@ class _GroupDrawerState extends State<GroupDrawer> {
             children: [
               Expanded(
                 child: GestureDetector(
-                  onDoubleTap: () =>
-                      _startEditingSession(sessionId, label),
+                  onDoubleTap: () => _startEditingSession(sessionId, label),
                   child: Text(
                     label,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      color: isActive
-                          ? AppColors.textPrimary
-                          : AppColors.textSecondary,
+                      color:
+                          isActive
+                              ? AppColors.textPrimary
+                              : AppColors.textSecondary,
                       fontSize: 12,
                     ),
                   ),
@@ -617,20 +686,39 @@ class _GroupDrawerState extends State<GroupDrawer> {
               const SizedBox(width: 6),
               _hoverReveal(
                 show: _hoveredSessionId == sessionId || _isMobile,
-                child: InkWell(
-                  onTap: () => widget.onCloseSession(sessionId),
-                  borderRadius: BorderRadius.circular(8),
-                  child: const SizedBox(
-                    width: 24,
-                    height: 32,
-                    child: Center(
-                      child: Icon(
-                        Icons.close_rounded,
-                        size: 14,
-                        color: AppColors.textMuted,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    InkWell(
+                      onTap: () => widget.onCloseSession(sessionId),
+                      borderRadius: BorderRadius.circular(8),
+                      child: const SizedBox(
+                        width: 24,
+                        height: 32,
+                        child: Center(
+                          child: Icon(
+                            Icons.close_rounded,
+                            size: 14,
+                            color: AppColors.textMuted,
+                          ),
+                        ),
                       ),
                     ),
-                  ),
+                    ReorderableDragStartListener(
+                      index: index,
+                      child: const SizedBox(
+                        width: 24,
+                        height: 32,
+                        child: Center(
+                          child: Icon(
+                            Icons.drag_indicator_rounded,
+                            size: 14,
+                            color: AppColors.textMuted,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],

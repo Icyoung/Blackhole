@@ -18,8 +18,10 @@ import 'package:voyager_share/voyager_share.dart'
         CandidateBar,
         CommandInputBar,
         CommandInputBarState,
+        DropSide,
         MultiWindowGrid,
         MultiWindowLayoutController,
+        SessionWindowCard,
         VpnStatusRing,
         VpnRingState;
 import 'package:xterm/xterm.dart';
@@ -36,13 +38,11 @@ import '../services/vpn_service.dart';
 import '../services/terminal_manager.dart';
 import '../services/transport_models.dart';
 import '../services/transport_rollout.dart';
-import '../widgets/add_terminal_card.dart';
 import '../widgets/chrome/header_chrome.dart';
 import '../widgets/group_drawer.dart';
 import '../widgets/keyboard/hhkb_keyboard.dart';
 import '../widgets/quick_actions_bar.dart';
 import '../widgets/settings_drawer.dart';
-import '../widgets/terminal_window_card.dart';
 
 class VoyagerHome extends StatefulWidget {
   const VoyagerHome({super.key});
@@ -491,7 +491,11 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   }
 
   Future<void> _loadAndSyncMultiWindowLayout() async {
-    await _multiWindowLayoutController.loadFor(_groupStore.activeGroupId);
+    final groupId = _groupStore.activeGroupId;
+    await _multiWindowLayoutController.loadFor(
+      groupId,
+      remoteLayout: _groupStore.layoutForGroup(groupId)?.layout,
+    );
     if (!mounted) {
       return;
     }
@@ -1528,6 +1532,11 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     });
   }
 
+  void _sendCreateSessionInGroup(String groupId) {
+    _groupStore.setActiveGroup(groupId);
+    _sendCreateSession();
+  }
+
   void _sendCloseSession(String sessionId) {
     _sendCommand({'type': 'close', 'sessionId': sessionId});
   }
@@ -1602,7 +1611,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     const barColor = AppColors.surface;
-    const activeColor = AppColors.border; // Slightly darker for contrast
+    const activeColor = AppColors.surfaceBright;
+    const terminalBackground = AppColors.surfaceVariant;
+    const multiWindowBackground = AppColors.background;
     const overlayColor =
         Colors.transparent; // No longer need overlay with solid background
     final terminal = _activeTerminal ?? _idleTerminal;
@@ -1620,7 +1631,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
 
     final scaffold = Scaffold(
       key: _scaffoldKey,
-      backgroundColor: AppColors.surfaceVariant,
+      backgroundColor:
+          _multiWindow ? multiWindowBackground : terminalBackground,
       onDrawerChanged: (isOpened) {
         if (!isOpened) {
           _groupStore.setDeferredSync(false);
@@ -1630,7 +1642,11 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       endDrawer: _buildSettingsDrawer(context),
       body: Stack(
         children: [
-          Positioned.fill(child: Container(color: AppColors.surfaceVariant)),
+          Positioned.fill(
+            child: Container(
+              color: _multiWindow ? multiWindowBackground : terminalBackground,
+            ),
+          ),
           Positioned.fill(
             top:
                 MediaQuery.of(context).padding.top +
@@ -1683,9 +1699,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                               sessions.isEmpty ? <String>[] : sessions;
                           final padding = EdgeInsets.fromLTRB(
                             16,
-                            12,
                             16,
-                            _bottomBarHeight + 20,
+                            16,
+                            _bottomBarHeight + 16,
                           );
 
                           if (displaySessions.isEmpty) {
@@ -1722,26 +1738,25 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                           return MultiWindowGrid(
                             padding: padding,
                             gap: 0,
-                            desktopHitSize: 8,
+                            splitterVisualGap: 16,
+                            desktopHitSize: 12,
+                            touchMinHitSize: 44,
                             mobileBreakpoint: 600,
                             scrollPhysics: const BouncingScrollPhysics(),
                             layout: layout,
-                            onResizeColumn:
-                                _multiWindowLayoutController.resizeColumn,
-                            onResizeRow: _multiWindowLayoutController.resizeRow,
+                            onResizeSplit:
+                                _multiWindowLayoutController.resizeSplit,
                             onResizeEnd:
-                                () => unawaited(
-                                  _multiWindowLayoutController.commit(),
+                                () => unawaited(_commitMultiWindowLayout()),
+                            onMoveCell:
+                                (from, to, side) => unawaited(
+                                  _moveMultiWindowCell(from, to, side),
                                 ),
-                            onMoveCell: (from, to, side) => unawaited(
-                              _multiWindowLayoutController.moveCell(
-                                fromSessionId: from,
-                                toSessionId: to,
-                                side: side,
-                              ),
-                            ),
                             cellBuilder: (context, sessionId, index) {
-                              return TerminalWindowCard(
+                              final label =
+                                  _terminalManager.getTitle(sessionId) ??
+                                  _groupStore.getSessionName(sessionId, index);
+                              return SessionWindowCard(
                                 key: _terminalCardKeyFor(sessionId),
                                 sessionId: sessionId,
                                 terminal: _terminalFor(sessionId),
@@ -1750,13 +1765,15 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                                   sessionId,
                                 ),
                                 viewKey: _viewKeyFor(sessionId),
-                                label: 'TERM ${index + 1}',
+                                label: label,
                                 isActive: sessionId == _activeSessionId,
                                 showHHKB: _showHHKB,
+                                deleteDetection: deleteDetection,
                                 hardwareKeyboardOnly: _useHardwareKeyboardOnly,
                                 isDragTarget:
                                     _dragging &&
                                     _dragTargetSessionId == sessionId,
+                                terminalStyle: buildTerminalStyle(fontSize: 8),
                                 onTap:
                                     () => _setActiveSession(
                                       sessionId,
@@ -1852,6 +1869,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                   _scheduleActiveResize();
                 });
               },
+              onResetMultiWindowLayout:
+                  () => unawaited(_resetMultiWindowLayout()),
             ),
           ),
           Positioned(
@@ -2132,6 +2151,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       onSelectSession:
           (sessionId) => _setActiveSession(sessionId, requestKeyboard: true),
       onCloseSession: _sendCloseSession,
+      onAddSession: _sendCreateSessionInGroup,
       sessionLabelBuilder: (sessionId, index) {
         return _terminalManager.getTitle(sessionId) ??
             _groupStore.getSessionName(sessionId, index);
@@ -2159,15 +2179,49 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     return _voyagerMultiWindowColumnsForWidth(MediaQuery.sizeOf(context).width);
   }
 
-  void _resetMultiWindowLayout({required bool keepPaneOrder}) {
-    unawaited(
-      _multiWindowLayoutController.resetToFallback(
-        sessionIds: _visibleSessions,
-        columns: _currentVoyagerMultiWindowColumns(),
-        keepPaneOrder: keepPaneOrder,
-      ),
+  Future<void> _resetMultiWindowLayout() async {
+    await _multiWindowLayoutController.resetToFallback(
+      sessionIds: _visibleSessions,
+      columns: _currentVoyagerMultiWindowColumns(),
+      keepPaneOrder: false,
     );
+    _sendMultiWindowLayoutUpdate();
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
     _scheduleActiveResize();
+  }
+
+  Future<void> _commitMultiWindowLayout() async {
+    await _multiWindowLayoutController.commit();
+    _sendMultiWindowLayoutUpdate();
+  }
+
+  Future<void> _moveMultiWindowCell(
+    String fromSessionId,
+    String toSessionId,
+    DropSide side,
+  ) async {
+    await _multiWindowLayoutController.moveCell(
+      fromSessionId: fromSessionId,
+      toSessionId: toSessionId,
+      side: side,
+    );
+    _sendMultiWindowLayoutUpdate();
+  }
+
+  void _sendMultiWindowLayoutUpdate() {
+    final layout = _multiWindowLayoutController.layout;
+    if (layout == null) {
+      return;
+    }
+    final groupId = _groupStore.activeGroupId;
+    _groupStore.updateGroupLayout(
+      groupId,
+      layout.toJson(),
+      baseRevision: _groupStore.layoutForGroup(groupId)?.revision,
+    );
   }
 
   Widget _buildSettingsDrawer(BuildContext context) {
@@ -2198,10 +2252,6 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
           _scheduleActiveResize();
         });
       },
-      onResetMultiWindowLayout:
-          () => _resetMultiWindowLayout(keepPaneOrder: false),
-      onEqualizeMultiWindowLayout:
-          () => _resetMultiWindowLayout(keepPaneOrder: true),
       onShowKeyboardToolsChanged: (value) {
         setState(() {
           _showKeyboardTools = value;

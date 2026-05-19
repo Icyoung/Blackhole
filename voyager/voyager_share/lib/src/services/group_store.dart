@@ -13,6 +13,7 @@ class GroupStore {
 
   final List<TerminalGroup> _groups = [];
   final Map<String, String> _sessionNames = {};
+  final Map<String, GroupLayoutSnapshot> _groupLayouts = {};
   String _activeGroupId = TerminalGroup.defaultGroupId;
   List<String> _groupOrder = [];
   SharedPreferences? _prefs;
@@ -22,6 +23,8 @@ class GroupStore {
 
   List<TerminalGroup> get groups => List.unmodifiable(_groups);
   Map<String, String> get sessionNames => Map.unmodifiable(_sessionNames);
+  Map<String, GroupLayoutSnapshot> get groupLayouts =>
+      Map.unmodifiable(_groupLayouts);
   String get activeGroupId => _activeGroupId;
 
   String getSessionName(String sessionId, int index) {
@@ -44,6 +47,10 @@ class GroupStore {
 
   List<String> get activeGroupSessionIds {
     return List.unmodifiable(activeGroup?.sessionIds ?? const []);
+  }
+
+  GroupLayoutSnapshot? layoutForGroup(String groupId) {
+    return _groupLayouts[groupId];
   }
 
   Future<void> loadLocalOrder() async {
@@ -79,6 +86,22 @@ class GroupStore {
       for (final entry in sessionNamesRaw.entries) {
         if (entry.key is String && entry.value is String) {
           _sessionNames[entry.key as String] = entry.value as String;
+        }
+      }
+    }
+
+    _groupLayouts.clear();
+    final groupLayoutsRaw = payload['groupLayouts'];
+    if (groupLayoutsRaw is Map) {
+      for (final entry in groupLayoutsRaw.entries) {
+        if (entry.key is! String || entry.value is! Map) {
+          continue;
+        }
+        final snapshot = GroupLayoutSnapshot.fromJson(
+          Map<String, dynamic>.from(entry.value as Map),
+        );
+        if (snapshot != null) {
+          _groupLayouts[entry.key as String] = snapshot;
         }
       }
     }
@@ -209,6 +232,23 @@ class GroupStore {
     });
   }
 
+  void updateGroupLayout(
+    String groupId,
+    Map<String, dynamic> layout, {
+    int? baseRevision,
+  }) {
+    _groupLayouts[groupId] = GroupLayoutSnapshot(
+      layout: Map<String, dynamic>.from(layout),
+      revision: baseRevision,
+    );
+    _sendOrQueue(<String, dynamic>{
+      'type': 'group_layout_update',
+      'groupId': groupId,
+      'layout': layout,
+      if (baseRevision != null) 'baseRevision': baseRevision,
+    });
+  }
+
   void reorderGroup(String groupId, int newIndex) {
     final oldIndex = _groups.indexWhere((group) => group.id == groupId);
     if (oldIndex == -1) {
@@ -264,6 +304,7 @@ class GroupStore {
     }
     _groups.clear();
     _sessionNames.clear();
+    _groupLayouts.clear();
     _activeGroupId = TerminalGroup.defaultGroupId;
     onChanged();
   }
@@ -355,5 +396,27 @@ class GroupStore {
       return;
     }
     sendCommand(payload);
+  }
+}
+
+class GroupLayoutSnapshot {
+  const GroupLayoutSnapshot({required this.layout, this.revision});
+
+  final Map<String, dynamic> layout;
+  final int? revision;
+
+  static GroupLayoutSnapshot? fromJson(Map<String, dynamic> json) {
+    final rawLayout = json['layout'];
+    if (rawLayout is Map) {
+      final revision = json['revision'];
+      return GroupLayoutSnapshot(
+        layout: Map<String, dynamic>.from(rawLayout),
+        revision: revision is int ? revision : null,
+      );
+    }
+    if (json['schemaVersion'] is int) {
+      return GroupLayoutSnapshot(layout: Map<String, dynamic>.from(json));
+    }
+    return null;
   }
 }

@@ -17,10 +17,12 @@ dependencies:
   shared_preferences: ^2.3.3
   cryptography: ^2.7.0
   google_fonts: ^6.2.1
+  flutter_svg: ^2.0.10
 
 flutter:
   assets:
     - assets/pinyin_dict.json
+    - assets/icons/square.grid.2x2.svg
 
 dev_dependencies:
   flutter_test:

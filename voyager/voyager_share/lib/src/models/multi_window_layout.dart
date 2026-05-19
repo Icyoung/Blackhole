@@ -1,40 +1,42 @@
 enum DropSide { left, right, top, bottom }
 
+enum LayoutSplitAxis { horizontal, vertical }
+
 class MultiWindowLayout {
   const MultiWindowLayout({
     this.schemaVersion = currentSchemaVersion,
-    required this.rows,
+    required this.root,
     this.hasUserLayout = false,
     this.hasCustomStructure = false,
   });
 
-  static const int currentSchemaVersion = 1;
+  static const int currentSchemaVersion = 2;
 
   final int schemaVersion;
-  final List<LayoutRow> rows;
+  final LayoutNode? root;
+
   /// User has interacted with the layout in any way (resize or restructure).
   final bool hasUserLayout;
+
   /// User has restructured the layout via drag-to-rearrange. When true, the
-  /// layout is preserved across window-width breakpoint changes; when false,
-  /// only weights are user-touched and a breakpoint cross will reflow.
+  /// layout is preserved across window-width breakpoints; when false, only
+  /// weights are user-touched and a breakpoint cross can reflow.
   final bool hasCustomStructure;
 
-  List<String> get sessionIds {
-    return [
-      for (final row in rows)
-        for (final cell in row.cells) cell.sessionId,
-    ];
-  }
+  List<String> get sessionIds => root?.sessionIds ?? const <String>[];
+
+  int get maxHorizontalLeafCount => _maxHorizontalLeafCount(root);
 
   MultiWindowLayout copyWith({
     int? schemaVersion,
-    List<LayoutRow>? rows,
+    LayoutNode? root,
+    bool clearRoot = false,
     bool? hasUserLayout,
     bool? hasCustomStructure,
   }) {
     return MultiWindowLayout(
       schemaVersion: schemaVersion ?? this.schemaVersion,
-      rows: rows ?? this.rows,
+      root: clearRoot ? null : normalizeNode(root ?? this.root),
       hasUserLayout: hasUserLayout ?? this.hasUserLayout,
       hasCustomStructure: hasCustomStructure ?? this.hasCustomStructure,
     );
@@ -45,35 +47,28 @@ class MultiWindowLayout {
       'schemaVersion': schemaVersion,
       'hasUserLayout': hasUserLayout,
       'hasCustomStructure': hasCustomStructure,
-      'rows': rows.map((row) => row.toJson()).toList(),
+      'root': root?.toJson(),
     };
   }
 
   static MultiWindowLayout? fromJson(Map<String, dynamic> json) {
     final version = json['schemaVersion'];
-    if (version != currentSchemaVersion) {
-      return null;
+    if (version == currentSchemaVersion) {
+      final rootJson = json['root'];
+      final root =
+          rootJson is Map
+              ? LayoutNode.fromJson(Map<String, dynamic>.from(rootJson))
+              : null;
+      return MultiWindowLayout(
+        root: normalizeNode(root),
+        hasUserLayout: json['hasUserLayout'] == true,
+        hasCustomStructure: json['hasCustomStructure'] == true,
+      );
     }
-    final rowsJson = json['rows'];
-    if (rowsJson is! List) {
-      return null;
+    if (version == 1) {
+      return _fromLegacyRowsJson(json);
     }
-    final rows = <LayoutRow>[];
-    for (final entry in rowsJson) {
-      if (entry is! Map) {
-        return null;
-      }
-      final row = LayoutRow.fromJson(Map<String, dynamic>.from(entry));
-      if (row == null) {
-        return null;
-      }
-      rows.add(row);
-    }
-    return MultiWindowLayout(
-      rows: normalizeRows(rows),
-      hasUserLayout: json['hasUserLayout'] == true,
-      hasCustomStructure: json['hasCustomStructure'] == true,
-    );
+    return null;
   }
 
   static MultiWindowLayout fallback({
@@ -93,8 +88,9 @@ class MultiWindowLayout {
       rows.add(LayoutRow(weight: 1, cells: normalizeCells(cells)));
     }
     return MultiWindowLayout(
-      rows: normalizeRows(rows),
+      root: _rootFromRows(normalizeRows(rows)),
       hasUserLayout: hasUserLayout,
+      hasCustomStructure: false,
     );
   }
 
@@ -103,7 +99,7 @@ class MultiWindowLayout {
     required int defaultColumns,
     required int maxCellsPerRow,
   }) {
-    if (rows.isEmpty || !hasUserLayout) {
+    if (root == null || !hasUserLayout) {
       return fallback(
         sessionIds: sessionIds,
         columns: defaultColumns,
@@ -112,47 +108,18 @@ class MultiWindowLayout {
     }
 
     final wanted = sessionIds.toSet();
-    final nextRows = <LayoutRow>[];
     final present = <String>{};
-    for (final row in rows) {
-      final cells = <LayoutCell>[];
-      for (final cell in row.cells) {
-        if (wanted.contains(cell.sessionId) && present.add(cell.sessionId)) {
-          cells.add(cell);
-        }
-      }
-      if (cells.isNotEmpty) {
-        nextRows.add(row.copyWith(cells: normalizeCells(cells)));
-      }
-    }
-
+    var nextRoot = _pruneSessions(root!, wanted, present);
     final safeMax = maxCellsPerRow <= 0 ? 1 : maxCellsPerRow;
     for (final sessionId in sessionIds) {
       if (present.contains(sessionId)) {
         continue;
       }
-      var targetRow = -1;
-      for (var i = 0; i < nextRows.length; i++) {
-        if (nextRows[i].cells.length < safeMax) {
-          targetRow = i;
-          break;
-        }
-      }
-      if (targetRow == -1) {
-        nextRows.add(LayoutRow(weight: 1, cells: const <LayoutCell>[]));
-        targetRow = nextRows.length - 1;
-      }
-      final row = nextRows[targetRow];
-      nextRows[targetRow] = row.copyWith(
-        cells: normalizeCells([
-          ...row.cells,
-          LayoutCell(sessionId: sessionId, weight: 1),
-        ]),
-      );
+      nextRoot = _appendSession(nextRoot, sessionId, safeMax);
       present.add(sessionId);
     }
 
-    return copyWith(rows: normalizeRows(nextRows), hasUserLayout: true);
+    return copyWith(root: nextRoot, hasUserLayout: true);
   }
 
   MultiWindowLayout resetKeepingOrder({required int columns}) {
@@ -163,152 +130,164 @@ class MultiWindowLayout {
     );
   }
 
-  /// Move [fromSessionId] adjacent to [toSessionId] on the given [side].
-  /// The source cell is removed first (its row weight-normalized; row dropped
-  /// if empty), then inserted at the target's edge. Vertical sides
-  /// (left/right) insert into the target's row. Horizontal sides
-  /// (top/bottom) split into a new row above/below the target's row.
   MultiWindowLayout moveCell({
     required String fromSessionId,
     required String toSessionId,
     required DropSide side,
   }) {
-    if (fromSessionId == toSessionId) {
+    final currentRoot = root;
+    if (currentRoot == null || fromSessionId == toSessionId) {
       return this;
     }
-    // Snapshot weights so we can restore the moving cell's relative size.
-    final movingCellWeight = _findCell(fromSessionId)?.weight ?? 1;
-
-    // Remove source.
-    final removed = <LayoutRow>[];
-    for (final row in rows) {
-      final cells = [
-        for (final cell in row.cells)
-          if (cell.sessionId != fromSessionId) cell,
-      ];
-      if (cells.isNotEmpty) {
-        removed.add(row.copyWith(cells: normalizeCells(cells)));
-      }
-    }
-
-    // Locate target after removal.
-    var targetRowIndex = -1;
-    var targetCellIndex = -1;
-    for (var r = 0; r < removed.length; r++) {
-      for (var c = 0; c < removed[r].cells.length; c++) {
-        if (removed[r].cells[c].sessionId == toSessionId) {
-          targetRowIndex = r;
-          targetCellIndex = c;
-          break;
-        }
-      }
-      if (targetRowIndex != -1) break;
-    }
-    if (targetRowIndex == -1) {
-      // Target was removed (target == source, already handled above) or
-      // missing; bail out without changes.
+    final moving = _findLeaf(currentRoot, fromSessionId);
+    if (moving == null || !_containsSession(currentRoot, toSessionId)) {
       return this;
     }
 
-    final newRows = [...removed];
-    final movingCell =
-        LayoutCell(sessionId: fromSessionId, weight: movingCellWeight);
-
-    switch (side) {
-      case DropSide.left:
-      case DropSide.right:
-        final targetRow = newRows[targetRowIndex];
-        final insertAt =
-            side == DropSide.left ? targetCellIndex : targetCellIndex + 1;
-        final cells = [...targetRow.cells];
-        cells.insert(insertAt, movingCell);
-        newRows[targetRowIndex] = targetRow.copyWith(
-          cells: normalizeCells(cells),
-        );
-        break;
-      case DropSide.top:
-      case DropSide.bottom:
-        final insertAt =
-            side == DropSide.top ? targetRowIndex : targetRowIndex + 1;
-        newRows.insert(
-          insertAt,
-          LayoutRow(weight: 1, cells: [movingCell]),
-        );
-        break;
+    final removed = _removeSession(currentRoot, fromSessionId);
+    if (removed == null || !_containsSession(removed, toSessionId)) {
+      return this;
+    }
+    final inserted = _insertAdjacent(removed, toSessionId, moving, side);
+    if (identical(inserted, removed)) {
+      return this;
     }
 
     return copyWith(
-      rows: normalizeRows(newRows),
+      root: inserted,
       hasUserLayout: true,
       hasCustomStructure: true,
     );
   }
 
-  LayoutCell? _findCell(String sessionId) {
-    for (final row in rows) {
-      for (final cell in row.cells) {
-        if (cell.sessionId == sessionId) return cell;
-      }
+  MultiWindowLayout resizeSplit(
+    List<int> splitPath,
+    int dividerIndex,
+    double deltaPx,
+    double parentExtent, {
+    double minWeight = 0.1,
+  }) {
+    if (parentExtent <= 0 || root == null) {
+      return this;
+    }
+    final nextRoot = _resizeSplitNode(
+      root!,
+      splitPath,
+      0,
+      dividerIndex,
+      deltaPx / parentExtent,
+      minWeight,
+    );
+    if (identical(nextRoot, root)) {
+      return this;
+    }
+    return copyWith(root: nextRoot);
+  }
+}
+
+abstract class LayoutNode {
+  const LayoutNode();
+
+  List<String> get sessionIds;
+
+  Map<String, dynamic> toJson();
+
+  static LayoutNode? fromJson(Map<String, dynamic> json) {
+    final type = json['type'];
+    if (type == 'leaf') {
+      return LayoutLeaf.fromJson(json);
+    }
+    if (type == 'split') {
+      return LayoutSplit.fromJson(json);
     }
     return null;
   }
+}
 
-  MultiWindowLayout resizeColumn(
-    int rowIndex,
-    int cellIndex,
-    double deltaPx,
-    double parentWidth, {
-    double minWeight = 0.1,
-  }) {
-    if (parentWidth <= 0 ||
-        rowIndex < 0 ||
-        rowIndex >= rows.length ||
-        cellIndex < 0 ||
-        cellIndex + 1 >= rows[rowIndex].cells.length) {
-      return this;
-    }
-    final row = rows[rowIndex];
-    final cells = [...row.cells];
-    final left = cells[cellIndex];
-    final right = cells[cellIndex + 1];
-    final deltaWeight = deltaPx / parentWidth;
-    final pairTotal = left.weight + right.weight;
-    final minPairWeight = pairTotal * minWeight;
-    final nextLeft = (left.weight + deltaWeight).clamp(
-      minPairWeight,
-      pairTotal - minPairWeight,
-    );
-    final nextRight = pairTotal - nextLeft;
-    cells[cellIndex] = left.copyWith(weight: nextLeft);
-    cells[cellIndex + 1] = right.copyWith(weight: nextRight);
-    final nextRows = [...rows];
-    nextRows[rowIndex] = row.copyWith(cells: normalizeCells(cells));
-    return copyWith(rows: normalizeRows(nextRows));
+class LayoutLeaf extends LayoutNode {
+  const LayoutLeaf({required this.sessionId});
+
+  final String sessionId;
+
+  @override
+  List<String> get sessionIds => <String>[sessionId];
+
+  @override
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{'type': 'leaf', 'sessionId': sessionId};
   }
 
-  MultiWindowLayout resizeRow(
-    int rowIndex,
-    double deltaPx,
-    double parentHeight, {
-    double minWeight = 0.1,
-  }) {
-    if (parentHeight <= 0 || rowIndex < 0 || rowIndex + 1 >= rows.length) {
-      return this;
+  static LayoutLeaf? fromJson(Map<String, dynamic> json) {
+    final sessionId = json['sessionId'];
+    if (sessionId is! String || sessionId.isEmpty) {
+      return null;
     }
-    final nextRows = [...rows];
-    final top = nextRows[rowIndex];
-    final bottom = nextRows[rowIndex + 1];
-    final deltaWeight = deltaPx / parentHeight;
-    final pairTotal = top.weight + bottom.weight;
-    final minPairWeight = pairTotal * minWeight;
-    final nextTop = (top.weight + deltaWeight).clamp(
-      minPairWeight,
-      pairTotal - minPairWeight,
+    return LayoutLeaf(sessionId: sessionId);
+  }
+}
+
+class LayoutSplit extends LayoutNode {
+  const LayoutSplit({
+    required this.axis,
+    required this.children,
+    required this.weights,
+  });
+
+  final LayoutSplitAxis axis;
+  final List<LayoutNode> children;
+  final List<double> weights;
+
+  LayoutSplit copyWith({
+    LayoutSplitAxis? axis,
+    List<LayoutNode>? children,
+    List<double>? weights,
+  }) {
+    return LayoutSplit(
+      axis: axis ?? this.axis,
+      children: children ?? this.children,
+      weights: weights ?? this.weights,
     );
-    final nextBottom = pairTotal - nextTop;
-    nextRows[rowIndex] = top.copyWith(weight: nextTop);
-    nextRows[rowIndex + 1] = bottom.copyWith(weight: nextBottom);
-    return copyWith(rows: normalizeRows(nextRows));
+  }
+
+  @override
+  List<String> get sessionIds {
+    return [for (final child in children) ...child.sessionIds];
+  }
+
+  @override
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'type': 'split',
+      'axis': axis.name,
+      'weights': weights,
+      'children': children.map((child) => child.toJson()).toList(),
+    };
+  }
+
+  static LayoutSplit? fromJson(Map<String, dynamic> json) {
+    final axis = _axisFromJson(json['axis']);
+    final childrenJson = json['children'];
+    if (axis == null || childrenJson is! List) {
+      return null;
+    }
+    final children = <LayoutNode>[];
+    for (final entry in childrenJson) {
+      if (entry is! Map) {
+        return null;
+      }
+      final child = LayoutNode.fromJson(Map<String, dynamic>.from(entry));
+      if (child != null) {
+        children.add(child);
+      }
+    }
+    final weights =
+        json['weights'] is List
+            ? (json['weights'] as List)
+                .map(_doubleFromJson)
+                .whereType<double>()
+                .toList()
+            : <double>[];
+    return LayoutSplit(axis: axis, children: children, weights: weights);
   }
 }
 
@@ -320,13 +299,6 @@ class LayoutRow {
 
   LayoutRow copyWith({double? weight, List<LayoutCell>? cells}) {
     return LayoutRow(weight: weight ?? this.weight, cells: cells ?? this.cells);
-  }
-
-  Map<String, dynamic> toJson() {
-    return <String, dynamic>{
-      'weight': weight,
-      'cells': cells.map((cell) => cell.toJson()).toList(),
-    };
   }
 
   static LayoutRow? fromJson(Map<String, dynamic> json) {
@@ -363,10 +335,6 @@ class LayoutCell {
     );
   }
 
-  Map<String, dynamic> toJson() {
-    return <String, dynamic>{'sessionId': sessionId, 'weight': weight};
-  }
-
   static LayoutCell? fromJson(Map<String, dynamic> json) {
     final sessionId = json['sessionId'];
     if (sessionId is! String || sessionId.isEmpty) {
@@ -377,20 +345,115 @@ class LayoutCell {
   }
 }
 
+MultiWindowLayout? _fromLegacyRowsJson(Map<String, dynamic> json) {
+  final rowsJson = json['rows'];
+  if (rowsJson is! List) {
+    return null;
+  }
+  final rows = <LayoutRow>[];
+  for (final entry in rowsJson) {
+    if (entry is! Map) {
+      return null;
+    }
+    final row = LayoutRow.fromJson(Map<String, dynamic>.from(entry));
+    if (row == null) {
+      return null;
+    }
+    rows.add(row);
+  }
+  return MultiWindowLayout(
+    root: _rootFromRows(normalizeRows(rows)),
+    hasUserLayout: json['hasUserLayout'] == true,
+    hasCustomStructure: json['hasCustomStructure'] == true,
+  );
+}
+
+LayoutNode? _rootFromRows(List<LayoutRow> rows) {
+  if (rows.isEmpty) {
+    return null;
+  }
+  final rowNodes = <LayoutNode>[];
+  final rowWeights = <double>[];
+  for (final row in rows) {
+    final cells = normalizeCells(row.cells);
+    if (cells.isEmpty) {
+      continue;
+    }
+    final node =
+        cells.length == 1
+            ? LayoutLeaf(sessionId: cells.first.sessionId)
+            : LayoutSplit(
+              axis: LayoutSplitAxis.horizontal,
+              children: [
+                for (final cell in cells) LayoutLeaf(sessionId: cell.sessionId),
+              ],
+              weights: [for (final cell in cells) cell.weight],
+            );
+    rowNodes.add(node);
+    rowWeights.add(row.weight);
+  }
+  if (rowNodes.isEmpty) {
+    return null;
+  }
+  if (rowNodes.length == 1) {
+    return normalizeNode(rowNodes.first);
+  }
+  return normalizeNode(
+    LayoutSplit(
+      axis: LayoutSplitAxis.vertical,
+      children: rowNodes,
+      weights: rowWeights,
+    ),
+  );
+}
+
+LayoutNode? normalizeNode(LayoutNode? node) {
+  if (node == null) {
+    return null;
+  }
+  if (node is LayoutLeaf) {
+    return node.sessionId.isEmpty ? null : node;
+  }
+  if (node is LayoutSplit) {
+    final children = <LayoutNode>[];
+    final weights = <double>[];
+    for (var i = 0; i < node.children.length; i++) {
+      final child = normalizeNode(node.children[i]);
+      if (child == null) {
+        continue;
+      }
+      children.add(child);
+      final weight = i < node.weights.length ? node.weights[i] : 1.0;
+      weights.add(weight > 0 ? weight : 1.0);
+    }
+    if (children.isEmpty) {
+      return null;
+    }
+    if (children.length == 1) {
+      return children.first;
+    }
+    return LayoutSplit(
+      axis: node.axis,
+      children: children,
+      weights: normalizeWeights(weights, children.length),
+    );
+  }
+  return null;
+}
+
 List<LayoutRow> normalizeRows(List<LayoutRow> rows) {
   final nonEmpty = rows.where((row) => row.cells.isNotEmpty).toList();
-  final total = nonEmpty.fold<double>(
-    0,
-    (sum, row) => sum + (row.weight > 0 ? row.weight : 1),
-  );
   if (nonEmpty.isEmpty) {
     return const <LayoutRow>[];
   }
+  final weights = normalizeWeights([
+    for (final row in nonEmpty) row.weight,
+  ], nonEmpty.length);
   return [
-    for (final row in nonEmpty)
-      row.copyWith(
-        weight: (row.weight > 0 ? row.weight : 1) / total,
-        cells: normalizeCells(row.cells),
+    for (var i = 0; i < nonEmpty.length; i++)
+      nonEmpty[i].copyWith(
+        weight: weights[i],
+        cells: normalizeCells(nonEmpty[i].cells),
       ),
   ];
 }
@@ -399,14 +462,307 @@ List<LayoutCell> normalizeCells(List<LayoutCell> cells) {
   if (cells.isEmpty) {
     return const <LayoutCell>[];
   }
-  final total = cells.fold<double>(
-    0,
-    (sum, cell) => sum + (cell.weight > 0 ? cell.weight : 1),
-  );
+  final weights = normalizeWeights([
+    for (final cell in cells) cell.weight,
+  ], cells.length);
   return [
-    for (final cell in cells)
-      cell.copyWith(weight: (cell.weight > 0 ? cell.weight : 1) / total),
+    for (var i = 0; i < cells.length; i++)
+      cells[i].copyWith(weight: weights[i]),
   ];
+}
+
+List<double> normalizeWeights(List<double> weights, int length) {
+  if (length <= 0) {
+    return const <double>[];
+  }
+  final safe = <double>[
+    for (var i = 0; i < length; i++)
+      i < weights.length && weights[i] > 0 ? weights[i] : 1,
+  ];
+  final total = safe.fold<double>(0, (sum, weight) => sum + weight);
+  if (total <= 0) {
+    return List<double>.filled(length, 1 / length);
+  }
+  return [for (final weight in safe) weight / total];
+}
+
+LayoutNode? _pruneSessions(
+  LayoutNode node,
+  Set<String> wanted,
+  Set<String> present,
+) {
+  if (node is LayoutLeaf) {
+    if (wanted.contains(node.sessionId) && present.add(node.sessionId)) {
+      return node;
+    }
+    return null;
+  }
+  if (node is LayoutSplit) {
+    final children = <LayoutNode>[];
+    final weights = <double>[];
+    for (var i = 0; i < node.children.length; i++) {
+      final child = _pruneSessions(node.children[i], wanted, present);
+      if (child != null) {
+        children.add(child);
+        weights.add(i < node.weights.length ? node.weights[i] : 1);
+      }
+    }
+    return normalizeNode(
+      LayoutSplit(axis: node.axis, children: children, weights: weights),
+    );
+  }
+  return null;
+}
+
+LayoutNode _appendSession(LayoutNode? root, String sessionId, int maxCells) {
+  final leaf = LayoutLeaf(sessionId: sessionId);
+  if (root == null) {
+    return leaf;
+  }
+  final appended = _appendToHorizontalCapacity(root, leaf, maxCells);
+  if (appended != null) {
+    return appended;
+  }
+  if (root is LayoutSplit && root.axis == LayoutSplitAxis.vertical) {
+    return normalizeNode(
+      root.copyWith(
+        children: [...root.children, leaf],
+        weights: [...root.weights, 1],
+      ),
+    )!;
+  }
+  return normalizeNode(
+    LayoutSplit(
+      axis: LayoutSplitAxis.vertical,
+      children: [root, leaf],
+      weights: const [1, 1],
+    ),
+  )!;
+}
+
+LayoutNode? _appendToHorizontalCapacity(
+  LayoutNode node,
+  LayoutLeaf leaf,
+  int maxCells,
+) {
+  if (maxCells <= 1) {
+    return null;
+  }
+  if (node is LayoutLeaf) {
+    return normalizeNode(
+      LayoutSplit(
+        axis: LayoutSplitAxis.horizontal,
+        children: [node, leaf],
+        weights: const [1, 1],
+      ),
+    );
+  }
+  if (node is LayoutSplit &&
+      node.axis == LayoutSplitAxis.horizontal &&
+      node.children.length < maxCells) {
+    return normalizeNode(
+      node.copyWith(
+        children: [...node.children, leaf],
+        weights: [...node.weights, 1],
+      ),
+    );
+  }
+  if (node is LayoutSplit && node.axis == LayoutSplitAxis.vertical) {
+    final children = [...node.children];
+    if (children.isEmpty) {
+      return leaf;
+    }
+    final last = _appendToHorizontalCapacity(children.last, leaf, maxCells);
+    if (last == null) {
+      return null;
+    }
+    children[children.length - 1] = last;
+    return normalizeNode(node.copyWith(children: children));
+  }
+  return null;
+}
+
+LayoutLeaf? _findLeaf(LayoutNode node, String sessionId) {
+  if (node is LayoutLeaf) {
+    return node.sessionId == sessionId ? node : null;
+  }
+  if (node is LayoutSplit) {
+    for (final child in node.children) {
+      final found = _findLeaf(child, sessionId);
+      if (found != null) {
+        return found;
+      }
+    }
+  }
+  return null;
+}
+
+bool _containsSession(LayoutNode node, String sessionId) {
+  return node.sessionIds.contains(sessionId);
+}
+
+LayoutNode? _removeSession(LayoutNode node, String sessionId) {
+  if (node is LayoutLeaf) {
+    return node.sessionId == sessionId ? null : node;
+  }
+  if (node is LayoutSplit) {
+    final children = <LayoutNode>[];
+    final weights = <double>[];
+    for (var i = 0; i < node.children.length; i++) {
+      final child = _removeSession(node.children[i], sessionId);
+      if (child != null) {
+        children.add(child);
+        weights.add(i < node.weights.length ? node.weights[i] : 1);
+      }
+    }
+    return normalizeNode(
+      LayoutSplit(axis: node.axis, children: children, weights: weights),
+    );
+  }
+  return node;
+}
+
+LayoutNode _insertAdjacent(
+  LayoutNode node,
+  String targetId,
+  LayoutLeaf moving,
+  DropSide side,
+) {
+  final axis = _axisForSide(side);
+  final insertBefore = side == DropSide.left || side == DropSide.top;
+  if (node is LayoutLeaf) {
+    if (node.sessionId != targetId) {
+      return node;
+    }
+    return normalizeNode(
+      LayoutSplit(
+        axis: axis,
+        children: insertBefore ? [moving, node] : [node, moving],
+        weights: const [1, 1],
+      ),
+    )!;
+  }
+  if (node is LayoutSplit) {
+    final children = [...node.children];
+    final weights = [...node.weights];
+    for (var i = 0; i < children.length; i++) {
+      final child = children[i];
+      if (child is LayoutLeaf && child.sessionId == targetId) {
+        if (node.axis == axis) {
+          final insertAt = insertBefore ? i : i + 1;
+          children.insert(insertAt, moving);
+          weights.insert(insertAt, i < weights.length ? weights[i] : 1);
+        } else {
+          children[i] =
+              normalizeNode(
+                LayoutSplit(
+                  axis: axis,
+                  children: insertBefore ? [moving, child] : [child, moving],
+                  weights: const [1, 1],
+                ),
+              )!;
+        }
+        return normalizeNode(
+          node.copyWith(children: children, weights: weights),
+        )!;
+      }
+      if (_containsSession(child, targetId)) {
+        final updated = _insertAdjacent(child, targetId, moving, side);
+        if (!identical(updated, child)) {
+          children[i] = updated;
+          return normalizeNode(
+            node.copyWith(children: children, weights: weights),
+          )!;
+        }
+      }
+    }
+  }
+  return node;
+}
+
+LayoutNode _resizeSplitNode(
+  LayoutNode node,
+  List<int> splitPath,
+  int depth,
+  int dividerIndex,
+  double deltaWeight,
+  double minWeight,
+) {
+  if (depth == splitPath.length) {
+    if (node is! LayoutSplit ||
+        dividerIndex < 0 ||
+        dividerIndex + 1 >= node.children.length) {
+      return node;
+    }
+    final weights = normalizeWeights(node.weights, node.children.length);
+    final first = weights[dividerIndex];
+    final second = weights[dividerIndex + 1];
+    final pairTotal = first + second;
+    final minPairWeight = pairTotal * minWeight;
+    final nextFirst = (first + deltaWeight).clamp(
+      minPairWeight,
+      pairTotal - minPairWeight,
+    );
+    weights[dividerIndex] = nextFirst;
+    weights[dividerIndex + 1] = pairTotal - nextFirst;
+    return normalizeNode(node.copyWith(weights: weights))!;
+  }
+  if (node is! LayoutSplit) {
+    return node;
+  }
+  final childIndex = splitPath[depth];
+  if (childIndex < 0 || childIndex >= node.children.length) {
+    return node;
+  }
+  final children = [...node.children];
+  final updated = _resizeSplitNode(
+    children[childIndex],
+    splitPath,
+    depth + 1,
+    dividerIndex,
+    deltaWeight,
+    minWeight,
+  );
+  if (identical(updated, children[childIndex])) {
+    return node;
+  }
+  children[childIndex] = updated;
+  return normalizeNode(node.copyWith(children: children))!;
+}
+
+LayoutSplitAxis? _axisFromJson(Object? raw) {
+  if (raw == 'horizontal') {
+    return LayoutSplitAxis.horizontal;
+  }
+  if (raw == 'vertical') {
+    return LayoutSplitAxis.vertical;
+  }
+  return null;
+}
+
+LayoutSplitAxis _axisForSide(DropSide side) {
+  return switch (side) {
+    DropSide.left || DropSide.right => LayoutSplitAxis.horizontal,
+    DropSide.top || DropSide.bottom => LayoutSplitAxis.vertical,
+  };
+}
+
+int _maxHorizontalLeafCount(LayoutNode? node) {
+  if (node == null) {
+    return 0;
+  }
+  if (node is LayoutLeaf) {
+    return 1;
+  }
+  if (node is LayoutSplit) {
+    final own =
+        node.axis == LayoutSplitAxis.horizontal ? node.children.length : 0;
+    return node.children.fold<int>(own, (max, child) {
+      final childMax = _maxHorizontalLeafCount(child);
+      return childMax > max ? childMax : max;
+    });
+  }
+  return 0;
 }
 
 double? _doubleFromJson(Object? value) {

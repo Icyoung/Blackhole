@@ -13,16 +13,16 @@
 //!     --client-ip 10.13.37.4 \
 //!     --server-ip 10.13.37.1
 
-#[path = "../vpn_helper_client.rs"]
-mod vpn_helper_client;
-#[path = "../vpn_helper_protocol.rs"]
-mod vpn_helper_protocol;
-#[path = "../tun_device.rs"]
-mod tun_device;
 #[path = "../dns_forwarder.rs"]
 mod dns_forwarder;
 #[path = "../nat.rs"]
 mod nat;
+#[path = "../tun_device.rs"]
+mod tun_device;
+#[path = "../vpn_helper_client.rs"]
+mod vpn_helper_client;
+#[path = "../vpn_helper_protocol.rs"]
+mod vpn_helper_protocol;
 
 use std::net::UdpSocket;
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -39,12 +39,10 @@ fn main() {
             eprintln!("missing {name}");
             std::process::exit(1);
         });
-        args.get(pos + 1)
-            .cloned()
-            .unwrap_or_else(|| {
-                eprintln!("missing value for {name}");
-                std::process::exit(1);
-            })
+        args.get(pos + 1).cloned().unwrap_or_else(|| {
+            eprintln!("missing value for {name}");
+            std::process::exit(1);
+        })
     };
 
     let helper_socket = get("--helper-socket");
@@ -70,7 +68,14 @@ fn main() {
 
     // Configure TUN IP address
     let status = std::process::Command::new("ifconfig")
-        .args([&prepared.tun.name, &client_ip, &server_ip, "netmask", "255.255.255.0", "up"])
+        .args([
+            &prepared.tun.name,
+            &client_ip,
+            &server_ip,
+            "netmask",
+            "255.255.255.0",
+            "up",
+        ])
         .status();
     if let Ok(s) = status {
         if !s.success() {
@@ -80,7 +85,13 @@ fn main() {
 
     // Add route
     let _ = std::process::Command::new("route")
-        .args(["add", "-net", "10.13.37.0/24", "-interface", &prepared.tun.name])
+        .args([
+            "add",
+            "-net",
+            "10.13.37.0/24",
+            "-interface",
+            &prepared.tun.name,
+        ])
         .status();
 
     // Create WG tunnel
@@ -90,16 +101,16 @@ fn main() {
     });
     let config_str = config_json.to_string();
     let tunnel = unsafe {
-        let ptr = tunnel_ffi::bh_wg_tunnel_new(
-            std::ffi::CString::new(config_str).unwrap().as_ptr(),
-        );
+        let ptr =
+            tunnel_ffi::bh_wg_tunnel_new(std::ffi::CString::new(config_str).unwrap().as_ptr());
         assert!(!ptr.is_null(), "failed to create WG tunnel");
         ptr
     };
 
     // Bind UDP socket
     let udp = UdpSocket::bind("0.0.0.0:0").expect("bind UDP");
-    udp.connect(format!("{server_addr}:{server_port}")).expect("connect UDP");
+    udp.connect(format!("{server_addr}:{server_port}"))
+        .expect("connect UDP");
     info!("UDP connected to {server_addr}:{server_port}");
 
     // Send initial handshake
@@ -216,17 +227,22 @@ mod tunnel_ffi {
         pub fn bh_wg_tunnel_new(config_json: *const std::ffi::c_char) -> *mut std::ffi::c_void;
         pub fn bh_wg_encapsulate(
             tunnel: *mut std::ffi::c_void,
-            src: *const u8, src_len: usize,
-            dst: *mut u8, dst_len: *mut usize,
+            src: *const u8,
+            src_len: usize,
+            dst: *mut u8,
+            dst_len: *mut usize,
         ) -> i32;
         pub fn bh_wg_decapsulate(
             tunnel: *mut std::ffi::c_void,
-            src: *const u8, src_len: usize,
-            dst: *mut u8, dst_len: *mut usize,
+            src: *const u8,
+            src_len: usize,
+            dst: *mut u8,
+            dst_len: *mut usize,
         ) -> i32;
         pub fn bh_wg_update_timers(
             tunnel: *mut std::ffi::c_void,
-            dst: *mut u8, dst_len: *mut usize,
+            dst: *mut u8,
+            dst_len: *mut usize,
         ) -> i32;
     }
 }

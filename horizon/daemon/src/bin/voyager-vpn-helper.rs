@@ -54,21 +54,17 @@ fn run(socket_path: PathBuf, pid_path: PathBuf) -> Result<(), String> {
             .map_err(|e| format!("failed to create socket directory: {e}"))?;
     }
     if let Some(parent) = pid_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create pid directory: {e}"))?;
+        fs::create_dir_all(parent).map_err(|e| format!("failed to create pid directory: {e}"))?;
     }
     if socket_path.exists() {
-        fs::remove_file(&socket_path)
-            .map_err(|e| format!("failed to remove stale socket: {e}"))?;
+        fs::remove_file(&socket_path).map_err(|e| format!("failed to remove stale socket: {e}"))?;
     }
     if pid_path.exists() {
-        fs::remove_file(&pid_path)
-            .map_err(|e| format!("failed to remove stale pid file: {e}"))?;
+        fs::remove_file(&pid_path).map_err(|e| format!("failed to remove stale pid file: {e}"))?;
     }
 
-    let listener = UnixListener::bind(&socket_path).map_err(|e| {
-        format!("failed to bind socket {}: {e}", socket_path.display())
-    })?;
+    let listener = UnixListener::bind(&socket_path)
+        .map_err(|e| format!("failed to bind socket {}: {e}", socket_path.display()))?;
     fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o666))
         .map_err(|e| format!("failed to set socket permissions: {e}"))?;
     fs::write(&pid_path, format!("{}\n", std::process::id()))
@@ -92,10 +88,14 @@ fn run(socket_path: PathBuf, pid_path: PathBuf) -> Result<(), String> {
 
 fn handle_client(stream: UnixStream, state: &Arc<Mutex<ActiveVpnState>>) -> Result<(), String> {
     let mut reader = BufReader::new(
-        stream.try_clone().map_err(|e| format!("clone stream: {e}"))?,
+        stream
+            .try_clone()
+            .map_err(|e| format!("clone stream: {e}"))?,
     );
     let mut line = String::new();
-    reader.read_line(&mut line).map_err(|e| format!("read request: {e}"))?;
+    reader
+        .read_line(&mut line)
+        .map_err(|e| format!("read request: {e}"))?;
     if line.trim().is_empty() {
         return Err("received empty request".to_string());
     }
@@ -135,8 +135,8 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<ActiveVpnState>>) -> Resu
                 }
             }
 
-            let tun = tun_device::create_tun(None)
-                .map_err(|e| format!("failed to create TUN: {e}"))?;
+            let tun =
+                tun_device::create_tun(None).map_err(|e| format!("failed to create TUN: {e}"))?;
             info!("created TUN device {}", tun.name);
             let interface_name = tun.name.clone();
 
@@ -148,7 +148,10 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<ActiveVpnState>>) -> Resu
             let _ = Command::new("route")
                 .args(["add", "-net", &subnet, "-interface", &tun.name])
                 .output();
-            info!("configured TUN: {} -> 10.13.37.1, route {}", client_ip, subnet);
+            info!(
+                "configured TUN: {} -> 10.13.37.1, route {}",
+                client_ip, subnet
+            );
 
             // Pass raw TUN fd directly to client (no socketpair bridge).
             // Client handles 4-byte AF header read/write itself.
@@ -224,8 +227,7 @@ fn send_response(
     response: &HelperResponse,
     fd: Option<RawFd>,
 ) -> Result<(), String> {
-    let payload =
-        serde_json::to_vec(response).map_err(|e| format!("serialize response: {e}"))?;
+    let payload = serde_json::to_vec(response).map_err(|e| format!("serialize response: {e}"))?;
     let mut iov = libc::iovec {
         iov_base: payload.as_ptr() as *mut libc::c_void,
         iov_len: payload.len(),
@@ -256,7 +258,10 @@ fn send_response(
     }
     let sent = unsafe { libc::sendmsg(stream.as_raw_fd(), &msg, 0) };
     if sent < 0 {
-        return Err(format!("sendmsg failed: {}", std::io::Error::last_os_error()));
+        return Err(format!(
+            "sendmsg failed: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     Ok(())
 }
@@ -302,17 +307,29 @@ fn run_packet_bridge(
 
     while !stop.load(Ordering::SeqCst) {
         let mut poll_fds = [
-            libc::pollfd { fd: tun_fd, events: libc::POLLIN, revents: 0 },
-            libc::pollfd { fd: helper_fd, events: libc::POLLIN, revents: 0 },
+            libc::pollfd {
+                fd: tun_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: helper_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
         let poll_result = unsafe { libc::poll(poll_fds.as_mut_ptr(), 2, 200) };
         if poll_result < 0 {
             let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted { continue; }
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
             warn!("bridge poll failed for {}: {}", interface_name, error);
             break;
         }
-        if poll_result == 0 { continue; }
+        if poll_result == 0 {
+            continue;
+        }
 
         if (poll_fds[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)) != 0
             || (poll_fds[1].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)) != 0
@@ -327,9 +344,7 @@ fn run_packet_bridge(
             if n > 4 {
                 let ip_len = n as usize - 4;
                 tun_buf.copy_within(4..n as usize, 0);
-                let sent = unsafe {
-                    libc::send(helper_fd, tun_buf.as_ptr() as _, ip_len, 0)
-                };
+                let sent = unsafe { libc::send(helper_fd, tun_buf.as_ptr() as _, ip_len, 0) };
                 if sent < 0 {
                     let e = std::io::Error::last_os_error();
                     warn!(interface = %interface_name, "bridge send to daemon failed: {e}");
@@ -343,7 +358,8 @@ fn run_packet_bridge(
 
         // Daemon → TUN (prepend 4-byte AF header)
         if (poll_fds[1].revents & libc::POLLIN) != 0 {
-            let n = unsafe { libc::recv(helper_fd, bridge_buf.as_mut_ptr() as _, bridge_buf.len(), 0) };
+            let n =
+                unsafe { libc::recv(helper_fd, bridge_buf.as_mut_ptr() as _, bridge_buf.len(), 0) };
             if n > 0 {
                 let n = n as usize;
                 let af: u32 = if (bridge_buf[0] >> 4) == 6 {
@@ -354,9 +370,7 @@ fn run_packet_bridge(
                 let mut prefixed = Vec::with_capacity(4 + n);
                 prefixed.extend_from_slice(&af.to_ne_bytes());
                 prefixed.extend_from_slice(&bridge_buf[..n]);
-                let _ = unsafe {
-                    libc::write(tun_fd, prefixed.as_ptr() as _, prefixed.len())
-                };
+                let _ = unsafe { libc::write(tun_fd, prefixed.as_ptr() as _, prefixed.len()) };
             } else if n == 0 {
                 info!("bridge daemon socket closed for {}", interface_name);
                 break;
@@ -378,7 +392,11 @@ fn create_bridge_socketpair() -> Result<(RawFd, RawFd), String> {
 }
 
 fn close_fd(fd: RawFd) {
-    if fd >= 0 { unsafe { libc::close(fd); } }
+    if fd >= 0 {
+        unsafe {
+            libc::close(fd);
+        }
+    }
 }
 
 struct ParsedArgs {
@@ -392,8 +410,12 @@ fn parse_args(args: Vec<String>) -> ParsedArgs {
     let mut pid_path: Option<PathBuf> = None;
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--socket" => { socket_path = iter.next().map(PathBuf::from); }
-            "--pid-file" => { pid_path = iter.next().map(PathBuf::from); }
+            "--socket" => {
+                socket_path = iter.next().map(PathBuf::from);
+            }
+            "--pid-file" => {
+                pid_path = iter.next().map(PathBuf::from);
+            }
             _ => {}
         }
     }
@@ -404,11 +426,17 @@ fn parse_args(args: Vec<String>) -> ParsedArgs {
 }
 
 fn default_pid_path() -> PathBuf {
-    resolve_home().join(".blackhole").join("voyager").join("vpn-helper.pid")
+    resolve_home()
+        .join(".blackhole")
+        .join("voyager")
+        .join("vpn-helper.pid")
 }
 
 fn default_socket_path() -> PathBuf {
-    resolve_home().join(".blackhole").join("voyager").join("vpn-helper.sock")
+    resolve_home()
+        .join(".blackhole")
+        .join("voyager")
+        .join("vpn-helper.sock")
 }
 
 fn resolve_home() -> PathBuf {

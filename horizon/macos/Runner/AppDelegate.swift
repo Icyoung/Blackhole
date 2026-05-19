@@ -4,8 +4,6 @@ import Darwin
 
 @main
 class AppDelegate: FlutterAppDelegate {
-  private let ptyManager = PtyManager()
-  private var outputSink: FlutterEventSink?
   private var securityScopedUrls: [URL] = []
   private let bookmarkDefaultsKey = "blackhole.security.bookmarks"
   private let vpnHelperSocketRelativePath = ".blackhole/horizon/vpn-helper.sock"
@@ -32,72 +30,11 @@ class AppDelegate: FlutterAppDelegate {
       reason: "Horizon daemon serving remote terminals"
     )
 
-    let channel = FlutterMethodChannel(
-      name: "com.blackhole/pty",
-      binaryMessenger: controller.engine.binaryMessenger
-    )
     systemChannel = FlutterMethodChannel(
       name: "com.blackhole/system",
       binaryMessenger: controller.engine.binaryMessenger
     )
-    let outputChannel = FlutterEventChannel(
-      name: "com.blackhole/pty/output",
-      binaryMessenger: controller.engine.binaryMessenger
-    )
-
-    outputChannel.setStreamHandler(self)
     restoreSecurityBookmarks()
-
-    channel.setMethodCallHandler { [weak self] call, result in
-      guard let self = self else {
-        result(FlutterError(code: "PTY_DEINIT", message: "PtyManager released", details: nil))
-        return
-      }
-      switch call.method {
-      case "startShell":
-        let args = call.arguments as? [String: Any]
-        let rows = args?["rows"] as? Int ?? 24
-        let cols = args?["cols"] as? Int ?? 80
-        let shellPath = args?["shellPath"] as? String
-        let cwd = args?["cwd"] as? String
-        do {
-          let sessionId = try self.ptyManager.startShell(rows: rows, cols: cols, shellPath: shellPath, cwd: cwd)
-          result(sessionId)
-        } catch {
-          result(FlutterError(code: "PTY_START", message: error.localizedDescription, details: nil))
-        }
-      case "writeStdin":
-        let args = call.arguments as? [String: Any]
-        let sessionId = args?["sessionId"] as? String ?? ""
-        guard
-          let data = (args?["data"] as? FlutterStandardTypedData)?.data
-        else {
-          result(FlutterError(code: "PTY_STDIN", message: "Missing data", details: nil))
-          return
-        }
-        self.ptyManager.writeStdin(sessionId: sessionId, data: data)
-        result(nil)
-      case "resize":
-        let args = call.arguments as? [String: Any]
-        let sessionId = args?["sessionId"] as? String ?? ""
-        let rows = args?["rows"] as? Int ?? 24
-        let cols = args?["cols"] as? Int ?? 80
-        self.ptyManager.resize(sessionId: sessionId, rows: rows, cols: cols)
-        result(nil)
-      case "kill":
-        let args = call.arguments as? [String: Any]
-        let sessionId = args?["sessionId"] as? String ?? ""
-        self.ptyManager.kill(sessionId: sessionId)
-        result(nil)
-      case "getCwd":
-        let args = call.arguments as? [String: Any]
-        let sessionId = args?["sessionId"] as? String ?? ""
-        let cwd = self.ptyManager.getCwd(sessionId: sessionId)
-        result(cwd)
-      default:
-        result(FlutterMethodNotImplemented)
-      }
-    }
 
     systemChannel?.setMethodCallHandler { [weak self] call, result in
       guard let self = self else {
@@ -169,15 +106,6 @@ class AppDelegate: FlutterAppDelegate {
       default:
         result(FlutterMethodNotImplemented)
       }
-    }
-
-    ptyManager.outputHandler = { [weak self] sessionId, data in
-      guard let self = self else { return }
-      let payload: [String: Any] = [
-        "sessionId": sessionId,
-        "data": FlutterStandardTypedData(bytes: data),
-      ]
-      self.outputSink?(payload)
     }
 
     super.applicationDidFinishLaunching(notification)
@@ -1114,18 +1042,6 @@ class AppDelegate: FlutterAppDelegate {
         NSLog("Failed to restore security bookmark: %@", error.localizedDescription)
       }
     }
-  }
-}
-
-extension AppDelegate: FlutterStreamHandler {
-  func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
-    outputSink = events
-    return nil
-  }
-
-  func onCancel(withArguments arguments: Any?) -> FlutterError? {
-    outputSink = nil
-    return nil
   }
 }
 

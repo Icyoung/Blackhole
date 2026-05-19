@@ -54,10 +54,7 @@ class MultiWindowLayoutController extends ChangeNotifier {
         columns: defaultColumns,
       );
     }
-    final maxCellsInRow = current.rows.fold<int>(
-      0,
-      (m, row) => row.cells.length > m ? row.cells.length : m,
-    );
+    final maxCellsInRow = current.maxHorizontalLeafCount;
     // User-resized weights only apply when the window's current column policy
     // still allows this structure. If we've crossed a breakpoint
     // (e.g. 1-col → 2-col), reflow into a fresh fallback. Weights are
@@ -71,8 +68,13 @@ class MultiWindowLayoutController extends ChangeNotifier {
     return current;
   }
 
-  Future<void> loadFor(String groupId) async {
-    if (_groupId == groupId && _loadedGroupId == groupId) {
+  Future<void> loadFor(
+    String groupId, {
+    Map<String, dynamic>? remoteLayout,
+  }) async {
+    if (_groupId == groupId &&
+        _loadedGroupId == groupId &&
+        remoteLayout == null) {
       return;
     }
     if (_groupId != groupId) {
@@ -83,9 +85,15 @@ class MultiWindowLayoutController extends ChangeNotifier {
     if (_groupId != groupId) {
       return;
     }
-    final raw = _prefs?.getString(_keyFor(groupId));
     MultiWindowLayout? loaded;
-    if (raw != null) {
+    if (remoteLayout != null) {
+      loaded = MultiWindowLayout.fromJson(remoteLayout);
+      if (loaded != null) {
+        await _save(groupId, loaded);
+      }
+    }
+    final raw = _prefs?.getString(_keyFor(groupId));
+    if (loaded == null && raw != null) {
       try {
         final json = jsonDecode(raw);
         if (json is Map) {
@@ -146,39 +154,20 @@ class MultiWindowLayoutController extends ChangeNotifier {
   }
 
   bool _layoutsEqual(MultiWindowLayout a, MultiWindowLayout b) {
-    if (a.hasUserLayout != b.hasUserLayout) return false;
-    if (a.rows.length != b.rows.length) return false;
-    for (var r = 0; r < a.rows.length; r++) {
-      final ra = a.rows[r];
-      final rb = b.rows[r];
-      if (ra.cells.length != rb.cells.length) return false;
-      for (var c = 0; c < ra.cells.length; c++) {
-        if (ra.cells[c].sessionId != rb.cells[c].sessionId) return false;
-      }
-    }
-    return true;
+    return jsonEncode(a.toJson()) == jsonEncode(b.toJson());
   }
 
-  void resizeColumn(
-    int rowIndex,
-    int cellIndex,
+  void resizeSplit(
+    List<int> splitPath,
+    int dividerIndex,
     double deltaPx,
-    double parentWidth,
+    double extent,
   ) {
     final current = _layout;
     if (current == null) {
       return;
     }
-    _layout = current.resizeColumn(rowIndex, cellIndex, deltaPx, parentWidth);
-    notifyListeners();
-  }
-
-  void resizeRow(int rowIndex, double deltaPx, double parentHeight) {
-    final current = _layout;
-    if (current == null) {
-      return;
-    }
-    _layout = current.resizeRow(rowIndex, deltaPx, parentHeight);
+    _layout = current.resizeSplit(splitPath, dividerIndex, deltaPx, extent);
     notifyListeners();
   }
 
@@ -224,9 +213,6 @@ class MultiWindowLayoutController extends ChangeNotifier {
     required bool keepPaneOrder,
   }) async {
     final groupId = _groupId;
-    if (groupId == null) {
-      return;
-    }
     if (keepPaneOrder && _layout != null) {
       _layout = _layout!.resetKeepingOrder(columns: columns);
     } else {
@@ -235,7 +221,9 @@ class MultiWindowLayoutController extends ChangeNotifier {
         columns: columns,
       );
     }
-    await _save(groupId, _layout!);
+    if (groupId != null) {
+      await _save(groupId, _layout!);
+    }
     notifyListeners();
   }
 

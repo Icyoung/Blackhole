@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 import '../design_tokens.dart';
 import 'chrome_tab_pill.dart';
@@ -26,6 +29,7 @@ class HeaderChrome extends StatelessWidget {
     this.trailingWidget,
     this.multiWindow = false,
     this.onToggleMultiWindow,
+    this.onResetMultiWindowLayout,
   });
 
   final Color color;
@@ -47,6 +51,7 @@ class HeaderChrome extends StatelessWidget {
   final Widget? trailingWidget;
   final bool multiWindow;
   final VoidCallback? onToggleMultiWindow;
+  final VoidCallback? onResetMultiWindowLayout;
 
   /// Minimum width to show the multi-window toggle (iPad-class screens).
   static const double _multiWindowBreakpoint = 768;
@@ -214,12 +219,11 @@ class HeaderChrome extends StatelessWidget {
                       if (onToggleMultiWindow != null &&
                           MediaQuery.of(context).size.width >=
                               _multiWindowBreakpoint)
-                        _CircleIconButton(
-                          icon:
-                              multiWindow
-                                  ? Icons.grid_view_rounded
-                                  : Icons.crop_square_rounded,
+                        _ViewModeIconButton(
+                          multiWindow: multiWindow,
                           onTap: onToggleMultiWindow!,
+                          onLongPress:
+                              multiWindow ? onResetMultiWindowLayout : null,
                         ),
                     ],
                   ),
@@ -242,6 +246,105 @@ class HeaderChrome extends StatelessWidget {
       return 'TERM ${index + 1}';
     }
     return label;
+  }
+}
+
+class _ViewModeIconButton extends StatefulWidget {
+  const _ViewModeIconButton({
+    required this.multiWindow,
+    required this.onTap,
+    this.onLongPress,
+  });
+
+  final bool multiWindow;
+  final VoidCallback onTap;
+  final VoidCallback? onLongPress;
+
+  @override
+  State<_ViewModeIconButton> createState() => _ViewModeIconButtonState();
+}
+
+class _ViewModeIconButtonState extends State<_ViewModeIconButton> {
+  static const _longPressDuration = Duration(seconds: 2);
+
+  Timer? _longPressTimer;
+  bool _longPressTriggered = false;
+
+  void _startPress() {
+    _longPressTriggered = false;
+    _longPressTimer?.cancel();
+    final onLongPress = widget.onLongPress;
+    if (onLongPress == null) {
+      return;
+    }
+    _longPressTimer = Timer(_longPressDuration, () {
+      if (!mounted) {
+        return;
+      }
+      _longPressTriggered = true;
+      Feedback.forLongPress(context);
+      onLongPress();
+    });
+  }
+
+  void _endPress() {
+    final shouldTap = !_longPressTriggered;
+    _longPressTimer?.cancel();
+    _longPressTimer = null;
+    _longPressTriggered = false;
+    if (shouldTap) {
+      widget.onTap();
+    }
+  }
+
+  void _cancelPress() {
+    _longPressTimer?.cancel();
+    _longPressTimer = null;
+    _longPressTriggered = false;
+  }
+
+  @override
+  void dispose() {
+    _longPressTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const multiIconSize = 15.0;
+    final Widget icon =
+        widget.multiWindow
+            ? SvgPicture.asset(
+              'assets/icons/square.grid.2x2.svg',
+              package: 'voyager_share',
+              width: multiIconSize,
+              height: multiIconSize,
+              colorFilter: const ColorFilter.mode(
+                AppColors.textSecondary,
+                BlendMode.srcIn,
+              ),
+            )
+            : const Icon(
+              Icons.crop_square,
+              size: 18,
+              color: AppColors.textSecondary,
+            );
+
+    return Tooltip(
+      message: widget.multiWindow ? 'Multi session' : 'Single session',
+      triggerMode: TooltipTriggerMode.manual,
+      child: Semantics(
+        button: true,
+        label: widget.multiWindow ? 'Multi session' : 'Single session',
+        child: Listener(
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: (_) => _startPress(),
+          onPointerUp: (_) => _endPress(),
+          onPointerCancel: (_) => _cancelPress(),
+          child: SizedBox(width: 32, height: 32, child: Center(child: icon)),
+        ),
+      ),
+    );
   }
 }
 
@@ -290,7 +393,7 @@ class _CircleIconButtonState extends State<_CircleIconButton> {
           margin: const EdgeInsets.symmetric(horizontal: 4),
           decoration: BoxDecoration(color: bg, shape: BoxShape.circle),
           child: Center(
-            child: Icon(widget.icon, color: AppColors.textTertiary, size: 14),
+            child: Icon(widget.icon, color: AppColors.textSecondary, size: 16),
           ),
         ),
       ),

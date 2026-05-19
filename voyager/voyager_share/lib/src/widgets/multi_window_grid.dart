@@ -13,14 +13,14 @@ class MultiWindowGrid extends StatelessWidget {
     required this.layout,
     required this.cellBuilder,
     this.trailingBuilder,
-    required this.onResizeColumn,
-    required this.onResizeRow,
+    required this.onResizeSplit,
     required this.onResizeEnd,
     this.onMoveCell,
     this.padding = EdgeInsets.zero,
     this.gap = 8,
-    this.touchMinHitSize = 32,
-    this.desktopHitSize = 6,
+    this.splitterVisualGap = 8,
+    this.touchMinHitSize = 44,
+    this.desktopHitSize = 12,
     this.mobileBreakpoint = 600,
     this.scrollPhysics,
   });
@@ -28,14 +28,19 @@ class MultiWindowGrid extends StatelessWidget {
   final MultiWindowLayout layout;
   final LayoutCellBuilder cellBuilder;
   final WidgetBuilder? trailingBuilder;
-  final void Function(int rowIndex, int cellIndex, double deltaPx, double width)
-  onResizeColumn;
-  final void Function(int rowIndex, double deltaPx, double height) onResizeRow;
+  final void Function(
+    List<int> splitPath,
+    int dividerIndex,
+    double deltaPx,
+    double extent,
+  )
+  onResizeSplit;
   final VoidCallback onResizeEnd;
   final void Function(String fromSessionId, String toSessionId, DropSide side)?
   onMoveCell;
   final EdgeInsetsGeometry padding;
   final double gap;
+  final double splitterVisualGap;
   final double touchMinHitSize;
   final double desktopHitSize;
   final double mobileBreakpoint;
@@ -48,10 +53,7 @@ class MultiWindowGrid extends StatelessWidget {
         if (constraints.maxWidth < mobileBreakpoint) {
           return _buildSingleColumn(context);
         }
-        return Padding(
-          padding: padding,
-          child: _buildSplitLayout(context, constraints),
-        );
+        return Padding(padding: padding, child: _buildSplitLayout(context));
       },
     );
   }
@@ -62,137 +64,117 @@ class MultiWindowGrid extends StatelessWidget {
       padding: padding,
       physics: scrollPhysics,
       children: [
-        for (final row in layout.rows)
-          for (final cell in row.cells) ...[
-            SizedBox(
-              height: 280,
-              child: cellBuilder(context, cell.sessionId, index++),
-            ),
-            SizedBox(height: gap),
-          ],
+        for (final sessionId in layout.sessionIds) ...[
+          SizedBox(
+            height: 280,
+            child: cellBuilder(context, sessionId, index++),
+          ),
+          SizedBox(height: gap),
+        ],
         if (trailingBuilder != null)
           SizedBox(height: 180, child: trailingBuilder!(context)),
       ],
     );
   }
 
-  Widget _buildSplitLayout(BuildContext context, BoxConstraints constraints) {
-    final rows = layout.rows;
-    if (rows.isEmpty) {
+  Widget _buildSplitLayout(BuildContext context) {
+    final root = layout.root;
+    if (root == null) {
       return trailingBuilder?.call(context) ?? const SizedBox.shrink();
     }
-    final hitSize = _hitSize(context);
-    final innerHeight = constraints.maxHeight - _verticalPadding(context);
-    var visualIndex = 0;
-    final children = <Widget>[];
-    for (var rowIndex = 0; rowIndex < rows.length; rowIndex++) {
-      final row = rows[rowIndex];
-      final firstVisualIndex = visualIndex;
-      children.add(
-        Expanded(
-          flex: _flex(row.weight),
-          child: LayoutBuilder(
-            builder: (context, rowConstraints) {
-              return _buildRow(
-                context,
-                row,
-                rowIndex,
-                rows.length,
-                rowConstraints,
-                innerHeight,
-                firstVisualIndex,
-                hitSize,
-              );
-            },
-          ),
-        ),
-      );
-      visualIndex += row.cells.length;
-      if (rowIndex < rows.length - 1) {
-        children.add(SizedBox(height: gap));
-      }
+    final visualIndexes = <String, int>{};
+    final ids = layout.sessionIds;
+    for (var i = 0; i < ids.length; i++) {
+      visualIndexes.putIfAbsent(ids[i], () => i);
     }
-    return Column(children: children);
+    final rootWidget = _buildNode(context, root, const <int>[], visualIndexes);
+    if (trailingBuilder == null) {
+      return rootWidget;
+    }
+    return Column(
+      children: [
+        Expanded(child: rootWidget),
+        SizedBox(height: gap),
+        SizedBox(height: 180, child: trailingBuilder!(context)),
+      ],
+    );
   }
 
-  Widget _buildRow(
+  Widget _buildNode(
     BuildContext context,
-    LayoutRow row,
-    int rowIndex,
-    int rowCount,
-    BoxConstraints rowConstraints,
-    double parentHeight,
-    int firstVisualIndex,
-    double hitSize,
+    LayoutNode node,
+    List<int> path,
+    Map<String, int> visualIndexes,
   ) {
-    final cells = row.cells;
-    final children = <Widget>[];
-    for (var cellIndex = 0; cellIndex < cells.length; cellIndex++) {
-      final cell = cells[cellIndex];
-      final cellChild = cellBuilder(
+    if (node is LayoutLeaf) {
+      final child = cellBuilder(
         context,
-        cell.sessionId,
-        firstVisualIndex + cellIndex,
+        node.sessionId,
+        visualIndexes[node.sessionId] ?? 0,
       );
-      final wrapped = onMoveCell == null
-          ? cellChild
+      return onMoveCell == null
+          ? child
           : _DraggableCell(
-              sessionId: cell.sessionId,
-              onMoveCell: onMoveCell!,
-              child: cellChild,
-            );
-      children.add(
-        Expanded(
-          flex: _flex(cell.weight),
-          child: _ResizableCell(
-            hitSize: hitSize,
-            hasLeft: cellIndex > 0,
-            hasRight: cellIndex < cells.length - 1,
-            hasTop: rowIndex > 0,
-            hasBottom: rowIndex < rowCount - 1,
-            onLeftDrag:
-                cellIndex > 0
-                    ? (delta) => onResizeColumn(
-                          rowIndex,
-                          cellIndex - 1,
-                          delta,
-                          rowConstraints.maxWidth,
-                        )
-                    : null,
-            onRightDrag:
-                cellIndex < cells.length - 1
-                    ? (delta) => onResizeColumn(
-                          rowIndex,
-                          cellIndex,
-                          delta,
-                          rowConstraints.maxWidth,
-                        )
-                    : null,
-            onTopDrag:
-                rowIndex > 0
-                    ? (delta) =>
-                        onResizeRow(rowIndex - 1, delta, parentHeight)
-                    : null,
-            onBottomDrag:
-                rowIndex < rowCount - 1
-                    ? (delta) => onResizeRow(rowIndex, delta, parentHeight)
-                    : null,
-            onDragEnd: onResizeEnd,
-            child: wrapped,
-          ),
-        ),
-      );
-      if (cellIndex < cells.length - 1) {
-        children.add(SizedBox(width: gap));
-      }
+            sessionId: node.sessionId,
+            onMoveCell: onMoveCell!,
+            child: child,
+          );
     }
-    if (trailingBuilder != null && rowIndex == rowCount - 1) {
-      if (children.isNotEmpty) {
-        children.add(SizedBox(width: gap));
-      }
-      children.add(Expanded(child: trailingBuilder!(context)));
+    if (node is! LayoutSplit || node.children.isEmpty) {
+      return const SizedBox.shrink();
     }
-    return Row(children: children);
+
+    final splitAxis =
+        node.axis == LayoutSplitAxis.horizontal
+            ? Axis.horizontal
+            : Axis.vertical;
+    final handleAxis =
+        splitAxis == Axis.horizontal ? Axis.vertical : Axis.horizontal;
+    final hitSize = _hitSize(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final extent =
+            splitAxis == Axis.horizontal
+                ? constraints.maxWidth
+                : constraints.maxHeight;
+        final children = <Widget>[];
+        for (var i = 0; i < node.children.length; i++) {
+          final childPath = <int>[...path, i];
+          final child = _buildNode(
+            context,
+            node.children[i],
+            childPath,
+            visualIndexes,
+          );
+          children.add(
+            Expanded(
+              flex: _flex(i < node.weights.length ? node.weights[i] : 1),
+              child: _ResizableSplitChild(
+                axis: splitAxis,
+                handleAxis: handleAxis,
+                hitSize: hitSize,
+                visualGap: splitterVisualGap,
+                hasLeading: i > 0,
+                hasTrailing: i < node.children.length - 1,
+                onLeadingDrag:
+                    i > 0
+                        ? (delta) => onResizeSplit(path, i - 1, delta, extent)
+                        : null,
+                onTrailingDrag:
+                    i < node.children.length - 1
+                        ? (delta) => onResizeSplit(path, i, delta, extent)
+                        : null,
+                onDragEnd: onResizeEnd,
+                child: child,
+              ),
+            ),
+          );
+        }
+        return splitAxis == Axis.horizontal
+            ? Row(children: children)
+            : Column(children: children);
+      },
+    );
   }
 
   double _hitSize(BuildContext context) {
@@ -203,117 +185,108 @@ class MultiWindowGrid extends StatelessWidget {
     return touchPlatform ? touchMinHitSize : desktopHitSize;
   }
 
-  double _verticalPadding(BuildContext context) {
-    final resolved = padding.resolve(Directionality.of(context));
-    return resolved.top + resolved.bottom;
-  }
-
   int _flex(double weight) {
     return (weight * 1000).round().clamp(1, 1000000);
   }
 }
 
-/// Wraps a cell with invisible edge handles so dragging either side of a
-/// shared border resizes the same split. There is no visible splitter line
-/// between cells — only the [gap] visual whitespace from the parent layout.
-class _ResizableCell extends StatelessWidget {
-  const _ResizableCell({
+/// Adds invisible edge handles and visual padding around a child in a split.
+/// The hit zone stays inside the split gutter created by [visualGap].
+class _ResizableSplitChild extends StatelessWidget {
+  const _ResizableSplitChild({
     required this.child,
+    required this.axis,
+    required this.handleAxis,
     required this.hitSize,
-    required this.hasLeft,
-    required this.hasRight,
-    required this.hasTop,
-    required this.hasBottom,
-    required this.onLeftDrag,
-    required this.onRightDrag,
-    required this.onTopDrag,
-    required this.onBottomDrag,
+    required this.visualGap,
+    required this.hasLeading,
+    required this.hasTrailing,
+    required this.onLeadingDrag,
+    required this.onTrailingDrag,
     required this.onDragEnd,
   });
 
   final Widget child;
+  final Axis axis;
+  final Axis handleAxis;
   final double hitSize;
-  final bool hasLeft;
-  final bool hasRight;
-  final bool hasTop;
-  final bool hasBottom;
-  final ValueChanged<double>? onLeftDrag;
-  final ValueChanged<double>? onRightDrag;
-  final ValueChanged<double>? onTopDrag;
-  final ValueChanged<double>? onBottomDrag;
+  final double visualGap;
+  final bool hasLeading;
+  final bool hasTrailing;
+  final ValueChanged<double>? onLeadingDrag;
+  final ValueChanged<double>? onTrailingDrag;
   final VoidCallback onDragEnd;
 
   @override
   Widget build(BuildContext context) {
-    final edge = hitSize;
-    final hasAnyEdge = (hasLeft && onLeftDrag != null) ||
-        (hasRight && onRightDrag != null) ||
-        (hasTop && onTopDrag != null) ||
-        (hasBottom && onBottomDrag != null);
-    // Inset child by hitSize on every active edge so the LongPressDraggable
-    // inside the cell never receives pointer events on the resize zone. The
-    // EdgeHandle layers below sit on top of the inset gap and own those
-    // pixels exclusively.
-    final insetChild = hasAnyEdge
-        ? Padding(
-            padding: EdgeInsets.only(
-              left: hasLeft && onLeftDrag != null ? edge : 0,
-              right: hasRight && onRightDrag != null ? edge : 0,
-              top: hasTop && onTopDrag != null ? edge : 0,
-              bottom: hasBottom && onBottomDrag != null ? edge : 0,
-            ),
-            child: child,
-          )
-        : child;
+    final handleExtent = hitSize / 2;
+    final visualInset = visualGap / 2;
+    final padded =
+        axis == Axis.horizontal
+            ? Padding(
+              padding: EdgeInsets.only(
+                left: hasLeading && onLeadingDrag != null ? visualInset : 0,
+                right: hasTrailing && onTrailingDrag != null ? visualInset : 0,
+              ),
+              child: child,
+            )
+            : Padding(
+              padding: EdgeInsets.only(
+                top: hasLeading && onLeadingDrag != null ? visualInset : 0,
+                bottom: hasTrailing && onTrailingDrag != null ? visualInset : 0,
+              ),
+              child: child,
+            );
+
     return Stack(
       fit: StackFit.expand,
       children: [
-        insetChild,
-        if (hasLeft && onLeftDrag != null)
+        padded,
+        if (axis == Axis.horizontal && hasLeading && onLeadingDrag != null)
           Positioned(
             left: 0,
             top: 0,
             bottom: 0,
-            width: edge,
+            width: handleExtent,
             child: _EdgeHandle(
-              axis: Axis.vertical,
-              onDrag: onLeftDrag!,
+              axis: handleAxis,
+              onDrag: onLeadingDrag!,
               onEnd: onDragEnd,
             ),
           ),
-        if (hasRight && onRightDrag != null)
+        if (axis == Axis.horizontal && hasTrailing && onTrailingDrag != null)
           Positioned(
             right: 0,
             top: 0,
             bottom: 0,
-            width: edge,
+            width: handleExtent,
             child: _EdgeHandle(
-              axis: Axis.vertical,
-              onDrag: onRightDrag!,
+              axis: handleAxis,
+              onDrag: onTrailingDrag!,
               onEnd: onDragEnd,
             ),
           ),
-        if (hasTop && onTopDrag != null)
+        if (axis == Axis.vertical && hasLeading && onLeadingDrag != null)
           Positioned(
             left: 0,
             right: 0,
             top: 0,
-            height: edge,
+            height: handleExtent,
             child: _EdgeHandle(
-              axis: Axis.horizontal,
-              onDrag: onTopDrag!,
+              axis: handleAxis,
+              onDrag: onLeadingDrag!,
               onEnd: onDragEnd,
             ),
           ),
-        if (hasBottom && onBottomDrag != null)
+        if (axis == Axis.vertical && hasTrailing && onTrailingDrag != null)
           Positioned(
             left: 0,
             right: 0,
             bottom: 0,
-            height: edge,
+            height: handleExtent,
             child: _EdgeHandle(
-              axis: Axis.horizontal,
-              onDrag: onBottomDrag!,
+              axis: handleAxis,
+              onDrag: onTrailingDrag!,
               onEnd: onDragEnd,
             ),
           ),
@@ -346,48 +319,45 @@ class _EdgeHandleState extends State<_EdgeHandle> {
         widget.axis == Axis.vertical
             ? SystemMouseCursors.resizeLeftRight
             : SystemMouseCursors.resizeUpDown;
-    final gesture = widget.axis == Axis.vertical
-        ? GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onHorizontalDragStart: (_) {
-              _didMove = false;
-              HapticFeedback.selectionClick();
-            },
-            onHorizontalDragUpdate: (details) {
-              _didMove = true;
-              widget.onDrag(details.delta.dx);
-            },
-            onHorizontalDragEnd: (_) {
-              if (_didMove) widget.onEnd();
-            },
-            onHorizontalDragCancel: () {
-              if (_didMove) widget.onEnd();
-            },
-            child: const SizedBox.expand(),
-          )
-        : GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onVerticalDragStart: (_) {
-              _didMove = false;
-              HapticFeedback.selectionClick();
-            },
-            onVerticalDragUpdate: (details) {
-              _didMove = true;
-              widget.onDrag(details.delta.dy);
-            },
-            onVerticalDragEnd: (_) {
-              if (_didMove) widget.onEnd();
-            },
-            onVerticalDragCancel: () {
-              if (_didMove) widget.onEnd();
-            },
-            child: const SizedBox.expand(),
-          );
-    return MouseRegion(
-      cursor: cursor,
-      opaque: false,
-      child: gesture,
-    );
+    final gesture =
+        widget.axis == Axis.vertical
+            ? GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onHorizontalDragStart: (_) {
+                _didMove = false;
+                HapticFeedback.selectionClick();
+              },
+              onHorizontalDragUpdate: (details) {
+                _didMove = true;
+                widget.onDrag(details.delta.dx);
+              },
+              onHorizontalDragEnd: (_) {
+                if (_didMove) widget.onEnd();
+              },
+              onHorizontalDragCancel: () {
+                if (_didMove) widget.onEnd();
+              },
+              child: const SizedBox.expand(),
+            )
+            : GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onVerticalDragStart: (_) {
+                _didMove = false;
+                HapticFeedback.selectionClick();
+              },
+              onVerticalDragUpdate: (details) {
+                _didMove = true;
+                widget.onDrag(details.delta.dy);
+              },
+              onVerticalDragEnd: (_) {
+                if (_didMove) widget.onEnd();
+              },
+              onVerticalDragCancel: () {
+                if (_didMove) widget.onEnd();
+              },
+              child: const SizedBox.expand(),
+            );
+    return MouseRegion(cursor: cursor, opaque: false, child: gesture);
   }
 }
 
@@ -414,8 +384,6 @@ class _DraggableCellState extends State<_DraggableCell> {
   bool _isDragSource = false;
 
   DropSide _sideForOffset(Offset local, Size size) {
-    // Divide the cell into 4 wedges via the diagonals from center.
-    // Whichever wedge the pointer is in determines the drop side.
     final cx = size.width / 2;
     final cy = size.height / 2;
     final dx = local.dx - cx;
@@ -433,8 +401,7 @@ class _DraggableCellState extends State<_DraggableCell> {
       data: widget.sessionId,
       delay: const Duration(milliseconds: 220),
       hapticFeedbackOnStart: true,
-      dragAnchorStrategy: (_, _, _) =>
-          const Offset(_feedbackWidth / 2, 0),
+      dragAnchorStrategy: (_, _, _) => const Offset(_feedbackWidth / 2, 0),
       feedback: Material(
         color: Colors.transparent,
         child: Opacity(
@@ -471,7 +438,6 @@ class _DraggableCellState extends State<_DraggableCell> {
           if (details.data == widget.sessionId) return;
           final box = context.findRenderObject() as RenderBox?;
           if (box == null) return;
-          // details.offset is the pointer's global position.
           final local = box.globalToLocal(details.offset);
           final side = _sideForOffset(local, box.size);
           if (side != _hoverSide) {
@@ -519,10 +485,11 @@ class _DropIndicatorPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final fill = Paint()..color = color.withValues(alpha: 0.18);
-    final stroke = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3;
+    final stroke =
+        Paint()
+          ..color = color
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 3;
     Rect rect;
     switch (side) {
       case DropSide.left:

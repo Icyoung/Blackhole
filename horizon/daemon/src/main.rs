@@ -8,14 +8,17 @@ mod vpn_helper_protocol;
 mod wg_server;
 
 use std::collections::HashMap;
+use std::env;
 #[cfg(unix)]
 use std::ffi::CStr;
 use std::fs;
-use std::io::Write;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::io::{self, IsTerminal, Read, Write};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::ConnectInfo;
@@ -34,6 +37,8 @@ use tracing::{debug, info, warn};
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 const VPN_SERVER_IP_STR: &str = "10.13.37.1";
 const RELAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const DEFAULT_HEADLESS_BIND: &str = "0.0.0.0";
+const DEFAULT_WORMHOLE_URL: &str = "wss://wormhole.blackhole-ai.com/ws";
 
 #[derive(Clone)]
 enum BroadcastMsg {
@@ -181,6 +186,10 @@ struct TerminalGroup {
     session_ids: Vec<String>,
     created_at: String,
     sort_order: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    layout: Option<serde_json::Value>,
+    #[serde(default)]
+    layout_revision: u64,
 }
 
 impl TerminalGroup {
@@ -191,6 +200,8 @@ impl TerminalGroup {
             session_ids: Vec::new(),
             created_at: now_iso8601(),
             sort_order: 0,
+            layout: None,
+            layout_revision: 0,
         }
     }
 
@@ -210,18 +221,79 @@ struct GroupStorage {
     session_names: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadlessLaunchMode {
+    Foreground,
+    Background,
+}
+
+#[derive(Debug)]
+struct HeadlessCliOptions {
+    mode: HeadlessLaunchMode,
+    configure: bool,
+    server_args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HeadlessCliConfig {
+    version: u32,
+    bind: String,
+    port: u16,
+    host_name: String,
+    wormhole: Option<HeadlessWormholeConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HeadlessWormholeConfig {
+    url: String,
+    token: Option<String>,
+    code: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeSummary {
+    pid: u32,
+    host_name: String,
+    lan_ws: String,
+    wormhole_url: Option<String>,
+    wormhole_code: Option<String>,
+    log_path: PathBuf,
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let mut config = match parse_args(std::env::args().skip(1).collect()) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!("{}", usage());
+        return;
+    }
+    if is_headless_cli_invocation(&args) {
+        if let Err(err) = run_headless_cli(args).await {
+            eprintln!("{err}");
+            std::process::exit(2);
+        }
+        return;
+    }
+
+    let config = match parse_args(args.clone()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(2);
         }
     };
+    run_server(config, &args, None).await;
+}
 
+async fn run_server(
+    mut config: Config,
+    cli_args: &[String],
+    ready_tx: Option<tokio::sync::oneshot::Sender<RuntimeSummary>>,
+) {
     let (lan_tx, _) = broadcast::channel::<BroadcastMsg>(512);
     let (wormhole_tx, _) = broadcast::channel::<BroadcastMsg>(512);
     let data_dir = resolve_data_dir();
@@ -231,7 +303,6 @@ async fn main() {
         let (file_vpn, file_subnet, file_port, file_routes) =
             load_vpn_settings_from_file(&data_dir);
         // Only apply file settings if the CLI did NOT explicitly set --vpn
-        let cli_args: Vec<String> = std::env::args().collect();
         let has_cli_vpn = cli_args.iter().any(|a| a == "--vpn");
         if !has_cli_vpn {
             if let Some(true) = file_vpn {
@@ -318,12 +389,14 @@ async fn main() {
 
     if let Some(wormhole_url) = config.wormhole_url.clone() {
         let state_for_wormhole = state.clone();
+        let wormhole_token = config.wormhole_token.clone();
+        let custom_session = config.custom_session.clone();
         tokio::spawn(async move {
             run_wormhole(
                 state_for_wormhole,
                 wormhole_url,
-                config.wormhole_token,
-                config.custom_session,
+                wormhole_token,
+                custom_session,
             )
             .await;
         });
@@ -410,6 +483,14 @@ async fn main() {
     }
 
     let addr = SocketAddr::new(config.bind, config.port);
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(err) => {
+            warn!("failed to bind {addr}: {err}");
+            let _ = fs::remove_file(&pid_path);
+            std::process::exit(1);
+        }
+    };
     info!("horizon-daemon listening on {addr}");
 
     // UPnP: map WebSocket TCP port for external access
@@ -421,14 +502,9 @@ async fn main() {
         }
     });
 
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(err) => {
-            warn!("failed to bind {addr}: {err}");
-            let _ = fs::remove_file(&pid_path);
-            std::process::exit(1);
-        }
-    };
+    if let Some(tx) = ready_tx {
+        let _ = tx.send(RuntimeSummary::from_config(&config, &state.data_dir));
+    }
     let result = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -442,6 +518,473 @@ async fn main() {
 
     let _ = fs::remove_file(&pid_path);
     let _ = fs::remove_file(state.data_dir.join("daemon.sock"));
+}
+
+impl Default for HeadlessCliConfig {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            bind: DEFAULT_HEADLESS_BIND.to_string(),
+            port: 9527,
+            host_name: hostname(),
+            wormhole: None,
+        }
+    }
+}
+
+impl RuntimeSummary {
+    fn from_config(config: &Config, data_dir: &Path) -> Self {
+        Self {
+            pid: std::process::id(),
+            host_name: config.host_name.clone(),
+            lan_ws: format!("ws://{}:{}/ws", config.bind, config.port),
+            wormhole_url: config.wormhole_url.clone(),
+            wormhole_code: config.custom_session.clone(),
+            log_path: daemon_log_path(data_dir),
+        }
+    }
+}
+
+fn is_headless_cli_invocation(args: &[String]) -> bool {
+    matches!(
+        args.first().map(String::as_str),
+        Some("start" | "foreground" | "background")
+    ) || args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--foreground" | "--background" | "--configure"
+        )
+    })
+}
+
+async fn run_headless_cli(args: Vec<String>) -> Result<(), String> {
+    let options = parse_headless_cli_options(&args)?;
+    let data_dir = resolve_data_dir();
+    let config_path = headless_config_path(&data_dir);
+    let existing = load_headless_config(&config_path);
+    let should_save_config = options.configure || existing.is_none();
+    let headless_config = if should_save_config {
+        prompt_headless_config(existing)?
+    } else {
+        existing.unwrap_or_default()
+    };
+
+    let mut server_args = headless_config_to_args(&headless_config);
+    server_args.extend(options.server_args.clone());
+
+    let mut config = parse_args(server_args.clone())?;
+    if headless_config.wormhole.is_none() && !args_include_wormhole(&options.server_args) {
+        config.wormhole_url = None;
+        config.wormhole_token = None;
+        config.custom_session = None;
+    }
+    if should_save_config {
+        save_headless_config(&config_path, &headless_config)?;
+    }
+
+    match options.mode {
+        HeadlessLaunchMode::Foreground => run_headless_foreground(config, server_args).await,
+        HeadlessLaunchMode::Background => run_headless_background(&config, &server_args).await,
+    }
+}
+
+fn parse_headless_cli_options(args: &[String]) -> Result<HeadlessCliOptions, String> {
+    let mut mode = HeadlessLaunchMode::Foreground;
+    let mut configure = false;
+    let mut server_args = Vec::new();
+    let mut start_index = 0;
+
+    if let Some(command) = args.first().map(String::as_str) {
+        match command {
+            "start" => start_index = 1,
+            "foreground" => {
+                mode = HeadlessLaunchMode::Foreground;
+                start_index = 1;
+            }
+            "background" => {
+                mode = HeadlessLaunchMode::Background;
+                start_index = 1;
+            }
+            _ => {}
+        }
+    }
+
+    for arg in &args[start_index..] {
+        match arg.as_str() {
+            "--foreground" => mode = HeadlessLaunchMode::Foreground,
+            "--background" => mode = HeadlessLaunchMode::Background,
+            "--configure" => configure = true,
+            _ => server_args.push(arg.clone()),
+        }
+    }
+
+    Ok(HeadlessCliOptions {
+        mode,
+        configure,
+        server_args,
+    })
+}
+
+async fn run_headless_foreground(config: Config, server_args: Vec<String>) -> Result<(), String> {
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let server_args_for_task = server_args.clone();
+    let server_task = tokio::spawn(async move {
+        run_server(config, &server_args_for_task, Some(ready_tx)).await;
+    });
+
+    let summary = ready_rx
+        .await
+        .map_err(|_| "horizon-daemon exited before it became reachable".to_string())?;
+    print_runtime_summary(&summary, HeadlessLaunchMode::Foreground);
+    println!("Press Enter to enter logs. Press Ctrl-C to stop Horizon.");
+    wait_for_enter().await?;
+    println!("Logs are streaming. Press Ctrl-C to stop Horizon.");
+    server_task
+        .await
+        .map_err(|e| format!("horizon-daemon task failed: {e}"))?;
+    Ok(())
+}
+
+async fn run_headless_background(config: &Config, server_args: &[String]) -> Result<(), String> {
+    let exe =
+        env::current_exe().map_err(|e| format!("failed to resolve current executable: {e}"))?;
+    let data_dir = resolve_data_dir();
+    fs::create_dir_all(&data_dir).map_err(|e| format!("failed to create data directory: {e}"))?;
+    let log_path = daemon_log_path(&data_dir);
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| format!("failed to open daemon log {}: {e}", log_path.display()))?;
+    let log_err = log
+        .try_clone()
+        .map_err(|e| format!("failed to clone daemon log handle: {e}"))?;
+
+    let mut command = Command::new(exe);
+    command
+        .args(server_args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
+    if config.wormhole_url.is_none() {
+        command.env_remove("WORMHOLE_URL");
+        command.env_remove("WORMHOLE_TOKEN");
+    }
+    configure_background_process(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("failed to start horizon-daemon in background: {e}"))?;
+
+    let healthy =
+        wait_for_health(config.bind, config.port, &mut child, Duration::from_secs(8)).await?;
+    if !healthy {
+        return Err(format!(
+            "horizon-daemon did not become reachable; see {}",
+            log_path.display()
+        ));
+    }
+
+    let summary = RuntimeSummary {
+        pid: child.id(),
+        host_name: config.host_name.clone(),
+        lan_ws: format!("ws://{}:{}/ws", config.bind, config.port),
+        wormhole_url: config.wormhole_url.clone(),
+        wormhole_code: config.custom_session.clone(),
+        log_path,
+    };
+    print_runtime_summary(&summary, HeadlessLaunchMode::Background);
+    println!("Startup guide complete. Horizon is running in the background.");
+    Ok(())
+}
+
+fn configure_background_process(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x00000008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+}
+
+async fn wait_for_enter() -> Result<(), String> {
+    let _ = tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| format!("failed to read Enter: {e}"))
+    })
+    .await
+    .map_err(|e| format!("failed to wait for Enter: {e}"))??;
+    Ok(())
+}
+
+async fn wait_for_health(
+    bind: IpAddr,
+    port: u16,
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<bool, String> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| format!("failed to inspect background daemon: {e}"))?
+        {
+            return Err(format!("horizon-daemon exited early with status {status}"));
+        }
+        if probe_health(bind, port) {
+            return Ok(true);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    Ok(false)
+}
+
+fn probe_health(bind: IpAddr, port: u16) -> bool {
+    let host = health_probe_host(bind);
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(
+        &SocketAddr::new(host, port),
+        Duration::from_millis(300),
+    ) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+    let request = "GET /health HTTP/1.1\r\nHost: horizon-daemon\r\nConnection: close\r\n\r\n";
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut response = String::new();
+    stream.read_to_string(&mut response).is_ok() && response.contains("200 OK")
+}
+
+fn health_probe_host(bind: IpAddr) -> IpAddr {
+    match bind {
+        IpAddr::V4(ip) if ip.is_unspecified() || ip.is_loopback() => {
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        }
+        IpAddr::V6(ip) if ip.is_unspecified() || ip.is_loopback() => {
+            IpAddr::V6(Ipv6Addr::LOCALHOST)
+        }
+        _ => bind,
+    }
+}
+
+fn print_runtime_summary(summary: &RuntimeSummary, mode: HeadlessLaunchMode) {
+    let mode_label = match mode {
+        HeadlessLaunchMode::Foreground => "foreground",
+        HeadlessLaunchMode::Background => "background",
+    };
+    println!();
+    println!("Horizon headless started ({mode_label})");
+    println!("PID: {}", summary.pid);
+    println!("Host: {}", summary.host_name);
+    println!("LAN: {}", summary.lan_ws);
+    match (&summary.wormhole_url, &summary.wormhole_code) {
+        (Some(url), Some(code)) => println!("Wormhole: {url} (code: {code})"),
+        (Some(url), None) => println!("Wormhole: {url}"),
+        (None, _) => println!("Wormhole: disabled"),
+    }
+    println!("Log: {}", summary.log_path.display());
+    println!();
+}
+
+fn prompt_headless_config(
+    existing: Option<HeadlessCliConfig>,
+) -> Result<HeadlessCliConfig, String> {
+    let mut config = existing.unwrap_or_default();
+    if !io::stdin().is_terminal() {
+        return Err(
+            "headless setup requires an interactive terminal; run `horizon-daemon start --configure` in a terminal, or use `horizon-daemon [server options]` for non-interactive launch"
+                .to_string(),
+        );
+    }
+
+    println!("Horizon headless first-run setup");
+    println!("Press Enter to accept defaults.");
+    config.host_name = prompt_line("Host name", Some(&config.host_name))?;
+    config.bind = prompt_line("Bind address", Some(&config.bind))?;
+    config.port = prompt_port("Port", config.port)?;
+
+    let existing_wormhole = config.wormhole.clone();
+    let enable_wormhole = prompt_yes_no("Enable Wormhole relay?", existing_wormhole.is_some())?;
+    config.wormhole = if enable_wormhole {
+        let existing_url = existing_wormhole
+            .as_ref()
+            .map(|w| w.url.as_str())
+            .unwrap_or(DEFAULT_WORMHOLE_URL);
+        let url = prompt_line("Wormhole URL", Some(existing_url))?;
+        let token = prompt_optional_value(
+            "Wormhole token (optional)",
+            existing_wormhole.as_ref().and_then(|w| w.token.as_deref()),
+            false,
+        )?;
+        let code = prompt_optional_value(
+            "Wormhole code/session (optional)",
+            existing_wormhole.as_ref().and_then(|w| w.code.as_deref()),
+            true,
+        )?;
+        Some(HeadlessWormholeConfig { url, token, code })
+    } else {
+        None
+    };
+
+    Ok(config)
+}
+
+fn prompt_line(label: &str, default: Option<&str>) -> Result<String, String> {
+    match default {
+        Some(default) if !default.is_empty() => print!("{label} [{default}]: "),
+        _ => print!("{label}: "),
+    }
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("failed to flush stdout: {e}"))?;
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| format!("failed to read input: {e}"))?;
+    let value = line.trim();
+    if value.is_empty() {
+        Ok(default.unwrap_or("").to_string())
+    } else {
+        Ok(value.to_string())
+    }
+}
+
+fn prompt_port(label: &str, default: u16) -> Result<u16, String> {
+    loop {
+        let value = prompt_line(label, Some(&default.to_string()))?;
+        match value.parse::<u16>() {
+            Ok(port) => return Ok(port),
+            Err(_) => println!("Please enter a valid TCP port."),
+        }
+    }
+}
+
+fn prompt_yes_no(label: &str, default: bool) -> Result<bool, String> {
+    let hint = if default { "Y/n" } else { "y/N" };
+    loop {
+        print!("{label} [{hint}]: ");
+        io::stdout()
+            .flush()
+            .map_err(|e| format!("failed to flush stdout: {e}"))?;
+        let mut line = String::new();
+        io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| format!("failed to read input: {e}"))?;
+        match line.trim().to_ascii_lowercase().as_str() {
+            "" => return Ok(default),
+            "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => println!("Please answer y or n."),
+        }
+    }
+}
+
+fn prompt_optional_value(
+    label: &str,
+    existing: Option<&str>,
+    show_existing: bool,
+) -> Result<Option<String>, String> {
+    match existing {
+        Some(value) if show_existing && !value.is_empty() => {
+            print!("{label} [{value}; '-' clears]: ")
+        }
+        Some(_) => print!("{label} [configured; blank keeps, '-' clears]: "),
+        None => print!("{label}: "),
+    }
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("failed to flush stdout: {e}"))?;
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| format!("failed to read input: {e}"))?;
+    let value = line.trim();
+    if value.is_empty() {
+        Ok(existing.map(ToString::to_string))
+    } else if value == "-" {
+        Ok(None)
+    } else {
+        Ok(Some(value.to_string()))
+    }
+}
+
+fn headless_config_to_args(config: &HeadlessCliConfig) -> Vec<String> {
+    let mut args = vec![
+        "--bind".to_string(),
+        config.bind.clone(),
+        "--port".to_string(),
+        config.port.to_string(),
+        "--host-name".to_string(),
+        config.host_name.clone(),
+    ];
+    if let Some(wormhole) = &config.wormhole {
+        if !wormhole.url.trim().is_empty() {
+            args.extend(["--wormhole-url".to_string(), wormhole.url.clone()]);
+        }
+        if let Some(token) = &wormhole.token {
+            args.extend(["--wormhole-token".to_string(), token.clone()]);
+        }
+        if let Some(code) = &wormhole.code {
+            args.extend(["--wormhole-session".to_string(), code.clone()]);
+        }
+    }
+    args
+}
+
+fn args_include_wormhole(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "--wormhole-url"
+            || arg.starts_with("--wormhole-url=")
+            || arg == "--wormhole-token"
+            || arg.starts_with("--wormhole-token=")
+            || arg == "--wormhole-session"
+            || arg.starts_with("--wormhole-session=")
+    })
+}
+
+fn headless_config_path(dir: &Path) -> PathBuf {
+    dir.join("headless.json")
+}
+
+fn daemon_log_path(dir: &Path) -> PathBuf {
+    dir.join("daemon.log")
+}
+
+fn load_headless_config(path: &Path) -> Option<HeadlessCliConfig> {
+    let content = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<HeadlessCliConfig>(&content).ok()
+}
+
+fn save_headless_config(path: &Path, config: &HeadlessCliConfig) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create config directory: {e}"))?;
+    }
+    let content = serde_json::to_string_pretty(config)
+        .map_err(|e| format!("failed to serialize headless config: {e}"))?;
+    fs::write(path, content).map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 async fn ws_handler(
@@ -1098,11 +1641,24 @@ fn build_group_sync_payload(
     groups: &[TerminalGroup],
     session_names: &HashMap<String, String>,
 ) -> serde_json::Value {
+    let mut group_layouts = serde_json::Map::new();
+    for group in groups {
+        if let Some(layout) = &group.layout {
+            group_layouts.insert(
+                group.id.clone(),
+                json!({
+                    "layout": layout,
+                    "revision": group.layout_revision,
+                }),
+            );
+        }
+    }
     json!({
         "type": "group_sync",
         "version": 1,
         "groups": groups,
         "sessionNames": session_names,
+        "groupLayouts": group_layouts,
     })
 }
 
@@ -1288,6 +1844,14 @@ async fn handle_lan_incoming(
                         .map(|v| v as usize);
                     if let (Some(gid), Some(idx)) = (group_id, new_index) {
                         handle_group_reorder(state, gid, idx, sink).await;
+                    }
+                }
+                "group_layout_update" => {
+                    let group_id = value.get("groupId").and_then(|v| v.as_str());
+                    let layout = value.get("layout").cloned();
+                    let base_revision = value.get("baseRevision").and_then(|v| v.as_u64());
+                    if let (Some(gid), Some(layout)) = (group_id, layout) {
+                        handle_group_layout_update(state, gid, layout, base_revision, sink).await;
                     }
                 }
                 "session_rename" => {
@@ -3096,6 +3660,8 @@ async fn handle_group_create(
         session_ids: Vec::new(),
         created_at: now_iso8601(),
         sort_order: groups.len() as i32,
+        layout: None,
+        layout_revision: 0,
     };
     groups.push(new_group);
     drop(groups);
@@ -3254,6 +3820,34 @@ async fn handle_group_reorder(
     }
 }
 
+async fn handle_group_layout_update(
+    state: &Arc<AppState>,
+    group_id: &str,
+    layout: serde_json::Value,
+    base_revision: Option<u64>,
+    sink: &mut futures_util::stream::SplitSink<WebSocket, AxumMessage>,
+) {
+    if !layout.is_object() {
+        let _ = send_group_error(sink, "invalid_layout", "Layout must be a JSON object.").await;
+        return;
+    }
+
+    let mut groups = state.groups.lock().await;
+    let Some(group) = groups.iter_mut().find(|g| g.id == group_id) else {
+        let _ = send_group_error(sink, "group_not_found", "Group not found.").await;
+        return;
+    };
+    group.layout = Some(layout);
+    group.layout_revision = base_revision
+        .map(|revision| revision.saturating_add(1))
+        .unwrap_or_else(|| group.layout_revision.saturating_add(1))
+        .max(group.layout_revision.saturating_add(1));
+
+    let session_names = state.session_names.lock().await;
+    save_groups(&state.data_dir, &groups, &session_names);
+    broadcast_group_sync(state, &groups, &session_names);
+}
+
 async fn handle_session_rename(
     state: &Arc<AppState>,
     session_id: &str,
@@ -3351,6 +3945,8 @@ async fn handle_group_create_wormhole(
         session_ids: Vec::new(),
         created_at: now_iso8601(),
         sort_order: groups.len() as i32,
+        layout: None,
+        layout_revision: 0,
     };
     groups.push(new_group);
     drop(groups);
@@ -3508,6 +4104,35 @@ async fn handle_group_reorder_wormhole(
         save_groups(&state.data_dir, &groups, &session_names);
         broadcast_group_sync(state, &groups, &session_names);
     }
+}
+
+async fn handle_group_layout_update_wormhole(
+    state: &Arc<AppState>,
+    group_id: &str,
+    layout: serde_json::Value,
+    base_revision: Option<u64>,
+    sink: &mut WormholeSink,
+) {
+    if !layout.is_object() {
+        let _ = send_group_error_wormhole(sink, "invalid_layout", "Layout must be a JSON object.")
+            .await;
+        return;
+    }
+
+    let mut groups = state.groups.lock().await;
+    let Some(group) = groups.iter_mut().find(|g| g.id == group_id) else {
+        let _ = send_group_error_wormhole(sink, "group_not_found", "Group not found.").await;
+        return;
+    };
+    group.layout = Some(layout);
+    group.layout_revision = base_revision
+        .map(|revision| revision.saturating_add(1))
+        .unwrap_or_else(|| group.layout_revision.saturating_add(1))
+        .max(group.layout_revision.saturating_add(1));
+
+    let session_names = state.session_names.lock().await;
+    save_groups(&state.data_dir, &groups, &session_names);
+    broadcast_group_sync(state, &groups, &session_names);
 }
 
 async fn handle_session_rename_wormhole(
@@ -4078,7 +4703,7 @@ mod winconpty {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Config {
     bind: IpAddr,
     port: u16,
@@ -4280,9 +4905,20 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
 
 fn usage() -> String {
     [
-        "Usage: horizon-daemon [--bind IP] [--port PORT] [--shell PATH] [--host-name NAME] [--dev-mode]",
-        "                   [--wormhole-url WS_URL] [--wormhole-token TOKEN] [--wormhole-session SESSION] [--config-id ID]",
-        "                   [--no-initial-session]",
+        "Usage:",
+        "  horizon-daemon start [--foreground|--background] [--configure] [server options]",
+        "  horizon-daemon foreground [--configure] [server options]",
+        "  horizon-daemon background [--configure] [server options]",
+        "  horizon-daemon [server options]",
+        "",
+        "Headless CLI:",
+        "  start/foreground/background run a first-use setup guide and then launch Horizon.",
+        "  Wormhole is optional; LAN mode is used when Wormhole is not configured.",
+        "",
+        "Server options:",
+        "  horizon-daemon [--bind IP] [--port PORT] [--shell PATH] [--host-name NAME] [--dev-mode]",
+        "                 [--wormhole-url WS_URL] [--wormhole-token TOKEN] [--wormhole-session SESSION] [--config-id ID]",
+        "                 [--no-initial-session]",
         "",
         "Starts the Horizon host core as a separate process.",
         "",
@@ -4923,6 +5559,21 @@ async fn handle_wormhole_incoming(
                         .map(|v| v as usize);
                     if let (Some(gid), Some(idx)) = (group_id, new_index) {
                         handle_group_reorder_wormhole(state, gid, idx, write).await;
+                    }
+                }
+                "group_layout_update" => {
+                    let group_id = value.get("groupId").and_then(|v| v.as_str());
+                    let layout = value.get("layout").cloned();
+                    let base_revision = value.get("baseRevision").and_then(|v| v.as_u64());
+                    if let (Some(gid), Some(layout)) = (group_id, layout) {
+                        handle_group_layout_update_wormhole(
+                            state,
+                            gid,
+                            layout,
+                            base_revision,
+                            write,
+                        )
+                        .await;
                     }
                 }
                 "session_rename" => {

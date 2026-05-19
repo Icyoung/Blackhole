@@ -4,8 +4,8 @@ import 'package:xterm/xterm.dart';
 import 'design_tokens.dart';
 import 'terminal_style.dart';
 
-class TerminalWindowCard extends StatefulWidget {
-  const TerminalWindowCard({
+class SessionWindowCard extends StatefulWidget {
+  const SessionWindowCard({
     super.key,
     required this.sessionId,
     required this.terminal,
@@ -15,13 +15,10 @@ class TerminalWindowCard extends StatefulWidget {
     required this.label,
     required this.isActive,
     required this.showHHKB,
+    this.deleteDetection = true,
     this.hardwareKeyboardOnly = false,
     this.isDragTarget = false,
     this.terminalStyle,
-    this.showActiveShadow = true,
-    this.showActiveChevron = true,
-    this.showCloseButton = true,
-    this.showStatusDot = true,
     this.onTap,
     this.onClose,
   });
@@ -34,21 +31,18 @@ class TerminalWindowCard extends StatefulWidget {
   final String label;
   final bool isActive;
   final bool showHHKB;
+  final bool deleteDetection;
   final bool hardwareKeyboardOnly;
   final bool isDragTarget;
   final TerminalStyle? terminalStyle;
-  final bool showActiveShadow;
-  final bool showActiveChevron;
-  final bool showCloseButton;
-  final bool showStatusDot;
   final VoidCallback? onTap;
   final VoidCallback? onClose;
 
   @override
-  State<TerminalWindowCard> createState() => _TerminalWindowCardState();
+  State<SessionWindowCard> createState() => _SessionWindowCardState();
 }
 
-class _TerminalWindowCardState extends State<TerminalWindowCard>
+class _SessionWindowCardState extends State<SessionWindowCard>
     with AutomaticKeepAliveClientMixin {
   @override
   bool get wantKeepAlive => true;
@@ -56,7 +50,7 @@ class _TerminalWindowCardState extends State<TerminalWindowCard>
   double? _savedScrollOffset;
 
   @override
-  void didUpdateWidget(TerminalWindowCard oldWidget) {
+  void didUpdateWidget(SessionWindowCard oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.isActive && !widget.isActive) {
       if (widget.scrollController.hasClients) {
@@ -74,8 +68,10 @@ class _TerminalWindowCardState extends State<TerminalWindowCard>
   @override
   Widget build(BuildContext context) {
     super.build(context);
-    final borderColor = widget.isActive ? AppColors.border : Colors.transparent;
-    final headerColor = widget.isActive ? AppColors.background : AppColors.surface;
+    final borderColor =
+        widget.isActive ? AppColors.border : AppColors.borderSubtle;
+    final headerColor =
+        widget.isActive ? AppColors.surfaceBright : AppColors.surface;
     return GestureDetector(
       onTapDown: (_) => widget.onTap?.call(),
       child: AnimatedContainer(
@@ -95,8 +91,8 @@ class _TerminalWindowCardState extends State<TerminalWindowCard>
                   decoration: BoxDecoration(
                     color: headerColor,
                     borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(12),
-                      topRight: Radius.circular(12),
+                      topLeft: Radius.circular(AppRadius.md),
+                      topRight: Radius.circular(AppRadius.md),
                     ),
                   ),
                   child: Row(
@@ -145,29 +141,26 @@ class _TerminalWindowCardState extends State<TerminalWindowCard>
                       bottomLeft: Radius.circular(AppRadius.md),
                       bottomRight: Radius.circular(AppRadius.md),
                     ),
-                    child: IgnorePointer(
-                      ignoring: !widget.isActive,
-                      child: TerminalView(
-                        widget.terminal,
-                        key: widget.viewKey,
-                        controller: widget.controller,
-                        scrollController: widget.scrollController,
-                        theme: kTerminalThemeLight,
-                        autoResize: true,
-                        autofocus: false,
-                        deleteDetection: true,
-                        hardwareKeyboardOnly: widget.hardwareKeyboardOnly,
-                        readOnly: widget.showHHKB,
-                        keyboardType:
-                            widget.showHHKB
-                                ? TextInputType.none
-                                : TextInputType.text,
-                        backgroundOpacity: 1.0,
-                        padding: const EdgeInsets.all(10),
-                        textStyle:
-                            widget.terminalStyle ??
-                            buildTerminalStyle(fontSize: 12),
-                      ),
+                    child: TerminalView(
+                      widget.terminal,
+                      key: widget.viewKey,
+                      controller: widget.controller,
+                      scrollController: widget.scrollController,
+                      theme: kTerminalThemeLight,
+                      autoResize: true,
+                      autofocus: false,
+                      deleteDetection: widget.deleteDetection,
+                      hardwareKeyboardOnly: widget.hardwareKeyboardOnly,
+                      readOnly: widget.showHHKB,
+                      keyboardType:
+                          widget.showHHKB
+                              ? TextInputType.none
+                              : TextInputType.text,
+                      backgroundOpacity: 1.0,
+                      padding: const EdgeInsets.all(10),
+                      textStyle:
+                          widget.terminalStyle ??
+                          buildTerminalStyle(fontSize: 8),
                     ),
                   ),
                 ),
@@ -177,7 +170,7 @@ class _TerminalWindowCardState extends State<TerminalWindowCard>
               Positioned.fill(
                 child: Container(
                   decoration: BoxDecoration(
-                    color: AppColors.accent.withValues(alpha: AppOpacity.light),
+                    color: AppColors.accent.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(AppRadius.lg),
                   ),
                 ),

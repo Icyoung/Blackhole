@@ -5,7 +5,6 @@
 #include <string>
 
 #include "flutter/generated_plugin_registrant.h"
-#include "pty_manager.h"
 #include "resource.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
@@ -29,10 +28,6 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
-
-  // Register PTY manager plugin
-  PtyManagerRegisterWithRegistrar(
-      flutter_controller_->engine()->GetRegistrarForPlugin("PtyManagerPlugin"));
 
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 

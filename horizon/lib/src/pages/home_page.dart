@@ -11,21 +11,23 @@ import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:voyager_share/voyager_share.dart'
-    show MultiWindowGrid, MultiWindowLayoutController, buildTerminalStyle;
+    show
+        MultiWindowGrid,
+        MultiWindowLayoutController,
+        DropSide,
+        SessionWindowCard,
+        buildTerminalStyle;
 import 'package:xterm/xterm.dart';
 
-import '../controllers/horizon_controller.dart';
 import '../models/dev_mode_config.dart';
 import '../models/terminal_group.dart';
 import '../services/connection_manager.dart';
 import '../services/daemon_manager.dart';
 import '../services/group_store.dart';
 import '../services/terminal_manager.dart';
-import '../services/terminal_service.dart';
 import '../widgets/dialogs/pairing_dialog.dart';
 import '../widgets/keyboard/hhkb_keyboard.dart';
 import '../widgets/quick_actions_bar.dart';
-import '../widgets/session_card.dart';
 import '../app.dart';
 
 enum _SidebarConnectionState { connected, connecting, disconnect }
@@ -62,11 +64,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   Timer? _daemonPairingPoll;
   Timer? _settingsDebounce;
 
-  late final HorizonController _hostController;
   final DaemonManager _daemonManager = DaemonManager();
-  late final TextEditingController _hostWormholeUrlController;
-  late final TextEditingController _hostWormholeTokenController;
-  late final TextEditingController _hostCustomSessionController;
   bool _hostPairingDialogShown = false;
 
   late final ConnectionManager _connectionManager;
@@ -131,10 +129,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   String? _deviceKey;
   String _deviceName = '';
   bool _clientPairingPending = false;
-  bool _hostConfigSynced = false;
 
-  // Local mode (Horizon) output subscription
-  StreamSubscription<TerminalOutput>? _localOutputSub;
   static const bool _logTerminalOutput = bool.fromEnvironment(
     'BH_LOG_TERMINAL_OUTPUT',
     defaultValue: true,
@@ -158,21 +153,13 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   List<String> get _visibleSessions => _groupStore.activeGroupSessionIds;
 
   // Daemon architecture: even in "server" mode we connect via WebSocket.
-  // In-process fallback: when daemon binary is unavailable, _hostController
-  // runs the WS server directly, so we consider the system active if either
-  // the WebSocket client is connected OR the in-process host is running.
-  bool get _usingDirectLocalPty => false;
-  bool get _isSystemActive =>
-      _connected || (_isHorizonMode && _hostController.running);
+  // A missing or failed daemon is a bug, not a Flutter-side PTY fallback.
+  bool get _isSystemActive => _connected;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _hostController = HorizonController(
-      devModeRequested: widget.devModeConfig.requested,
-      requireDevModeConfirmation: widget.devModeConfig.requiresConfirmation,
-    );
     _terminalManager = TerminalManager(
       onInput: _handleTerminalInput,
       onResize: _handleResize,
@@ -281,17 +268,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _multiWindowLayoutController.addListener(_handleMultiWindowLayoutChanged);
     unawaited(_loadAndSyncMultiWindowLayout());
     unawaited(_groupStore.loadLocalOrder());
-    _hostWormholeUrlController = TextEditingController(
-      text: _hostController.wormholeBaseUrl,
-    );
-    _hostWormholeTokenController = TextEditingController(
-      text: _hostController.wormholeToken,
-    );
-    _hostCustomSessionController = TextEditingController(
-      text: _hostController.customSessionId,
-    );
-    _hostCustomSessionController.addListener(_syncHostCustomSession);
-    _hostController.addListener(_handleHostChange);
     _urlController.addListener(_handleAddressChange);
     _wormholeController.addListener(_handleAddressChange);
     _sessionController.addListener(_saveSettings);
@@ -464,9 +440,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       _useWormhole = false;
     });
 
-    // Ensure local PTY host isn't accidentally running (would conflict on port).
-    await _hostController.stop();
-
     final bindHost = _desiredDaemonBindHost(lanEnabled: lanEnabled);
     final started = await _daemonManager.ensureRunning(
       wsUri: wsUri,
@@ -483,25 +456,12 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       _startDaemonPairingPolling(wsUri);
       _maybeAutoConnectLocal();
     } else {
-      // Daemon binary not available — fall back to in-process HorizonController.
-      debugPrint(
-        '[Horizon] Daemon unavailable, falling back to in-process host',
-      );
-      _hostController.setHostDeviceName(hostName);
-      await _hostController.start();
-      if (_hostController.running) {
-        _subscribeLocalOutput();
-        _maybeAutoConnectLocal();
-      } else {
-        // In-process host failed (e.g. port already in use by another instance).
-        // Try connecting to the existing server on that port as a client fallback.
-        debugPrint(
-          '[Horizon] In-process host failed: ${_hostController.error ?? "unknown"}, '
-          'trying to connect to existing server on port $lanPort',
-        );
-        // Attempt to connect as client; if that also fails, try killing the
-        // orphaned process and restarting the in-process host.
-        await _connectOrRecoverPort(wsUri, hostName);
+      debugPrint('[Horizon] Daemon unavailable; Horizon requires daemon');
+      if (mounted) {
+        setState(() {
+          _error = 'Horizon daemon unavailable. Check bundled daemon startup.';
+          _connectionAttempting = false;
+        });
       }
     }
   }
@@ -521,7 +481,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       }
 
       // Switching into client mode: clear local state and connect using native settings.
-      _unsubscribeLocalOutput();
       _stopCwdPolling();
       _sessionCwds.clear();
       _sessions.clear();
@@ -667,7 +626,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       _deviceKey = prefs.getString('deviceKey');
       _deviceName = deviceName;
     });
-    _hostController.setHostDeviceName(deviceName);
     _connectionManager.updateAutoReconnect(_autoReconnect);
 
     // Notify native about initial multiWindow state (delay to ensure native is ready)
@@ -698,7 +656,11 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   Future<void> _loadAndSyncMultiWindowLayout() async {
-    await _multiWindowLayoutController.loadFor(_groupStore.activeGroupId);
+    final groupId = _groupStore.activeGroupId;
+    await _multiWindowLayoutController.loadFor(
+      groupId,
+      remoteLayout: _groupStore.layoutForGroup(groupId)?.layout,
+    );
     if (!mounted) {
       return;
     }
@@ -728,101 +690,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     setState(() {});
     _scheduleActiveResize();
   }
-
-  void _handleHostChange() {
-    if (!mounted) {
-      return;
-    }
-    if (_hostController.running) {
-      if (!_hostConfigSynced) {
-        _safeSetText(
-          _hostWormholeUrlController,
-          _hostController.wormholeBaseUrl,
-        );
-        _safeSetText(
-          _hostWormholeTokenController,
-          _hostController.wormholeToken,
-        );
-        _safeSetText(
-          _hostCustomSessionController,
-          _hostController.customSessionId,
-        );
-        _hostConfigSynced = true;
-      }
-      // Always subscribe to local output (for Horizon mode data)
-      if (_localOutputSub == null) {
-        _subscribeLocalOutput();
-        // If in Horizon mode and no sessions, load local sessions
-        if (_isHorizonMode && _sessions.isEmpty) {
-          _loadLocalSessions();
-        }
-      }
-      // Only auto-connect when acting as a client (Voyager mode).
-      if (!_isHorizonMode) {
-        _maybeAutoConnectLocal();
-      } else {
-        final mirroredSessionId = _hostController.mirroredActiveSessionId;
-        final mirroredGroupId = _hostController.mirroredActiveGroupId;
-        if (mirroredSessionId != null &&
-            _sessions.contains(mirroredSessionId)) {
-          if (mirroredGroupId != null && mirroredGroupId.isNotEmpty) {
-            _groupStore.setActiveGroup(mirroredGroupId);
-          }
-          if (_activeSessionId != mirroredSessionId) {
-            _activeSessionId = mirroredSessionId;
-            _terminalManager.activeSessionId = mirroredSessionId;
-            _terminalFor(mirroredSessionId);
-            setState(() {});
-            _scheduleActiveResize();
-            _restoreScrollOffset(mirroredSessionId);
-            _updateWindowTitle();
-          }
-        }
-      }
-      return;
-    }
-    if (_isHorizonMode) {
-      _sessions.clear();
-      _activeSessionId = null;
-      _terminalManager.activeSessionId = null;
-      _terminalManager.clear();
-      _stopCwdPolling();
-      _sessionCwds.clear();
-      setState(() {});
-    }
-  }
-
-  void _subscribeLocalOutput() {
-    _unsubscribeLocalOutput();
-    _localOutputSub = _hostController.localOutputStream.listen(
-      _handleLocalOutput,
-      onError: (error) {
-        debugPrint('[Horizon Local] Output error: $error');
-      },
-    );
-  }
-
-  void _unsubscribeLocalOutput() {
-    _localOutputSub?.cancel();
-    _localOutputSub = null;
-  }
-
-  void _handleLocalOutput(TerminalOutput output) {
-    // Only process if in Horizon mode (direct local access)
-    if (!_isHorizonMode) {
-      return;
-    }
-    _logTerminalOutputBytes(
-      output.sessionId,
-      output.data,
-      note: _currentEnterProbeNote(output.sessionId),
-    );
-    _terminalManager.writeToTerminalBytes(output.sessionId, output.data);
-    // Note: No setState needed - TerminalView auto-updates via Terminal's notifyListeners
-  }
-
-  bool get _useLocalOutputMirror =>
-      _isHorizonMode && _localOutputSub != null && !_usingDirectLocalPty;
 
   bool _containsEnterInput(String data) {
     return data.contains('\r') || data.contains('\n');
@@ -986,53 +853,12 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     return buffer.toString();
   }
 
-  void _loadLocalSessions() {
-    final localSessions = _hostController.localSessions;
-    debugPrint('[Mode] Loading local sessions: ${localSessions.length}');
-    _sessions
-      ..clear()
-      ..addAll(localSessions);
-
-    // If no sessions exist, create one
-    if (_sessions.isEmpty) {
-      debugPrint('[Mode] No local sessions, creating one');
-      _createLocalSession();
-      return;
-    }
-
-    // Apply group sync
-    final syncPayload = _hostController.getLocalGroupSync();
-    _groupStore.applySync(syncPayload);
-
-    // Set active session
-    _syncActiveSessionWithGroup();
-    // Fall back to first session if group not ready
-    if (_activeSessionId == null && _sessions.isNotEmpty) {
-      _activeSessionId = _sessions.first;
-    }
-    debugPrint('[Mode] Active session: $_activeSessionId');
-    _terminalManager.activeSessionId = _activeSessionId;
-    if (_activeSessionId != null) {
-      _terminalFor(_activeSessionId!);
-    }
-
-    if (mounted) {
-      setState(() {});
-    }
-    _scheduleActiveResize();
-    if (_activeSessionId != null) {
-      _restoreScrollOffset(_activeSessionId!);
-    }
-    // Start cwd polling after loading sessions
-    _startCwdPolling();
-  }
-
   void _startCwdPolling() {
     _stopCwdPolling();
     if (!_isHorizonMode) {
       return;
     }
-    if (!_usingDirectLocalPty && !_connected) {
+    if (!_connected) {
       return;
     }
     // Poll immediately once
@@ -1050,22 +876,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
 
   Future<void> _pollSessionCwds() async {
     if (!_isHorizonMode) {
-      return;
-    }
-    if (_usingDirectLocalPty) {
-      for (final sessionId in _sessions) {
-        final cwd = await _hostController.getLocalCwd(sessionId);
-        if (cwd == null || cwd.isEmpty) {
-          continue;
-        }
-        final oldCwd = _sessionCwds[sessionId];
-        if (oldCwd != cwd) {
-          _sessionCwds[sessionId] = cwd;
-        }
-      }
-      if (mounted) {
-        setState(() {});
-      }
       return;
     }
     if (!_connected) {
@@ -1111,20 +921,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     return name.isEmpty ? cwd : name;
   }
 
-  void _showPairingDialog(PendingPairing pending) {
-    if (_hostPairingDialogShown) {
-      return;
-    }
-    _hostPairingDialogShown = true;
-
-    _showPairingDialogWith(
-      deviceName: pending.deviceName,
-      onApprove:
-          (remember) => _hostController.approvePairing(remember: remember),
-      onReject: _hostController.rejectPairing,
-    );
-  }
-
   void _showPairingDialogWith({
     required String deviceName,
     required void Function(bool remember) onApprove,
@@ -1150,33 +946,8 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     );
   }
 
-  void _syncHostCustomSession() {
-    unawaited(_ensureDaemonHostConfig());
-  }
-
   String _desiredDaemonBindHost({required bool lanEnabled}) {
     return lanEnabled ? '0.0.0.0' : '127.0.0.1';
-  }
-
-  Future<void> _ensureDaemonHostConfig() async {
-    final wsUri = Uri.tryParse(_urlController.text.trim());
-    if (wsUri == null || !DaemonManager.isLocalWs(wsUri)) {
-      return;
-    }
-    final nativeSettings = await _readNativeSettings();
-    final lanEnabled = _readBool(nativeSettings['lanEnabled'], fallback: true);
-    final vpnEnabled = _readBool(nativeSettings['vpnEnabled'], fallback: false);
-    await _ensureNativeVpnHelper();
-    await _daemonManager.ensureRunning(
-      wsUri: wsUri,
-      hostName: _deviceName,
-      devMode: widget.devModeConfig.requested,
-      vpnRequired: vpnEnabled,
-      wormholeUrl: _hostWormholeUrlController.text.trim(),
-      wormholeToken: _hostWormholeTokenController.text.trim(),
-      wormholeSession: _hostCustomSessionController.text.trim(),
-      bindHost: _desiredDaemonBindHost(lanEnabled: lanEnabled),
-    );
   }
 
   void _syncActiveSessionWithGroup() {
@@ -1296,16 +1067,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     return duplicatedIosName.hasMatch(trimmed);
   }
 
-  void _safeSetText(TextEditingController controller, String text) {
-    if (controller.text == text) {
-      return;
-    }
-    controller.value = TextEditingValue(
-      text: text,
-      selection: TextSelection.collapsed(offset: text.length),
-    );
-  }
-
   Future<void> _saveSettings() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('lanAddress', _urlController.text);
@@ -1328,22 +1089,16 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   void dispose() {
     _connectionManager.disconnect(shouldReconnect: false);
     _settingsChannel.setMethodCallHandler(null);
-    _unsubscribeLocalOutput();
     _stopCwdPolling();
     _daemonStatusPoll?.cancel();
     _daemonStatusPoll = null;
     _daemonPairingPoll?.cancel();
     _daemonPairingPoll = null;
     WidgetsBinding.instance.removeObserver(this);
-    _hostController.removeListener(_handleHostChange);
-    _hostCustomSessionController.removeListener(_syncHostCustomSession);
     _urlController.removeListener(_handleAddressChange);
     _wormholeController.removeListener(_handleAddressChange);
     _sessionController.removeListener(_saveSettings);
     _tokenController.removeListener(_saveSettings);
-    _hostWormholeUrlController.dispose();
-    _hostWormholeTokenController.dispose();
-    _hostCustomSessionController.dispose();
     _urlController.dispose();
     _wormholeController.dispose();
     _sessionController.dispose();
@@ -1351,7 +1106,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _metricsDebounce?.cancel();
     _settingsDebounce?.cancel();
     _terminalManager.dispose();
-    _hostController.dispose();
     _tabScrollController.dispose();
     _groupScrollController.dispose();
     _multiWindowLayoutController.removeListener(
@@ -1471,18 +1225,15 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _groupStore.onDisconnected();
     _connectionAttempting = false;
 
-    // If using network backend (daemon / remote host), clear the network-driven UI state.
-    if (!_usingDirectLocalPty) {
-      _sessions.clear();
-      _syncedSessions.clear();
-      _activeSessionId = null;
-      _terminalManager.activeSessionId = null;
-      _terminalManager.clear();
-      _stopCwdPolling();
-      _sessionCwds.clear();
-      if (mounted) {
-        setState(() {});
-      }
+    _sessions.clear();
+    _syncedSessions.clear();
+    _activeSessionId = null;
+    _terminalManager.activeSessionId = null;
+    _terminalManager.clear();
+    _stopCwdPolling();
+    _sessionCwds.clear();
+    if (mounted) {
+      setState(() {});
     }
   }
 
@@ -1494,11 +1245,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     debugPrint(
       '[Mode] Received session list: ${sessions.length} sessions, isHorizonMode=$_isHorizonMode',
     );
-    if (_usingDirectLocalPty) {
-      debugPrint('[Mode] Ignoring session list (using direct PTY backend)');
-      return;
-    }
-
     _sessions
       ..clear()
       ..addAll(sessions);
@@ -1539,36 +1285,8 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     }
   }
 
-  // Handler for local session created (Horizon mode direct access)
-  void _handleLocalSessionCreated(String sessionId) {
-    // Only update UI if in Horizon mode
-    if (!_isHorizonMode) {
-      return;
-    }
-    if (!_sessions.contains(sessionId)) {
-      _sessions.add(sessionId);
-    }
-    _activeSessionId = sessionId;
-    _terminalManager.activeSessionId = sessionId;
-    _terminalFor(sessionId);
-    if (mounted) {
-      setState(() {
-        _createSessionInFlight = false;
-        if (_isTransientCreateError(_error)) {
-          _error = null;
-        }
-      });
-    }
-    _scheduleActiveResize();
-    _restoreScrollOffset(sessionId);
-    _updateWindowTitle();
-  }
-
   // Handler for remote session created (Voyager mode / network callback)
   void _handleRemoteSessionCreated(String sessionId) {
-    if (_usingDirectLocalPty) {
-      return;
-    }
     if (!_sessions.contains(sessionId)) {
       _sessions.add(sessionId);
     }
@@ -1589,33 +1307,8 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _updateWindowTitle();
   }
 
-  // Handler for local session closed (Horizon mode direct access)
-  void _handleLocalSessionClosed(String sessionId) {
-    // Only update UI if in Horizon mode
-    if (!_isHorizonMode) {
-      return;
-    }
-    _sessions.remove(sessionId);
-    _terminalManager.removeSession(sessionId);
-    if (_activeSessionId == sessionId) {
-      final sessions = _visibleSessions;
-      _activeSessionId = sessions.isNotEmpty ? sessions.first : null;
-      _terminalManager.activeSessionId = _activeSessionId;
-    }
-    if (_activeSessionId == null) {
-      _terminalManager.activeSessionId = null;
-    }
-    if (mounted) {
-      setState(() {});
-    }
-    _updateWindowTitle();
-  }
-
   // Handler for remote session closed (Voyager mode / network callback)
   void _handleRemoteSessionClosed(String sessionId) {
-    if (_usingDirectLocalPty) {
-      return;
-    }
     _sessions.remove(sessionId);
     _terminalManager.removeSession(sessionId);
     _terminalCardKeys.remove(sessionId);
@@ -1640,9 +1333,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     int? nextOffset,
     bool reset = true,
   }) {
-    if (_usingDirectLocalPty || _useLocalOutputMirror) {
-      return;
-    }
     if (content.isEmpty) {
       return;
     }
@@ -1654,9 +1344,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   void _requestSyncIfNeeded(String sessionId) {
-    if (_usingDirectLocalPty) {
-      return;
-    }
     if (_syncedSessions.contains(sessionId)) {
       return;
     }
@@ -1665,9 +1352,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   void _handleStdout(String sessionId, String text) {
-    if (_usingDirectLocalPty || _useLocalOutputMirror) {
-      return;
-    }
     _logTerminalOutputBytes(
       sessionId,
       Uint8List.fromList(utf8.encode(text)),
@@ -1678,9 +1362,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   void _handleStdoutBytes(String sessionId, Uint8List bytes) {
-    if (_usingDirectLocalPty || _useLocalOutputMirror) {
-      return;
-    }
     _logTerminalOutputBytes(
       sessionId,
       bytes,
@@ -1729,97 +1410,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     }
   }
 
-  /// Try connecting as a client to an existing server on [wsUri].
-  /// If the connection doesn't establish within a short timeout, assume the
-  /// port is held by an orphaned process, kill it, and restart the in-process
-  /// host.
-  Future<void> _connectOrRecoverPort(Uri wsUri, String hostName) async {
-    // First, try connecting as a client to whatever is on that port.
-    await _connect();
-
-    // Give the connection a moment to establish.
-    await Future.delayed(const Duration(seconds: 2));
-
-    if (_connected) {
-      debugPrint('[Horizon] Connected to existing server as client fallback');
-      return;
-    }
-
-    // Connection failed — the port holder is likely an orphaned process.
-    // Try to kill it by finding the PID listening on the port.
-    debugPrint('[Horizon] Client fallback failed, attempting port recovery');
-    final recovered = await _tryRecoverPort(wsUri.port);
-    if (recovered) {
-      // Port is free now, restart the in-process host.
-      debugPrint('[Horizon] Port recovered, restarting in-process host');
-      _hostController.setHostDeviceName(hostName);
-      await _hostController.start();
-      if (_hostController.running) {
-        _subscribeLocalOutput();
-        _maybeAutoConnectLocal();
-      } else {
-        debugPrint(
-          '[Horizon] In-process host still failed after port recovery: '
-          '${_hostController.error ?? "unknown"}',
-        );
-      }
-    } else {
-      debugPrint('[Horizon] Port recovery failed, staying offline');
-    }
-  }
-
-  /// Attempt to free [port] by killing any orphaned Horizon process holding it.
-  /// Returns true if the port was freed.
-  Future<bool> _tryRecoverPort(int port) async {
-    if (Platform.isWindows) {
-      // Port recovery not supported on Windows yet.
-      return false;
-    }
-    try {
-      // Use lsof to find the PID holding the port (macOS/Linux)
-      final result = await Process.run('lsof', ['-ti', ':$port']);
-      if (result.exitCode != 0) {
-        return false;
-      }
-      final pids =
-          (result.stdout as String)
-              .split('\n')
-              .map((s) => int.tryParse(s.trim()))
-              .whereType<int>()
-              .where((p) => p != _pidSelf)
-              .toSet();
-      if (pids.isEmpty) {
-        return false;
-      }
-      for (final pid in pids) {
-        debugPrint(
-          '[Horizon] Killing orphaned process on port $port: PID $pid',
-        );
-        Process.killPid(pid, ProcessSignal.sigterm);
-      }
-      // Wait for the port to be freed
-      for (var i = 0; i < 10; i++) {
-        await Future.delayed(const Duration(milliseconds: 200));
-        try {
-          final server = await ServerSocket.bind(
-            InternetAddress.loopbackIPv4,
-            port,
-          );
-          await server.close();
-          return true;
-        } catch (_) {
-          // Port still in use, keep waiting
-        }
-      }
-      return false;
-    } catch (e) {
-      debugPrint('[Horizon] Port recovery error: $e');
-      return false;
-    }
-  }
-
-  int get _pidSelf => pid;
-
   Future<void> _ensureDeviceNameReady() async {
     if (!_isGenericDeviceName(_deviceName)) {
       return;
@@ -1836,7 +1426,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     } else {
       _deviceName = trimmed;
     }
-    _hostController.setHostDeviceName(trimmed);
     await _saveSettings();
   }
 
@@ -2059,14 +1648,13 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
         _meta = false;
       }
       _appendTerminalTrace(
-        'handleInput:beforeSend session=$sessionId output=${_escapeControlCharacters(output)} connected=$_connected direct=$_usingDirectLocalPty',
+        'handleInput:beforeSend session=$sessionId output=${_escapeControlCharacters(output)} connected=$_connected',
       );
       _logTerminalInputEvent(
         'prepareSendRaw',
         sessionId,
         output,
-        note:
-            'connected=$_connected active=${_activeSessionId ?? ""} direct=$_usingDirectLocalPty',
+        note: 'connected=$_connected active=${_activeSessionId ?? ""}',
       );
       _sendRawFor(sessionId, output);
       _appendTerminalTrace(
@@ -2124,11 +1712,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     if (!_multiWindow && _activeSessionId != sessionId) {
       return;
     }
-    if (_usingDirectLocalPty) {
-      _hostController.resizeLocalSession(sessionId, rows, cols);
-    } else {
-      _connectionManager.sendResize(sessionId, cols, rows);
-    }
+    _connectionManager.sendResize(sessionId, cols, rows);
   }
 
   void _sendRaw(String data) {
@@ -2142,16 +1726,11 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   void _sendRawFor(String sessionId, String data) {
     try {
       _appendTerminalTrace(
-        'sendRaw:start session=$sessionId data=${_escapeControlCharacters(data)} connected=$_connected direct=$_usingDirectLocalPty',
+        'sendRaw:start session=$sessionId data=${_escapeControlCharacters(data)} connected=$_connected',
       );
       final note = _armEnterProbeIfNeeded(sessionId, data);
       _logTerminalInputEvent('sendRaw', sessionId, data, note: note);
-      if (_usingDirectLocalPty) {
-        final bytes = Uint8List.fromList(utf8.encode(data));
-        _hostController.writeLocalStdin(sessionId, bytes);
-      } else {
-        _connectionManager.sendRaw(sessionId, data);
-      }
+      _connectionManager.sendRaw(sessionId, data);
       _appendTerminalTrace(
         'sendRaw:done session=$sessionId data=${_escapeControlCharacters(data)}',
       );
@@ -2159,7 +1738,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
         'sentRaw',
         sessionId,
         data,
-        note: 'connected=$_connected direct=$_usingDirectLocalPty',
+        note: 'connected=$_connected',
       );
     } catch (error, stackTrace) {
       final details =
@@ -2175,10 +1754,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   void _sendGroupCommand(Map<String, dynamic> payload) {
-    if (_usingDirectLocalPty) {
-      unawaited(_hostController.applyLocalGroupCommand(payload));
-      return;
-    }
     _connectionManager.sendCommand(payload);
   }
 
@@ -2189,12 +1764,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
 
   Future<void> _sendCreateSession() async {
     if (_createSessionInFlight) {
-      return;
-    }
-    if (_usingDirectLocalPty) {
-      _createSessionInFlight = true;
-      await _createLocalSession();
-      _createSessionInFlight = false;
       return;
     }
     if (!_connected) {
@@ -2212,7 +1781,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     final groupId = _groupStore.activeGroupId;
     _sendCommand({'type': 'create', 'groupId': groupId});
     Future.delayed(const Duration(milliseconds: 900), () {
-      if (!mounted || _usingDirectLocalPty) {
+      if (!mounted) {
         return;
       }
       if (requestId != _createSessionRequestId) {
@@ -2233,34 +1802,8 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _sendCreateSession();
   }
 
-  Future<void> _createLocalSession() async {
-    final groupId = _groupStore.activeGroupId;
-    final sessionId = await _hostController.createLocalSession(
-      groupId: groupId,
-      seedSessionId: _activeSessionId,
-    );
-    if (sessionId != null) {
-      _handleLocalSessionCreated(sessionId);
-      // Refresh group sync
-      final syncPayload = _hostController.getLocalGroupSync();
-      _groupStore.applySync(syncPayload);
-    }
-  }
-
   void _sendCloseSession(String sessionId) {
-    if (_usingDirectLocalPty) {
-      _closeLocalSession(sessionId);
-      return;
-    }
     _sendCommand({'type': 'close', 'sessionId': sessionId});
-  }
-
-  Future<void> _closeLocalSession(String sessionId) async {
-    await _hostController.closeLocalSession(sessionId);
-    _handleLocalSessionClosed(sessionId);
-    // Refresh group sync
-    final syncPayload = _hostController.getLocalGroupSync();
-    _groupStore.applySync(syncPayload);
   }
 
   void _sendKey(TerminalKey key) {
@@ -2409,81 +1952,67 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       }
     });
 
-    return AnimatedBuilder(
-      animation: _hostController,
-      builder: (context, _) {
-        final pending = _hostController.pendingPairing;
-        if (pending != null && !_hostPairingDialogShown) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            _showPairingDialog(pending);
-          });
-        }
+    const sidebarExpandedWidth = 240.0;
+    const sidebarCollapsedWidth = 64.0;
+    const sidebarSwitchWidth = 170.0;
+    const topBarHeight = 56.0;
+    const animDuration = Duration(milliseconds: 220);
+    const animCurve = Curves.easeOutCubic;
 
-        const sidebarExpandedWidth = 240.0;
-        const sidebarCollapsedWidth = 64.0;
-        const sidebarSwitchWidth = 170.0;
-        const topBarHeight = 56.0;
-        const animDuration = Duration(milliseconds: 220);
-        const animCurve = Curves.easeOutCubic;
-
-        return Scaffold(
-          key: _scaffoldKey,
-          backgroundColor: HorizonColors.background,
-          body: Stack(
+    return Scaffold(
+      key: _scaffoldKey,
+      backgroundColor: HorizonColors.background,
+      body: Stack(
+        children: [
+          Positioned.fill(child: _buildBackground()),
+          Row(
             children: [
-              Positioned.fill(child: _buildBackground()),
-              Row(
-                children: [
-                  AnimatedContainer(
-                    duration: animDuration,
-                    curve: animCurve,
-                    width:
-                        _showSidebar
-                            ? sidebarExpandedWidth
-                            : sidebarCollapsedWidth,
-                    child: LayoutBuilder(
-                      builder: (context, constraints) {
-                        if (constraints.maxWidth >= sidebarSwitchWidth) {
-                          return _buildSidebarContent(context);
-                        }
-                        return _buildSidebarRail(context);
-                      },
-                    ),
-                  ),
-                  Expanded(
-                    child: Column(
-                      children: [
-                        _buildTopBar(context, topBarHeight),
-                        Expanded(
-                          child: Stack(
-                            children: [
-                              Positioned.fill(
-                                child: _buildSessionCanvas(
-                                  context,
-                                  deleteDetection: deleteDetection,
-                                ),
-                              ),
-                              Positioned(
-                                left: 0,
-                                right: 0,
-                                bottom: 0,
-                                child: SafeArea(
-                                  top: false,
-                                  child: _buildBottomBars(isInputActive),
-                                ),
-                              ),
-                            ],
+              AnimatedContainer(
+                duration: animDuration,
+                curve: animCurve,
+                width:
+                    _showSidebar ? sidebarExpandedWidth : sidebarCollapsedWidth,
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    if (constraints.maxWidth >= sidebarSwitchWidth) {
+                      return _buildSidebarContent(context);
+                    }
+                    return _buildSidebarRail(context);
+                  },
+                ),
+              ),
+              Expanded(
+                child: Column(
+                  children: [
+                    _buildTopBar(context, topBarHeight),
+                    Expanded(
+                      child: Stack(
+                        children: [
+                          Positioned.fill(
+                            child: _buildSessionCanvas(
+                              context,
+                              deleteDetection: deleteDetection,
+                            ),
                           ),
-                        ),
-                      ],
+                          Positioned(
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            child: SafeArea(
+                              top: false,
+                              child: _buildBottomBars(isInputActive),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ],
           ),
-        );
-      },
+        ],
+      ),
     );
   }
 
@@ -2569,12 +2098,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
           return _SidebarConnectionState.connected;
         }
         return _SidebarConnectionState.disconnect;
-      }
-      if (_hostController.wormholeConnected) {
-        return _SidebarConnectionState.connected;
-      }
-      if (_hostController.wormholeConnecting) {
-        return _SidebarConnectionState.connecting;
       }
       return _SidebarConnectionState.disconnect;
     }
@@ -2794,6 +2317,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
         _multiWindow
             ? SvgPicture.asset(
               'assets/icons/square.grid.2x2.svg',
+              package: 'voyager_share',
               width: 16,
               height: 16,
               colorFilter: const ColorFilter.mode(
@@ -2813,16 +2337,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
         onLongPress: _multiWindow ? _showMultiWindowLayoutMenu : null,
         onSecondaryTap: _multiWindow ? _showMultiWindowLayoutMenu : null,
         borderRadius: BorderRadius.circular(10),
-        child: Container(
-          width: 32,
-          height: 32,
-          decoration: BoxDecoration(
-            color: HorizonColors.surfaceBright,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: HorizonColors.borderSubtle),
-          ),
-          child: Center(child: icon),
-        ),
+        child: SizedBox(width: 32, height: 32, child: Center(child: icon)),
       ),
     );
   }
@@ -3806,23 +3321,19 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
         return MultiWindowGrid(
           padding: padding,
           gap: 0,
+          splitterVisualGap: 16,
           desktopHitSize: 9,
           mobileBreakpoint: 0,
           scrollPhysics: const BouncingScrollPhysics(),
           layout: layout,
-          onResizeColumn: _multiWindowLayoutController.resizeColumn,
-          onResizeRow: _multiWindowLayoutController.resizeRow,
-          onResizeEnd: () => unawaited(_multiWindowLayoutController.commit()),
-          onMoveCell: (from, to, side) => unawaited(
-            _multiWindowLayoutController.moveCell(
-              fromSessionId: from,
-              toSessionId: to,
-              side: side,
-            ),
-          ),
+          onResizeSplit: _multiWindowLayoutController.resizeSplit,
+          onResizeEnd: () => unawaited(_commitMultiWindowLayout()),
+          onMoveCell:
+              (from, to, side) =>
+                  unawaited(_moveMultiWindowCell(from, to, side)),
           cellBuilder: (context, sessionId, index) {
             final label = _getSessionLabel(sessionId, index);
-            return HorizonSessionCard(
+            return SessionWindowCard(
               key: _terminalCardKeyFor(sessionId),
               sessionId: sessionId,
               terminal: _terminalFor(sessionId),
@@ -3864,14 +3375,46 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   }
 
   void _resetMultiWindowLayout({required bool keepPaneOrder}) {
-    unawaited(
-      _multiWindowLayoutController.resetToFallback(
+    unawaited(() async {
+      await _multiWindowLayoutController.resetToFallback(
         sessionIds: _visibleSessions,
         columns: _currentHorizonMultiWindowColumns(),
         keepPaneOrder: keepPaneOrder,
-      ),
-    );
+      );
+      _sendMultiWindowLayoutUpdate();
+    }());
     _scheduleActiveResize();
+  }
+
+  Future<void> _commitMultiWindowLayout() async {
+    await _multiWindowLayoutController.commit();
+    _sendMultiWindowLayoutUpdate();
+  }
+
+  Future<void> _moveMultiWindowCell(
+    String fromSessionId,
+    String toSessionId,
+    DropSide side,
+  ) async {
+    await _multiWindowLayoutController.moveCell(
+      fromSessionId: fromSessionId,
+      toSessionId: toSessionId,
+      side: side,
+    );
+    _sendMultiWindowLayoutUpdate();
+  }
+
+  void _sendMultiWindowLayoutUpdate() {
+    final layout = _multiWindowLayoutController.layout;
+    if (layout == null) {
+      return;
+    }
+    final groupId = _groupStore.activeGroupId;
+    _groupStore.updateGroupLayout(
+      groupId,
+      layout.toJson(),
+      baseRevision: _groupStore.layoutForGroup(groupId)?.revision,
+    );
   }
 
   Widget _buildSingleSessionView(bool deleteDetection) {
@@ -3938,27 +3481,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
               label: const Text('New session'),
             ),
           ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildAddSessionCard() {
-    return InkWell(
-      onTap: _sendCreateSession,
-      borderRadius: BorderRadius.circular(10),
-      child: Container(
-        decoration: BoxDecoration(
-          color: HorizonColors.surfaceVariant,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: HorizonColors.borderSubtle, width: 1),
-        ),
-        child: const Center(
-          child: Icon(
-            Icons.add_rounded,
-            size: 30,
-            color: HorizonColors.textMuted,
-          ),
         ),
       ),
     );
@@ -4171,7 +3693,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
         normalized == '::1') {
       return true;
     }
-    return _hostController.addresses.contains(host);
+    return false;
   }
 }
 

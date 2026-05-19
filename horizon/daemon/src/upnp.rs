@@ -57,12 +57,22 @@ pub async fn add_port_mapping_proto(
 
 /// Convenience: map UDP port.
 pub async fn add_port_mapping(local_port: u16) -> Result<IpAddr, String> {
-    add_port_mapping_proto(local_port, igd_next::PortMappingProtocol::UDP, "Blackhole WireGuard").await
+    add_port_mapping_proto(
+        local_port,
+        igd_next::PortMappingProtocol::UDP,
+        "Blackhole WireGuard",
+    )
+    .await
 }
 
 /// Convenience: map TCP port.
 pub async fn add_tcp_port_mapping(local_port: u16) -> Result<IpAddr, String> {
-    add_port_mapping_proto(local_port, igd_next::PortMappingProtocol::TCP, "Blackhole Horizon WebSocket").await
+    add_port_mapping_proto(
+        local_port,
+        igd_next::PortMappingProtocol::TCP,
+        "Blackhole Horizon WebSocket",
+    )
+    .await
 }
 
 /// Remove a previously added UPnP port mapping.
@@ -94,11 +104,8 @@ pub fn spawn_renewal_task(local_port: u16) -> tokio::task::JoinHandle<()> {
     })
 }
 
-fn get_local_ip_for_gateway(
-    gateway_addr: &SocketAddr,
-) -> Result<Ipv4Addr, String> {
-    let socket =
-        std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("bind failed: {e}"))?;
+fn get_local_ip_for_gateway(gateway_addr: &SocketAddr) -> Result<Ipv4Addr, String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("bind failed: {e}"))?;
     socket
         .connect(gateway_addr)
         .map_err(|e| format!("connect to gateway failed: {e}"))?;

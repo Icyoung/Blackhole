@@ -643,8 +643,7 @@ impl WgServer {
             TunnelResult::WriteToNetwork(n) => {
                 let _ = peer;
                 // Response packet (e.g., handshake response) — send back.
-                self.send_network_packet(&dst[..n], Some(peer_addr))
-                    .await;
+                self.send_network_packet(&dst[..n], Some(peer_addr)).await;
                 // The tunnel may have more data queued (e.g., after handshake
                 // completion it may immediately produce decrypted buffered data).
                 self.drain_tunnel(&pk.clone(), dst, tun).await;
@@ -700,12 +699,7 @@ impl WgServer {
 
     /// After a handshake completes the tunnel may have buffered decrypted
     /// packets. Drain them to the TUN device.
-    async fn drain_tunnel(
-        &mut self,
-        peer_pk: &str,
-        dst: &mut [u8],
-        tun: &AsyncTun,
-    ) {
+    async fn drain_tunnel(&mut self, peer_pk: &str, dst: &mut [u8], tun: &AsyncTun) {
         // Feed an empty slice to get any queued data.
         let empty: &[u8] = &[];
         loop {
@@ -722,11 +716,7 @@ impl WgServer {
                     }
                 }
                 Ok(TunnelResult::WriteToNetwork(n)) => {
-                    self.send_network_packet(
-                        &dst[..n],
-                        Some(peer_addr),
-                    )
-                    .await;
+                    self.send_network_packet(&dst[..n], Some(peer_addr)).await;
                 }
                 _ => break,
             }
@@ -783,11 +773,7 @@ impl WgServer {
                     "encapsulated TUN packet for WireGuard peer"
                 );
                 let _ = peer;
-                self.send_network_packet(
-                    &dst[..n],
-                    Some(peer_addr),
-                )
-                .await;
+                self.send_network_packet(&dst[..n], Some(peer_addr)).await;
             }
             Ok(TunnelResult::Done) => {}
             Ok(TunnelResult::Err(msg)) => {
@@ -837,8 +823,7 @@ impl WgServer {
         }
 
         for (packet, peer_addr) in timer_packets {
-            self.send_network_packet(&packet, Some(peer_addr))
-                .await;
+            self.send_network_packet(&packet, Some(peer_addr)).await;
         }
 
         for pk in peers_to_probe {
@@ -887,11 +872,7 @@ impl WgServer {
         }
     }
 
-    async fn send_network_packet(
-        &self,
-        packet: &[u8],
-        direct_addr: Option<SocketAddr>,
-    ) {
+    async fn send_network_packet(&self, packet: &[u8], direct_addr: Option<SocketAddr>) {
         if let Some(addr) = direct_addr.filter(|addr| addr.port() != 0) {
             if let Err(e) = self.udp.send_to(packet, addr).await {
                 warn!(error = %e, peer = %addr, "failed to send WireGuard packet over UDP");
@@ -909,8 +890,8 @@ mod tests {
     use std::os::fd::IntoRawFd;
     use std::os::unix::net::UnixDatagram as StdUnixDatagram;
 
-    use tunnel::generate_keypair;
     use tokio::sync::oneshot;
+    use tunnel::generate_keypair;
 
     fn build_ipv4_packet(src: Ipv4Addr, dst: Ipv4Addr, payload: &[u8]) -> Vec<u8> {
         let total_len = 20 + payload.len();
@@ -938,9 +919,7 @@ mod tests {
         server_socket.into_raw_fd()
     }
 
-    async fn build_test_server(
-        private_key: String,
-    ) -> WgServer {
+    async fn build_test_server(private_key: String) -> WgServer {
         let tun_fd = packet_socket_fd();
         let probe_socket = std::net::UdpSocket::bind("127.0.0.1:0")
             .expect("failed to allocate ephemeral UDP port for test");
@@ -950,14 +929,9 @@ mod tests {
             .port();
         drop(probe_socket);
 
-        WgServer::new(
-            private_key,
-            listen_port,
-            tun_fd,
-            TunTransport::PacketSocket,
-        )
-        .await
-        .expect("failed to create test WG server")
+        WgServer::new(private_key, listen_port, tun_fd, TunTransport::PacketSocket)
+            .await
+            .expect("failed to create test WG server")
     }
 
     async fn recv_udp_packet(socket: &tokio::net::UdpSocket) -> Result<Vec<u8>, String> {
@@ -1024,7 +998,6 @@ mod tests {
             }
         }
     }
-
 
     #[test]
     fn preferred_endpoint_uses_explicit_endpoint_or_first_candidate() {
@@ -1152,7 +1125,4 @@ mod tests {
             "accepted direct UDP traffic should end the probe window"
         );
     }
-
-
-
 }
