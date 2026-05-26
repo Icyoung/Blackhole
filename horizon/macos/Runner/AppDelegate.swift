@@ -23,6 +23,7 @@ class AppDelegate: FlutterAppDelegate {
     setupStatusItem()
     setupAppMenu()
     setupToolbar()
+    promptForFullDiskAccessIfNeeded()
 
     // Prevent macOS from sleeping while Horizon is running (keeps daemon accessible)
     preventSleepActivity = ProcessInfo.processInfo.beginActivity(
@@ -66,7 +67,6 @@ class AppDelegate: FlutterAppDelegate {
           // Synthesise a left-mouse-down at the current mouse location so
           // performDrag has an event to work with.
           let loc = window.mouseLocationOutsideOfEventStream
-          let screenLoc = window.convertPoint(toScreen: loc)
           if let event = NSEvent.mouseEvent(
             with: .leftMouseDown,
             location: loc,
@@ -103,6 +103,38 @@ class AppDelegate: FlutterAppDelegate {
         }
       case "vpnHelperStatus":
         result(self.vpnHelperStatus())
+      case "removeNativeTitleBar":
+        self.removeNativeTitleBar()
+        result(nil)
+      case "toggleZoom":
+        if let window = self.mainFlutterWindow {
+          let action = UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") ?? "Maximize"
+          switch action {
+          case "Maximize", "Fill":
+            window.zoom(nil)
+          case "Minimize":
+            window.miniaturize(nil)
+          default:
+            break
+          }
+        }
+        result(nil)
+      case "windowClose":
+        self.allowTerminate = true
+        NSApp.terminate(nil)
+        result(nil)
+      case "windowMinimize":
+        self.mainFlutterWindow?.miniaturize(nil)
+        result(nil)
+      case "windowZoom":
+        self.mainFlutterWindow?.zoom(nil)
+        result(nil)
+      case "windowToggleFullScreen":
+        self.mainFlutterWindow?.toggleFullScreen(nil)
+        result(nil)
+      case "showWindowControlMenu":
+        self.showWindowControlMenu()
+        result(nil)
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -163,29 +195,24 @@ class AppDelegate: FlutterAppDelegate {
   private func setupToolbar() {
     guard let window = mainFlutterWindow else { return }
 
-    // Required for immersive titlebar; also helps avoid 1px/light borders around content.
     window.styleMask.insert(.fullSizeContentView)
-
     window.titleVisibility = .hidden
     window.titlebarAppearsTransparent = true
-
-    // Disable the system title bar drag region so it doesn't intercept clicks on
-    // Flutter buttons in the top bar area. Window dragging is handled by Flutter
-    // via the "startWindowDrag" method channel call.
     window.isMovableByWindowBackground = false
+
     if #available(macOS 11.0, *) {
       window.titlebarSeparatorStyle = .none
     }
-    // Match HorizonColors.surface (#FAFBFC)
-    window.backgroundColor = NSColor(calibratedRed: 0.98, green: 0.984, blue: 0.988, alpha: 1.0)
-    window.isOpaque = true
+    window.backgroundColor = .clear
+    window.isOpaque = false
+    window.hasShadow = true
     window.contentView?.wantsLayer = true
-    window.contentView?.layer?.backgroundColor = window.backgroundColor?.cgColor
+    window.contentView?.layer?.cornerRadius = 10
+    window.contentView?.layer?.masksToBounds = true
     window.contentView?.superview?.wantsLayer = true
-    window.contentView?.superview?.layer?.backgroundColor = window.backgroundColor?.cgColor
+    window.contentView?.superview?.layer?.cornerRadius = 10
+    window.contentView?.superview?.layer?.masksToBounds = true
 
-    // Immersive titlebar: nudge traffic-light buttons a bit down/right so they
-    // don't feel glued to the window edge when Flutter draws under the titlebar.
     let dxEnv = ProcessInfo.processInfo.environment["BLACKHOLE_TRAFFIC_LIGHT_DX"].flatMap { Double($0) }
     let dyEnv = ProcessInfo.processInfo.environment["BLACKHOLE_TRAFFIC_LIGHT_DY"].flatMap { Double($0) }
     let dx = CGFloat(dxEnv ?? 10)
@@ -201,6 +228,54 @@ class AppDelegate: FlutterAppDelegate {
 
     // Multi-window toggle is now in the Flutter tab bar
     setupWindowMenu()
+  }
+
+  private func removeNativeTitleBar() {
+    guard let window = mainFlutterWindow else { return }
+    window.styleMask.remove(.titled)
+    window.backgroundColor = .clear
+    window.isOpaque = false
+    window.hasShadow = true
+    window.contentView?.wantsLayer = true
+    window.contentView?.layer?.cornerRadius = 10
+    window.contentView?.layer?.masksToBounds = true
+    window.invalidateShadow()
+  }
+
+  private func showWindowControlMenu() {
+    guard let window = mainFlutterWindow, let contentView = window.contentView else { return }
+    let menu = NSMenu()
+
+    let zoomItem = NSMenuItem(title: "Zoom", action: #selector(zoomMainWindow(_:)), keyEquivalent: "")
+    zoomItem.target = self
+    menu.addItem(zoomItem)
+
+    let fullScreenTitle = window.styleMask.contains(.fullScreen) ? "Exit Full Screen" : "Enter Full Screen"
+    let fullScreenItem = NSMenuItem(title: fullScreenTitle, action: #selector(toggleMainWindowFullScreen(_:)), keyEquivalent: "")
+    fullScreenItem.target = self
+    menu.addItem(fullScreenItem)
+
+    menu.addItem(.separator())
+
+    let centerItem = NSMenuItem(title: "Center", action: #selector(centerMainWindow(_:)), keyEquivalent: "")
+    centerItem.target = self
+    menu.addItem(centerItem)
+
+    let mouseInWindow = window.mouseLocationOutsideOfEventStream
+    let location = NSPoint(x: mouseInWindow.x, y: mouseInWindow.y - 8)
+    menu.popUp(positioning: nil, at: location, in: contentView)
+  }
+
+  @objc private func zoomMainWindow(_ sender: Any?) {
+    mainFlutterWindow?.zoom(nil)
+  }
+
+  @objc private func toggleMainWindowFullScreen(_ sender: Any?) {
+    mainFlutterWindow?.toggleFullScreen(nil)
+  }
+
+  @objc private func centerMainWindow(_ sender: Any?) {
+    mainFlutterWindow?.center()
   }
 
   // Keep original constraint constants so repeated apply() does not accumulate.
@@ -700,6 +775,63 @@ class AppDelegate: FlutterAppDelegate {
     }
   }
 
+  private func promptForFullDiskAccessIfNeeded() {
+    let defaults = UserDefaults.standard
+    let suppressKey = "blackhole.fda.suppressPrompt"
+    if defaults.bool(forKey: suppressKey) { return }
+
+    DispatchQueue.global(qos: .utility).async { [weak self] in
+      if Self.hasFullDiskAccess() { return }
+      DispatchQueue.main.async {
+        self?.showFullDiskAccessAlert(suppressKey: suppressKey)
+      }
+    }
+  }
+
+  private static func hasFullDiskAccess() -> Bool {
+    // Probing a path that's only readable with FDA. TCC silently denies (returns
+    // ENOENT/EPERM) without prompting because we don't declare a usage string.
+    let probes = [
+      "Library/Safari/CloudTabs.db",
+      "Library/Safari/Bookmarks.plist",
+    ]
+    let home = NSHomeDirectory()
+    for rel in probes {
+      let path = (home as NSString).appendingPathComponent(rel)
+      if FileManager.default.isReadableFile(atPath: path) {
+        return true
+      }
+    }
+    return false
+  }
+
+  private func showFullDiskAccessAlert(suppressKey: String) {
+    let alert = NSAlert()
+    alert.messageText = "Horizon needs Full Disk Access"
+    alert.informativeText = """
+      Horizon hosts terminals and agents that read files across your home directory and other apps' data. \
+      Without Full Disk Access, macOS will repeatedly prompt to allow each folder.
+
+      Open System Settings to grant access, then relaunch Horizon.
+      """
+    alert.alertStyle = .informational
+    alert.addButton(withTitle: "Open System Settings")
+    alert.addButton(withTitle: "Later")
+    alert.addButton(withTitle: "Don't Ask Again")
+
+    let response = alert.runModal()
+    switch response {
+    case .alertFirstButtonReturn:
+      if let url = URL(string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles") {
+        NSWorkspace.shared.open(url)
+      }
+    case .alertThirdButtonReturn:
+      UserDefaults.standard.set(true, forKey: suppressKey)
+    default:
+      break
+    }
+  }
+
   private func ensureVpnHelper() throws -> [String: Any] {
     let settings = readNativeSettings()
     let enabled = settings["vpnEnabled"] as? Bool ?? false
@@ -1043,6 +1175,7 @@ class AppDelegate: FlutterAppDelegate {
       }
     }
   }
+
 }
 
 extension AppDelegate: NSWindowDelegate {

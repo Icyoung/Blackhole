@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'src/app.dart';
@@ -45,6 +46,11 @@ Future<void> main(List<String> args) async {
     await windowManager.show();
     await windowManager.focus();
   });
+  if (!kIsWeb && Platform.isMacOS) {
+    await const MethodChannel(
+      'com.blackhole/system',
+    ).invokeMethod<void>('removeNativeTitleBar');
+  }
 
   final devMode = _resolveDevMode();
   runApp(HorizonApp(devModeConfig: devMode));

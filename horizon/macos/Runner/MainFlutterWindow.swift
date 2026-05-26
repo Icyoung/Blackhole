@@ -8,6 +8,10 @@ class MainFlutterWindow: NSWindow {
     case absolute
   }
 
+  // Without .titled, the window doesn't automatically become key/main on click.
+  override var canBecomeKey: Bool { true }
+  override var canBecomeMain: Bool { true }
+
   private var trafficLightDx: CGFloat = 0
   private var trafficLightDy: CGFloat = 0
   private var trafficLightMode: TrafficLightMode = .relative

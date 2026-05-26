@@ -114,7 +114,9 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   bool _dragging = false;
   String? _dragTargetSessionId;
   final Set<int> _topBarInteractivePointers = <int>{};
-
+  int? _topBarDragPointer;
+  Offset? _topBarDragStartPos;
+  bool _trafficLightsHovered = false;
   // GlobalKeys for terminal cards in multi-window mode (for hit testing)
   final Map<String, GlobalKey> _terminalCardKeys = {};
 
@@ -1959,59 +1961,75 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     const animDuration = Duration(milliseconds: 220);
     const animCurve = Curves.easeOutCubic;
 
-    return Scaffold(
-      key: _scaffoldKey,
-      backgroundColor: HorizonColors.background,
-      body: Stack(
-        children: [
-          Positioned.fill(child: _buildBackground()),
-          Row(
-            children: [
-              AnimatedContainer(
-                duration: animDuration,
-                curve: animCurve,
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: Scaffold(
+        key: _scaffoldKey,
+        backgroundColor: HorizonColors.background,
+        body: Stack(
+          children: [
+            Positioned.fill(child: _buildBackground()),
+            Row(
+              children: [
+                AnimatedContainer(
+                  duration: animDuration,
+                  curve: animCurve,
+                  width:
+                      _showSidebar
+                          ? sidebarExpandedWidth
+                          : sidebarCollapsedWidth,
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      if (constraints.maxWidth >= sidebarSwitchWidth) {
+                        return _buildSidebarContent(context);
+                      }
+                      return _buildSidebarRail(context);
+                    },
+                  ),
+                ),
+                Expanded(
+                  child: Column(
+                    children: [
+                      _buildTopBar(context, topBarHeight),
+                      Expanded(
+                        child: Stack(
+                          children: [
+                            Positioned.fill(
+                              child: _buildSessionCanvas(
+                                context,
+                                deleteDetection: deleteDetection,
+                              ),
+                            ),
+                            Positioned(
+                              left: 0,
+                              right: 0,
+                              bottom: 0,
+                              child: SafeArea(
+                                top: false,
+                                child: _buildBottomBars(isInputActive),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            if (!kIsWeb && Platform.isMacOS)
+              Positioned(
+                top: 0,
+                left: 0,
                 width:
                     _showSidebar ? sidebarExpandedWidth : sidebarCollapsedWidth,
-                child: LayoutBuilder(
-                  builder: (context, constraints) {
-                    if (constraints.maxWidth >= sidebarSwitchWidth) {
-                      return _buildSidebarContent(context);
-                    }
-                    return _buildSidebarRail(context);
-                  },
-                ),
+                height: 48,
+                child: _buildWindowDragRegion(),
               ),
-              Expanded(
-                child: Column(
-                  children: [
-                    _buildTopBar(context, topBarHeight),
-                    Expanded(
-                      child: Stack(
-                        children: [
-                          Positioned.fill(
-                            child: _buildSessionCanvas(
-                              context,
-                              deleteDetection: deleteDetection,
-                            ),
-                          ),
-                          Positioned(
-                            left: 0,
-                            right: 0,
-                            bottom: 0,
-                            child: SafeArea(
-                              top: false,
-                              child: _buildBottomBars(isInputActive),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ],
+            if (!kIsWeb && Platform.isMacOS)
+              Positioned(top: 13, left: 14, child: _buildTrafficLights()),
+          ],
+        ),
       ),
     );
   }
@@ -2020,11 +2038,97 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     return const ColoredBox(color: HorizonColors.surface);
   }
 
-  void _handleTopBarPanStart(DragStartDetails details) {
-    if (kIsWeb || !Platform.isMacOS || _topBarInteractivePointers.isNotEmpty) {
-      return;
-    }
-    _systemChannel.invokeMethod('startWindowDrag');
+  Widget _buildTrafficLights() {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _trafficLightsHovered = true),
+      onExit: (_) => setState(() => _trafficLightsHovered = false),
+      child: Row(
+        children: [
+          _trafficLightButton(
+            kind: _TrafficLightKind.close,
+            color: const Color(0xFFFF5F57),
+            hoverColor: const Color(0xFFFF6B63),
+            showGlyph: _trafficLightsHovered,
+            onTap: () => _systemChannel.invokeMethod('windowClose'),
+          ),
+          const SizedBox(width: 8),
+          _trafficLightButton(
+            kind: _TrafficLightKind.minimize,
+            color: const Color(0xFFFFBD2E),
+            hoverColor: const Color(0xFFFFCA45),
+            showGlyph: _trafficLightsHovered,
+            onTap: () => _systemChannel.invokeMethod('windowMinimize'),
+          ),
+          const SizedBox(width: 8),
+          _trafficLightButton(
+            kind: _TrafficLightKind.zoom,
+            color: const Color(0xFF28C840),
+            hoverColor: const Color(0xFF31D74B),
+            showGlyph: _trafficLightsHovered,
+            onTap: () => _systemChannel.invokeMethod('windowZoom'),
+            onLongPress:
+                () => _systemChannel.invokeMethod('showWindowControlMenu'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildWindowDragRegion() {
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (event) {
+        if (_topBarInteractivePointers.isEmpty) {
+          _topBarDragPointer = event.pointer;
+          _topBarDragStartPos = event.position;
+        }
+      },
+      onPointerMove: (event) {
+        if (_topBarDragPointer == event.pointer &&
+            _topBarDragStartPos != null &&
+            _topBarInteractivePointers.isEmpty) {
+          final delta = (event.position - _topBarDragStartPos!).distance;
+          if (delta > 4.0) {
+            _topBarDragPointer = null;
+            _topBarDragStartPos = null;
+            _systemChannel.invokeMethod('startWindowDrag');
+          }
+        }
+      },
+      onPointerUp: (event) {
+        if (_topBarDragPointer == event.pointer) {
+          _topBarDragPointer = null;
+          _topBarDragStartPos = null;
+        }
+      },
+      onPointerCancel: (event) {
+        if (_topBarDragPointer == event.pointer) {
+          _topBarDragPointer = null;
+          _topBarDragStartPos = null;
+        }
+      },
+      child: const SizedBox.expand(),
+    );
+  }
+
+  Widget _trafficLightButton({
+    required _TrafficLightKind kind,
+    required Color color,
+    required Color hoverColor,
+    required bool showGlyph,
+    required VoidCallback onTap,
+    VoidCallback? onLongPress,
+  }) {
+    return _markTopBarInteractive(
+      child: _TrafficLightButton(
+        kind: kind,
+        color: color,
+        hoverColor: hoverColor,
+        showGlyph: showGlyph,
+        onTap: onTap,
+        onLongPress: onLongPress,
+      ),
+    );
   }
 
   Widget _markTopBarInteractive({required Widget child}) {
@@ -2047,9 +2151,38 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     final leftPad = _showSidebar ? 0.0 : 32.0;
     final tabs = _visibleSessions;
 
-    return GestureDetector(
-      onPanStart: _handleTopBarPanStart,
+    return Listener(
       behavior: HitTestBehavior.translucent,
+      onPointerDown: (event) {
+        if (!kIsWeb && Platform.isMacOS && _topBarInteractivePointers.isEmpty) {
+          _topBarDragPointer = event.pointer;
+          _topBarDragStartPos = event.position;
+        }
+      },
+      onPointerMove: (event) {
+        if (_topBarDragPointer == event.pointer &&
+            _topBarDragStartPos != null &&
+            _topBarInteractivePointers.isEmpty) {
+          final delta = (event.position - _topBarDragStartPos!).distance;
+          if (delta > 4.0) {
+            _topBarDragPointer = null;
+            _topBarDragStartPos = null;
+            _systemChannel.invokeMethod('startWindowDrag');
+          }
+        }
+      },
+      onPointerUp: (event) {
+        if (_topBarDragPointer == event.pointer) {
+          _topBarDragPointer = null;
+          _topBarDragStartPos = null;
+        }
+      },
+      onPointerCancel: (event) {
+        if (_topBarDragPointer == event.pointer) {
+          _topBarDragPointer = null;
+          _topBarDragStartPos = null;
+        }
+      },
       child: Container(
         height: height,
         padding: EdgeInsets.fromLTRB(leftPad, 8, 12, 8),
@@ -2077,7 +2210,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
           decoration: BoxDecoration(
             color: HorizonColors.surfaceBright,
             borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: HorizonColors.borderSubtle),
+            border: null,
           ),
           child: Center(
             child: CustomPaint(
@@ -2188,7 +2321,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
             decoration: BoxDecoration(
               color: HorizonColors.surfaceBright,
               borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: HorizonColors.borderSubtle),
+              border: null,
             ),
             child: Center(
               child:
@@ -2260,7 +2393,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
             ),
           ),
           const SizedBox(width: 6),
-          Flexible(
+          Expanded(
             child: Text(
               detail,
               maxLines: 1,
@@ -2273,7 +2406,6 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
               ),
             ),
           ),
-          const Spacer(),
           const SizedBox(width: 8),
           SizedBox(
             width: 24,
@@ -2458,7 +2590,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                 decoration: BoxDecoration(
                   color: HorizonColors.surfaceBright,
                   borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: HorizonColors.borderSubtle),
+                  border: null,
                 ),
                 child: const Icon(
                   Icons.add_rounded,
@@ -2500,12 +2632,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                       ? HorizonColors.surfaceBright
                       : HorizonColors.surfaceVariant,
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color:
-                    isActive
-                        ? HorizonColors.accent.withValues(alpha: 0.5)
-                        : HorizonColors.borderSubtle,
-              ),
+              border: null,
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
@@ -2704,7 +2831,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                   decoration: BoxDecoration(
                     color: HorizonColors.surfaceBright,
                     borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: HorizonColors.borderSubtle),
+                    border: null,
                   ),
                   child: const Icon(
                     Icons.add_rounded,
@@ -2740,12 +2867,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                     ? HorizonColors.surfaceBright
                     : HorizonColors.surfaceVariant,
             borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color:
-                  isActive
-                      ? HorizonColors.accent.withValues(alpha: 0.45)
-                      : HorizonColors.borderSubtle,
-            ),
+            border: null,
           ),
           child: Center(
             child: Text(
@@ -2817,7 +2939,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                         decoration: BoxDecoration(
                           color: HorizonColors.surfaceBright,
                           borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: HorizonColors.borderSubtle),
+                          border: null,
                         ),
                         child: const Icon(
                           Icons.add_rounded,
@@ -2918,12 +3040,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                 ? HorizonColors.surfaceBright
                 : HorizonColors.surfaceVariant,
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color:
-              isActive
-                  ? HorizonColors.accent.withValues(alpha: 0.45)
-                  : HorizonColors.borderSubtle,
-        ),
+        border: null,
       ),
       child: MouseRegion(
         onEnter: (_) => setState(() => _hoveredGroupId = group.id),
@@ -3153,12 +3270,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
           decoration: BoxDecoration(
             color: isActive ? HorizonColors.surface : Colors.transparent,
             borderRadius: BorderRadius.circular(10),
-            border: Border.all(
-              color:
-                  isActive
-                      ? HorizonColors.accent.withValues(alpha: 0.45)
-                      : Colors.transparent,
-            ),
+            border: null,
           ),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
@@ -3695,6 +3807,145 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     }
     return false;
   }
+}
+
+enum _TrafficLightKind { close, minimize, zoom }
+
+class _TrafficLightButton extends StatefulWidget {
+  const _TrafficLightButton({
+    required this.kind,
+    required this.color,
+    required this.hoverColor,
+    required this.showGlyph,
+    required this.onTap,
+    this.onLongPress,
+  });
+
+  final _TrafficLightKind kind;
+  final Color color;
+  final Color hoverColor;
+  final bool showGlyph;
+  final VoidCallback onTap;
+  final VoidCallback? onLongPress;
+
+  @override
+  State<_TrafficLightButton> createState() => _TrafficLightButtonState();
+}
+
+class _TrafficLightButtonState extends State<_TrafficLightButton> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        onLongPress: widget.onLongPress,
+        child: SizedBox(
+          width: 15,
+          height: 15,
+          child: Center(
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 100),
+              width: 13,
+              height: 13,
+              decoration: BoxDecoration(
+                color: _hovered ? widget.hoverColor : widget.color,
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: Colors.black.withValues(alpha: 0.08),
+                  width: 0.5,
+                ),
+              ),
+              child: AnimatedOpacity(
+                duration: const Duration(milliseconds: 80),
+                opacity: widget.showGlyph ? 1 : 0,
+                child: CustomPaint(
+                  painter: _TrafficLightGlyphPainter(kind: widget.kind),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TrafficLightGlyphPainter extends CustomPainter {
+  const _TrafficLightGlyphPainter({required this.kind});
+
+  final _TrafficLightKind kind;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final glyphColor = switch (kind) {
+      _TrafficLightKind.close => const Color(0xFF990F0A),
+      _TrafficLightKind.minimize => const Color(0xFF985700),
+      _TrafficLightKind.zoom => const Color(0xFF0B6A1F),
+    };
+    final center = Offset(size.width / 2, size.height / 2);
+
+    switch (kind) {
+      case _TrafficLightKind.close:
+        final paint =
+            Paint()
+              ..color = glyphColor.withValues(alpha: 0.78)
+              ..strokeWidth = 1.1
+              ..strokeCap = StrokeCap.round
+              ..style = PaintingStyle.stroke;
+        const d = 2.35;
+        canvas.drawLine(
+          center.translate(-d, -d),
+          center.translate(d, d),
+          paint,
+        );
+        canvas.drawLine(
+          center.translate(d, -d),
+          center.translate(-d, d),
+          paint,
+        );
+      case _TrafficLightKind.minimize:
+        final paint =
+            Paint()
+              ..color = glyphColor.withValues(alpha: 0.78)
+              ..style = PaintingStyle.fill;
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(
+            Rect.fromCenter(center: center, width: 5.6, height: 1.45),
+            const Radius.circular(0.72),
+          ),
+          paint,
+        );
+      case _TrafficLightKind.zoom:
+        final fill =
+            Paint()
+              ..color = glyphColor.withValues(alpha: 0.78)
+              ..style = PaintingStyle.fill;
+        final topLeft =
+            Path()
+              ..moveTo(center.dx - 2.95, center.dy - 2.95)
+              ..lineTo(center.dx + 0.35, center.dy - 2.95)
+              ..lineTo(center.dx - 2.95, center.dy + 0.35)
+              ..close();
+        final bottomRight =
+            Path()
+              ..moveTo(center.dx + 2.95, center.dy + 2.95)
+              ..lineTo(center.dx - 0.35, center.dy + 2.95)
+              ..lineTo(center.dx + 2.95, center.dy - 0.35)
+              ..close();
+        canvas.drawPath(topLeft, fill);
+        canvas.drawPath(bottomRight, fill);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_TrafficLightGlyphPainter oldDelegate) =>
+      kind != oldDelegate.kind;
 }
 
 /// Sidebar toggle icon based on SF Symbols sidebar.left design.
