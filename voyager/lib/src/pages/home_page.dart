@@ -478,7 +478,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       });
       return;
     }
-    _restoreActiveGroupForCurrentSession();
+    if (_reconnecting) {
+      _restoreActiveGroupForCurrentSession();
+    }
     // Request sync for all sessions in the new group
     for (final sessionId in _visibleSessions) {
       _requestSyncIfNeeded(sessionId);

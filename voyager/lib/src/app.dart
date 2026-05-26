@@ -101,6 +101,12 @@ class VoyagerApp extends StatelessWidget {
           textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
         ),
       ),
+      drawerTheme: const DrawerThemeData(
+        elevation: 0,
+        shadowColor: Colors.transparent,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(),
+      ),
       snackBarTheme: SnackBarThemeData(
         backgroundColor: AppColors.surfaceVariant,
         contentTextStyle: const TextStyle(

@@ -360,7 +360,14 @@ class _GroupDrawerState extends State<GroupDrawer> {
     if (widget.embedded) {
       return Material(color: AppColors.surface, child: content);
     }
-    return Drawer(backgroundColor: AppColors.surface, child: content);
+    return Drawer(
+      backgroundColor: AppColors.surface,
+      surfaceTintColor: Colors.transparent,
+      shadowColor: Colors.transparent,
+      elevation: 0,
+      shape: const RoundedRectangleBorder(),
+      child: content,
+    );
   }
 
   Widget _buildGroupTile(TerminalGroup group, int index) {
@@ -379,12 +386,6 @@ class _GroupDrawerState extends State<GroupDrawer> {
         decoration: BoxDecoration(
           color: isActive ? AppColors.surfaceBright : AppColors.surfaceVariant,
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color:
-                isActive
-                    ? AppColors.accent.withValues(alpha: 0.45)
-                    : Colors.transparent,
-          ),
         ),
         child: Column(
           children: [
@@ -656,12 +657,6 @@ class _GroupDrawerState extends State<GroupDrawer> {
           decoration: BoxDecoration(
             color: isActive ? AppColors.surface : Colors.transparent,
             borderRadius: BorderRadius.circular(10),
-            border: Border.all(
-              color:
-                  isActive
-                      ? AppColors.accent.withValues(alpha: 0.45)
-                      : Colors.transparent,
-            ),
           ),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
