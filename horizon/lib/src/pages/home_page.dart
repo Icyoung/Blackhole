@@ -2824,13 +2824,13 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
               message: 'New group',
               child: InkWell(
                 onTap: _promptCreateGroup,
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(10),
                 child: Container(
                   width: 32,
                   height: 32,
                   decoration: BoxDecoration(
                     color: HorizonColors.surfaceBright,
-                    borderRadius: BorderRadius.circular(12),
+                    borderRadius: BorderRadius.circular(10),
                     border: null,
                   ),
                   child: const Icon(
@@ -2857,7 +2857,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       message: name,
       child: InkWell(
         onTap: () => _groupStore.setActiveGroup(group.id),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(10),
         child: Container(
           width: 32,
           height: 32,
@@ -2866,7 +2866,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
                 isActive
                     ? HorizonColors.surfaceBright
                     : HorizonColors.surfaceVariant,
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(10),
             border: null,
           ),
           child: Center(
@@ -3533,7 +3533,8 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     final terminal = _activeTerminal ?? _idleTerminal;
     final controller = _activeController ?? _idleController;
     final scrollController = _activeScrollController ?? _idleScrollController;
-    final padding = EdgeInsets.fromLTRB(12, 10, 12, _bottomBarHeight + 12);
+    const inset = 12.0;
+    final padding = EdgeInsets.fromLTRB(inset, inset, inset, _bottomBarHeight + inset);
 
     if (_activeSessionId == null) {
       return _buildEmptySessionState(padding);
@@ -3541,21 +3542,24 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
 
     return Padding(
       padding: padding,
-      child: TerminalView(
-        terminal,
-        key: _activeViewKey ?? _idleTerminalViewKey,
-        controller: controller,
-        scrollController: scrollController,
-        theme: HorizonTerminalTheme.light,
-        autoResize: false,
-        autofocus: true,
-        deleteDetection: deleteDetection,
-        hardwareKeyboardOnly: _useHardwareKeyboardOnly,
-        readOnly: _showHHKB,
-        keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
-        backgroundOpacity: 1.0,
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-        textStyle: buildTerminalStyle(fontSize: 10),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: TerminalView(
+          terminal,
+          key: _activeViewKey ?? _idleTerminalViewKey,
+          controller: controller,
+          scrollController: scrollController,
+          theme: HorizonTerminalTheme.light,
+          autoResize: false,
+          autofocus: true,
+          deleteDetection: deleteDetection,
+          hardwareKeyboardOnly: _useHardwareKeyboardOnly,
+          readOnly: _showHHKB,
+          keyboardType: _showHHKB ? TextInputType.none : TextInputType.text,
+          backgroundOpacity: 1.0,
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+          textStyle: buildTerminalStyle(fontSize: 10),
+        ),
       ),
     );
   }
