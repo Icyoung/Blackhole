@@ -137,6 +137,15 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     defaultValue: true,
   );
   static const Duration _enterProbeWindow = Duration(milliseconds: 1200);
+
+  // Cap total terminal-log disk usage. The output log previously grew
+  // unbounded (observed at 162 GiB filling the disk). Each log family is
+  // capped via single-backup rotation: the live file is rotated to
+  // "<name>.1" once it reaches half the cap, so live + backup together never
+  // exceed _maxTerminalLogBytes.
+  static const int _maxTerminalLogBytes = 3 * 1024 * 1024 * 1024; // 3 GiB
+  final Map<String, int> _terminalLogSizes = {};
+
   String? _terminalOutputLogPath;
   String? _terminalInputLogPath;
   DateTime? _enterProbeUntil;
@@ -797,9 +806,19 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     required String label,
   }) {
     try {
-      File(
-        path,
-      ).writeAsStringSync(content, mode: FileMode.writeOnlyAppend, flush: true);
+      final file = File(path);
+      // Track size in memory to avoid a stat() on every write.
+      final written = content.length;
+      final current = (_terminalLogSizes[path] ??= file.existsSync() ? file.lengthSync() : 0);
+      // Rotate at half the cap so live + backup never exceed the full cap.
+      if (current >= _maxTerminalLogBytes ~/ 2) {
+        final backup = File('$path.1');
+        if (backup.existsSync()) backup.deleteSync();
+        file.renameSync('$path.1');
+        _terminalLogSizes[path] = 0;
+      }
+      file.writeAsStringSync(content, mode: FileMode.writeOnlyAppend, flush: true);
+      _terminalLogSizes[path] = (_terminalLogSizes[path] ?? 0) + written;
     } catch (error) {
       debugPrint('[Horizon] Failed to append terminal $label log: $error');
     }
@@ -811,10 +830,10 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
             .resolve('blackhole_terminal_trace.log')
             .toFilePath();
     try {
-      File(path).writeAsStringSync(
+      _appendTerminalLog(
+        path,
         '[${DateTime.now().toIso8601String()}] $line\n',
-        mode: FileMode.writeOnlyAppend,
-        flush: true,
+        label: 'trace',
       );
     } catch (_) {
       // Best-effort tracing only.
