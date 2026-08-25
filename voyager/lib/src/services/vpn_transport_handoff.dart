@@ -1,5 +1,10 @@
 import 'transport_models.dart';
 
+const kVpnAppWebsocketHost = '10.13.37.1';
+const kVpnAppWebsocketPort = 9527;
+
+bool isVpnAppWebsocketHost(String? host) => host == kVpnAppWebsocketHost;
+
 enum VpnTunnelMode {
   direct,
   relay,
@@ -14,6 +19,8 @@ enum VpnTunnelMode {
     return VpnTunnelMode.unknown;
   }
 }
+
+enum VpnHostInfoAction { ignore, markDirect, fallback }
 
 class VpnTransportEndpoint {
   const VpnTransportEndpoint({required this.serverIp, required this.lanPort});
@@ -40,6 +47,7 @@ class VpnTunnelSnapshot {
     this.udpPacketsIn,
     this.wgRxBytes,
     this.directSessionReady,
+    this.timeSinceLastHandshakeSecs,
     this.error,
   });
 
@@ -53,6 +61,7 @@ class VpnTunnelSnapshot {
   final int? udpPacketsIn;
   final int? wgRxBytes;
   final bool? directSessionReady;
+  final int? timeSinceLastHandshakeSecs;
   final String? error;
 
   factory VpnTunnelSnapshot.fromJson(Map<String, dynamic> map) {
@@ -71,6 +80,9 @@ class VpnTunnelSnapshot {
       tunPacketsIn: (map['tunPacketsIn'] as num?)?.toInt(),
       udpPacketsIn: (map['udpPacketsIn'] as num?)?.toInt(),
       wgRxBytes: (map['wgRxBytes'] as num?)?.toInt(),
+      directSessionReady: map['directSessionReady'] as bool?,
+      timeSinceLastHandshakeSecs: (map['timeSinceLastHandshakeSecs'] as num?)
+          ?.toInt(),
       error: map['error'] as String?,
     );
   }
@@ -124,6 +136,7 @@ class VpnTransportHandoffCoordinator {
   bool _wasVpnConnected = false;
   bool _pendingSwitch = false;
   bool _suppressFallback = false;
+  bool _switchSuppressed = false;
   bool _readyForTransportSwitch = false;
   VpnTunnelSnapshot? _lastSnapshot;
   DateTime? _connectedAt;
@@ -140,6 +153,7 @@ class VpnTransportHandoffCoordinator {
     _wasVpnConnected = false;
     _pendingSwitch = false;
     _suppressFallback = false;
+    _switchSuppressed = false;
     _readyForTransportSwitch = false;
     _lastSnapshot = null;
     _connectedAt = null;
@@ -157,6 +171,15 @@ class VpnTransportHandoffCoordinator {
 
   void clearFallbackSuppression() {
     _suppressFallback = false;
+  }
+
+  void suppressSwitch() {
+    _switchSuppressed = true;
+    _pendingSwitch = false;
+  }
+
+  void clearSwitchSuppression() {
+    _switchSuppressed = false;
   }
 
   VpnTransportEndpoint? restoreEndpointFromNativeStatus({
@@ -180,8 +203,7 @@ class VpnTransportHandoffCoordinator {
     }
     return VpnTransportEndpoint(
       serverIp: serverIp,
-      lanPort:
-          snapshot.lanPort ?? _defaultLanPortFor(snapshot.mode, defaultLanPort),
+      lanPort: snapshot.lanPort ?? defaultLanPort,
     );
   }
 
@@ -193,31 +215,27 @@ class VpnTransportHandoffCoordinator {
     DateTime? now,
   }) {
     final timestamp = now ?? DateTime.now().toUtc();
-    final desiredTransportKind = transportKindForMode(vpnMode);
-    if (!_pendingSwitch ||
+    if (_switchSuppressed ||
+        !_pendingSwitch ||
         !vpnConnected ||
+        vpnMode == VpnTunnelMode.relay ||
         endpoint == null ||
-        !_needsTransportSwitch(
-          activeTransportKind: activeTransportKind,
-          desiredTransportKind: desiredTransportKind,
-        )) {
+        !_needsInTunnelHandoff(activeTransportKind)) {
       return const VpnTransportDecision.none();
     }
     _readyForTransportSwitch = _isReadyForTransportSwitch(
-      mode: vpnMode,
       connectedAt: _connectedAt,
       now: timestamp,
       snapshot: _lastSnapshot,
+      endpoint: endpoint,
     );
     if (!_readyForTransportSwitch) {
       return const VpnTransportDecision.none();
     }
-    _pendingSwitch = false;
-    _lastTransportSwitchAt = timestamp;
-    return VpnTransportDecision.switchTransport(
+    return _switchToInTunnel(
       endpoint: endpoint,
-      transportKind: desiredTransportKind,
       reason: 'primary_connection_opened',
+      timestamp: timestamp,
     );
   }
 
@@ -230,33 +248,31 @@ class VpnTransportHandoffCoordinator {
   }) {
     final timestamp = now ?? DateTime.now().toUtc();
     _lastSnapshot = snapshot;
-    final desiredTransportKind = transportKindForMode(snapshot.mode);
     if (snapshot.isConnected && !_wasVpnConnected && endpoint != null) {
       _wasVpnConnected = true;
       _connectedAt = timestamp;
       _disconnectObservedAt = null;
       final readyForSwitch = _isReadyForTransportSwitch(
-        mode: snapshot.mode,
         connectedAt: _connectedAt,
         now: timestamp,
         snapshot: snapshot,
+        endpoint: endpoint,
       );
       _readyForTransportSwitch = readyForSwitch;
+      if (_switchSuppressed || snapshot.mode == VpnTunnelMode.relay) {
+        _pendingSwitch = true;
+        return const VpnTransportDecision.none();
+      }
       if (primaryConnectionConnected &&
-          _needsTransportSwitch(
-            activeTransportKind: activeTransportKind,
-            desiredTransportKind: desiredTransportKind,
-          )) {
+          _needsInTunnelHandoff(activeTransportKind)) {
         if (!readyForSwitch) {
           _pendingSwitch = true;
           return const VpnTransportDecision.none();
         }
-        _pendingSwitch = false;
-        _lastTransportSwitchAt = timestamp;
-        return VpnTransportDecision.switchTransport(
+        return _switchToInTunnel(
           endpoint: endpoint,
-          transportKind: desiredTransportKind,
           reason: 'vpn_connected',
+          timestamp: timestamp,
         );
       }
       _pendingSwitch = true;
@@ -268,89 +284,50 @@ class VpnTransportHandoffCoordinator {
         _pendingSwitch &&
         endpoint != null) {
       final readyForSwitch = _isReadyForTransportSwitch(
-        mode: snapshot.mode,
         connectedAt: _connectedAt,
         now: timestamp,
         snapshot: snapshot,
+        endpoint: endpoint,
       );
       _readyForTransportSwitch = readyForSwitch;
-      if (readyForSwitch &&
+      if (!_switchSuppressed &&
+          snapshot.mode != VpnTunnelMode.relay &&
+          readyForSwitch &&
           primaryConnectionConnected &&
-          _needsTransportSwitch(
-            activeTransportKind: activeTransportKind,
-            desiredTransportKind: desiredTransportKind,
-          )) {
-        _pendingSwitch = false;
-        _lastTransportSwitchAt = timestamp;
-        return VpnTransportDecision.switchTransport(
+          _needsInTunnelHandoff(activeTransportKind)) {
+        return _switchToInTunnel(
           endpoint: endpoint,
-          transportKind: desiredTransportKind,
           reason: 'vpn_stable',
+          timestamp: timestamp,
         );
       }
     }
 
-    if (snapshot.isConnected &&
-        primaryConnectionConnected &&
-        endpoint != null &&
-        _isVpnTransport(activeTransportKind) &&
-        _needsTransportSwitch(
-          activeTransportKind: activeTransportKind,
-          desiredTransportKind: desiredTransportKind,
-        )) {
-      final lastSwitchAt = _lastTransportSwitchAt;
-      if (lastSwitchAt != null &&
-          !timestamp.isBefore(lastSwitchAt) &&
-          timestamp.difference(lastSwitchAt) < const Duration(seconds: 2)) {
-        return const VpnTransportDecision.none();
-      }
-      final readyForSwitch = _isReadyForTransportSwitch(
-        mode: snapshot.mode,
-        connectedAt: _connectedAt,
-        now: timestamp,
-        snapshot: snapshot,
-      );
-      _readyForTransportSwitch = readyForSwitch;
-      if (readyForSwitch) {
-        _lastTransportSwitchAt = timestamp;
-        return VpnTransportDecision.switchTransport(
-          endpoint: endpoint,
-          transportKind: desiredTransportKind,
-          reason: 'vpn_mode_changed',
-        );
-      }
-    }
-
-    // Re-arm: a prior switch decision was consumed but the transport never
-    // actually changed (e.g., VPN briefly errored and recovered within the
-    // grace window). Retry after a cooldown to avoid rapid-fire.
     if (snapshot.isConnected &&
         _wasVpnConnected &&
         !_pendingSwitch &&
+        !_switchSuppressed &&
+        snapshot.mode != VpnTunnelMode.relay &&
         endpoint != null &&
         primaryConnectionConnected &&
-        !_isVpnTransport(activeTransportKind) &&
-        _needsTransportSwitch(
-          activeTransportKind: activeTransportKind,
-          desiredTransportKind: desiredTransportKind,
-        )) {
+        _needsInTunnelHandoff(activeTransportKind)) {
       final lastSwitchAt = _lastTransportSwitchAt;
-      final cooldownElapsed = lastSwitchAt == null ||
+      final cooldownElapsed =
+          lastSwitchAt == null ||
           timestamp.difference(lastSwitchAt) >= _fallbackSuppressionWindow;
       if (cooldownElapsed) {
         final readyForSwitch = _isReadyForTransportSwitch(
-          mode: snapshot.mode,
           connectedAt: _connectedAt,
           now: timestamp,
           snapshot: snapshot,
+          endpoint: endpoint,
         );
         _readyForTransportSwitch = readyForSwitch;
         if (readyForSwitch) {
-          _lastTransportSwitchAt = timestamp;
-          return VpnTransportDecision.switchTransport(
+          return _switchToInTunnel(
             endpoint: endpoint,
-            transportKind: desiredTransportKind,
             reason: 'vpn_rearm_after_stale_switch',
+            timestamp: timestamp,
           );
         }
       }
@@ -386,51 +363,82 @@ class VpnTransportHandoffCoordinator {
     return const VpnTransportDecision.none();
   }
 
+  VpnTransportDecision _switchToInTunnel({
+    required VpnTransportEndpoint endpoint,
+    required String reason,
+    required DateTime timestamp,
+  }) {
+    _pendingSwitch = false;
+    _lastTransportSwitchAt = timestamp;
+    return VpnTransportDecision.switchTransport(
+      endpoint: endpoint,
+      transportKind: TransportKind.unknown,
+      reason: reason,
+    );
+  }
+
   static TransportKind transportKindForMode(VpnTunnelMode mode) {
     return switch (mode) {
       VpnTunnelMode.relay => TransportKind.unknown,
       VpnTunnelMode.direct => TransportKind.wireguardDirect,
-      VpnTunnelMode.unknown => TransportKind.wireguardDirect,
+      VpnTunnelMode.unknown => TransportKind.unknown,
     };
   }
 
-  static bool _isVpnTransport(TransportKind kind) {
-    return kind == TransportKind.wireguardDirect;
+  static VpnHostInfoAction hostInfoAction({
+    required String? socketHost,
+    required bool? vpnPeer,
+  }) {
+    if (!isVpnAppWebsocketHost(socketHost)) {
+      return VpnHostInfoAction.ignore;
+    }
+    if (vpnPeer == true) {
+      return VpnHostInfoAction.markDirect;
+    }
+    return VpnHostInfoAction.fallback;
   }
 
-  static bool _needsTransportSwitch({
-    required TransportKind activeTransportKind,
-    required TransportKind desiredTransportKind,
+  static bool isStayOnWs({
+    required bool handoffPending,
+    required TransportKind activeKind,
+    required String? socketHost,
   }) {
-    if (activeTransportKind == desiredTransportKind) {
+    if (handoffPending) {
       return false;
     }
-    if (!_isVpnTransport(desiredTransportKind)) {
+    if (activeKind == TransportKind.wireguardDirect) {
+      return false;
+    }
+    if (isVpnAppWebsocketHost(socketHost)) {
       return false;
     }
     return true;
   }
 
-  static int _defaultLanPortFor(VpnTunnelMode mode, int defaultLanPort) {
-    return defaultLanPort;
+  static bool _needsInTunnelHandoff(TransportKind activeTransportKind) {
+    return activeTransportKind == TransportKind.wormholeRelay ||
+        activeTransportKind == TransportKind.lanDirect;
   }
 
-  static bool satisfiesDirectReadinessGate(VpnTunnelSnapshot snapshot) {
-    final hasInboundUdp = (snapshot.udpPacketsIn ?? 0) > 0;
-    final hasTunnelTraffic = (snapshot.tunPacketsIn ?? 0) > 0;
-    final hasWireGuardRx = (snapshot.wgRxBytes ?? 0) > 0;
-    // Primary gate: inbound UDP proves the WG handshake completed and the
-    // peer can reach us. Tunnel/WG data counters are a bonus signal but not
-    // required — Horizon's TUN routing may not produce data packets before
-    // the transport switch.
-    final nativeReady = snapshot.directSessionReady ?? false;
-    return hasInboundUdp && (hasTunnelTraffic || hasWireGuardRx || nativeReady);
+  static bool satisfiesDirectReadinessGate(
+    VpnTunnelSnapshot snapshot, {
+    required VpnTransportEndpoint? endpoint,
+  }) {
+    if (!isVpnAppWebsocketHost(endpoint?.serverIp)) {
+      return false;
+    }
+    if (!snapshot.isConnected) {
+      return false;
+    }
+    final handshakeSecs = snapshot.timeSinceLastHandshakeSecs;
+    final handshakeReady = handshakeSecs != null && handshakeSecs >= 0;
+    return handshakeReady || snapshot.directSessionReady == true;
   }
 
   bool _isReadyForTransportSwitch({
-    required VpnTunnelMode mode,
     required DateTime? connectedAt,
     required DateTime now,
+    required VpnTransportEndpoint? endpoint,
     VpnTunnelSnapshot? snapshot,
   }) {
     final readySince = connectedAt;
@@ -440,6 +448,6 @@ class VpnTransportHandoffCoordinator {
     if (snapshot == null) {
       return false;
     }
-    return satisfiesDirectReadinessGate(snapshot);
+    return satisfiesDirectReadinessGate(snapshot, endpoint: endpoint);
   }
 }

@@ -2,7 +2,65 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:voyager/src/services/transport_models.dart';
 import 'package:voyager/src/services/vpn_transport_handoff.dart';
 
+const _endpoint = VpnTransportEndpoint(
+  serverIp: kVpnAppWebsocketHost,
+  lanPort: kVpnAppWebsocketPort,
+);
+
+VpnTunnelSnapshot _snapshot({
+  bool isActive = true,
+  bool isConnected = true,
+  VpnTunnelMode mode = VpnTunnelMode.direct,
+  int? tunPacketsIn,
+  int? udpPacketsIn,
+  int? wgRxBytes,
+  bool? directSessionReady,
+  int? timeSinceLastHandshakeSecs,
+  String? error,
+}) {
+  return VpnTunnelSnapshot(
+    isActive: isActive,
+    isConnected: isConnected,
+    mode: mode,
+    serverIp: kVpnAppWebsocketHost,
+    lanPort: kVpnAppWebsocketPort,
+    tunPacketsIn: tunPacketsIn,
+    udpPacketsIn: udpPacketsIn,
+    wgRxBytes: wgRxBytes,
+    directSessionReady: directSessionReady,
+    timeSinceLastHandshakeSecs: timeSinceLastHandshakeSecs,
+    error: error,
+  );
+}
+
 void main() {
+  group('VpnTunnelSnapshot.fromJson', () {
+    test('parses handshake fields that used to be dropped', () {
+      final snapshot = VpnTunnelSnapshot.fromJson({
+        'status': 'connected',
+        'connectionMode': 'direct',
+        'serverIp': kVpnAppWebsocketHost,
+        'lanPort': kVpnAppWebsocketPort,
+        'directSessionReady': true,
+        'timeSinceLastHandshakeSecs': 4,
+      });
+
+      expect(snapshot.isConnected, isTrue);
+      expect(snapshot.directSessionReady, isTrue);
+      expect(snapshot.timeSinceLastHandshakeSecs, 4);
+    });
+
+    test('keeps missing handshake fields null', () {
+      final snapshot = VpnTunnelSnapshot.fromJson({
+        'status': 'connected',
+        'udpPacketsIn': 9,
+      });
+
+      expect(snapshot.directSessionReady, isNull);
+      expect(snapshot.timeSinceLastHandshakeSecs, isNull);
+    });
+  });
+
   group('VpnTransportHandoffCoordinator', () {
     test('restores endpoint from active vpn status using default port', () {
       final coordinator = VpnTransportHandoffCoordinator();
@@ -13,14 +71,14 @@ void main() {
           isActive: true,
           isConnected: true,
           mode: VpnTunnelMode.direct,
-          serverIp: '10.13.37.1',
+          serverIp: kVpnAppWebsocketHost,
         ),
-        defaultLanPort: 9527,
+        defaultLanPort: kVpnAppWebsocketPort,
       );
 
       expect(restored, isNotNull);
-      expect(restored?.serverIp, '10.13.37.1');
-      expect(restored?.lanPort, 9527);
+      expect(restored?.serverIp, kVpnAppWebsocketHost);
+      expect(restored?.lanPort, kVpnAppWebsocketPort);
     });
 
     test(
@@ -34,87 +92,53 @@ void main() {
             isActive: false,
             isConnected: false,
             mode: VpnTunnelMode.unknown,
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
+            serverIp: kVpnAppWebsocketHost,
+            lanPort: kVpnAppWebsocketPort,
             error: 'WireGuard handshake timed out',
           ),
-          defaultLanPort: 9527,
+          defaultLanPort: kVpnAppWebsocketPort,
         );
 
         expect(restored, isNull);
       },
     );
 
-    test('switches transport when vpn direct becomes connected on wormhole',
-        () {
+    test('switches in-tunnel WS as unknown after handshake dwell', () {
       final coordinator = VpnTransportHandoffCoordinator();
       final connectedAt = DateTime.utc(2026, 1, 1, 0, 0, 0);
 
-      // First status: connected but not ready (no traffic yet).
       coordinator.onVpnStatusChanged(
-        snapshot: const VpnTunnelSnapshot(
-          isActive: true,
-          isConnected: true,
-          mode: VpnTunnelMode.direct,
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-          tunPacketsIn: 0,
-          udpPacketsIn: 0,
-          wgRxBytes: 0,
-        ),
+        snapshot: _snapshot(),
         primaryConnectionConnected: true,
         activeTransportKind: TransportKind.wormholeRelay,
-        endpoint: const VpnTransportEndpoint(
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-        ),
+        endpoint: _endpoint,
         now: connectedAt,
       );
 
-      // Second status: traffic flowing, readiness gate satisfied.
       final decision = coordinator.onVpnStatusChanged(
-        snapshot: const VpnTunnelSnapshot(
-          isActive: true,
-          isConnected: true,
-          mode: VpnTunnelMode.direct,
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-          tunPacketsIn: 1,
-          udpPacketsIn: 1,
-          wgRxBytes: 128,
-        ),
+        snapshot: _snapshot(timeSinceLastHandshakeSecs: 1),
         primaryConnectionConnected: true,
         activeTransportKind: TransportKind.wormholeRelay,
-        endpoint: const VpnTransportEndpoint(
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-        ),
+        endpoint: _endpoint,
         now: connectedAt.add(const Duration(seconds: 3)),
       );
 
       expect(decision.shouldSwitch, isTrue);
-      expect(decision.transportKind, TransportKind.wireguardDirect);
+      expect(decision.transportKind, TransportKind.unknown);
+      expect(
+        decision.endpoint?.websocketUri.toString(),
+        'ws://$kVpnAppWebsocketHost:$kVpnAppWebsocketPort/ws',
+      );
     });
 
     test('arms pending switch until primary connection opens', () {
       final coordinator = VpnTransportHandoffCoordinator();
 
       final initial = coordinator.onVpnStatusChanged(
-        snapshot: const VpnTunnelSnapshot(
-          isActive: true,
-          isConnected: true,
-          mode: VpnTunnelMode.direct,
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-          udpPacketsIn: 1,
-          wgRxBytes: 128,
-        ),
+        snapshot: _snapshot(timeSinceLastHandshakeSecs: 0),
         primaryConnectionConnected: false,
         activeTransportKind: TransportKind.unknown,
-        endpoint: const VpnTransportEndpoint(
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-        ),
+        endpoint: _endpoint,
         now: DateTime.utc(2026, 1, 1, 0, 0, 0),
       );
 
@@ -125,354 +149,195 @@ void main() {
         vpnConnected: true,
         vpnMode: VpnTunnelMode.direct,
         activeTransportKind: TransportKind.wormholeRelay,
-        endpoint: const VpnTransportEndpoint(
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-        ),
+        endpoint: _endpoint,
         now: DateTime.utc(2026, 1, 1, 0, 0, 3),
       );
 
       expect(resumed.shouldSwitch, isTrue);
-      expect(resumed.transportKind, TransportKind.wireguardDirect);
+      expect(resumed.transportKind, TransportKind.unknown);
     });
 
     test('falls back when vpn disconnects after being connected', () {
       final coordinator = VpnTransportHandoffCoordinator();
       final connectedAt = DateTime.utc(2026, 1, 1, 0, 0, 0);
 
-      // Connect with direct mode.
       coordinator.onVpnStatusChanged(
-        snapshot: const VpnTunnelSnapshot(
-          isActive: true,
-          isConnected: true,
-          mode: VpnTunnelMode.direct,
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-          tunPacketsIn: 1,
-          udpPacketsIn: 1,
-          wgRxBytes: 128,
-        ),
+        snapshot: _snapshot(timeSinceLastHandshakeSecs: 1),
         primaryConnectionConnected: true,
         activeTransportKind: TransportKind.wormholeRelay,
-        endpoint: const VpnTransportEndpoint(
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-        ),
+        endpoint: _endpoint,
         now: connectedAt,
       );
 
-      // Disconnect observed — within grace window, no fallback yet.
       final disconnected = coordinator.onVpnStatusChanged(
-        snapshot: const VpnTunnelSnapshot(
-          isActive: false,
-          isConnected: false,
-          mode: VpnTunnelMode.direct,
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-        ),
+        snapshot: _snapshot(isActive: false, isConnected: false),
         primaryConnectionConnected: false,
         activeTransportKind: TransportKind.wireguardDirect,
-        endpoint: const VpnTransportEndpoint(
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-        ),
+        endpoint: _endpoint,
         now: connectedAt.add(const Duration(seconds: 10)),
       );
 
       expect(disconnected.shouldFallback, isFalse);
 
-      // After grace window — fallback to primary.
       final afterGrace = coordinator.onVpnStatusChanged(
-        snapshot: const VpnTunnelSnapshot(
-          isActive: false,
-          isConnected: false,
-          mode: VpnTunnelMode.direct,
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-        ),
+        snapshot: _snapshot(isActive: false, isConnected: false),
         primaryConnectionConnected: false,
         activeTransportKind: TransportKind.wireguardDirect,
-        endpoint: const VpnTransportEndpoint(
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-        ),
+        endpoint: _endpoint,
         now: connectedAt.add(const Duration(seconds: 15)),
       );
 
       expect(afterGrace.shouldFallback, isTrue);
     });
 
-    test(
-      'direct handoff waits for stable inbound traffic before switching',
-      () {
-        final coordinator = VpnTransportHandoffCoordinator();
-        final connectedAt = DateTime.utc(2026, 1, 1, 0, 0, 0);
+    test('direct handoff waits for handshake fields before switching', () {
+      final coordinator = VpnTransportHandoffCoordinator();
+      final connectedAt = DateTime.utc(2026, 1, 1, 0, 0, 0);
 
-        final initial = coordinator.onVpnStatusChanged(
-          snapshot: const VpnTunnelSnapshot(
-            isActive: true,
-            isConnected: true,
-            mode: VpnTunnelMode.direct,
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-            tunPacketsIn: 0,
-            udpPacketsIn: 0,
-            wgRxBytes: 0,
-          ),
-          primaryConnectionConnected: true,
-          activeTransportKind: TransportKind.wormholeRelay,
+      final initial = coordinator.onVpnStatusChanged(
+        snapshot: _snapshot(udpPacketsIn: 4, tunPacketsIn: 2, wgRxBytes: 256),
+        primaryConnectionConnected: true,
+        activeTransportKind: TransportKind.wormholeRelay,
+        endpoint: _endpoint,
+        now: connectedAt,
+      );
+
+      expect(initial.type, VpnTransportDecisionType.none);
+      expect(coordinator.pendingSwitch, isTrue);
+
+      final stillPending = coordinator.onVpnStatusChanged(
+        snapshot: _snapshot(udpPacketsIn: 4, tunPacketsIn: 2, wgRxBytes: 256),
+        primaryConnectionConnected: true,
+        activeTransportKind: TransportKind.wormholeRelay,
+        endpoint: _endpoint,
+        now: connectedAt.add(const Duration(seconds: 3)),
+      );
+      expect(stillPending.type, VpnTransportDecisionType.none);
+      expect(coordinator.pendingSwitch, isTrue);
+
+      final ready = coordinator.onVpnStatusChanged(
+        snapshot: _snapshot(directSessionReady: true),
+        primaryConnectionConnected: true,
+        activeTransportKind: TransportKind.wormholeRelay,
+        endpoint: _endpoint,
+        now: connectedAt.add(const Duration(seconds: 3)),
+      );
+
+      expect(ready.shouldSwitch, isTrue);
+      expect(ready.transportKind, TransportKind.unknown);
+    });
+
+    test('udpPacketsIn alone does not satisfy the readiness gate', () {
+      expect(
+        VpnTransportHandoffCoordinator.satisfiesDirectReadinessGate(
+          _snapshot(udpPacketsIn: 4, tunPacketsIn: 0, wgRxBytes: 2048),
+          endpoint: _endpoint,
+        ),
+        isFalse,
+      );
+    });
+
+    test('missing handshake fields fail the gate closed', () {
+      expect(
+        VpnTransportHandoffCoordinator.satisfiesDirectReadinessGate(
+          _snapshot(),
+          endpoint: _endpoint,
+        ),
+        isFalse,
+      );
+    });
+
+    test('timeSinceLastHandshakeSecs >= 0 satisfies the gate', () {
+      expect(
+        VpnTransportHandoffCoordinator.satisfiesDirectReadinessGate(
+          _snapshot(timeSinceLastHandshakeSecs: 0),
+          endpoint: _endpoint,
+        ),
+        isTrue,
+      );
+    });
+
+    test('directSessionReady true satisfies the gate', () {
+      expect(
+        VpnTransportHandoffCoordinator.satisfiesDirectReadinessGate(
+          _snapshot(directSessionReady: true),
+          endpoint: _endpoint,
+        ),
+        isTrue,
+      );
+    });
+
+    test('non-10.13.37.1 endpoint fails the gate closed', () {
+      expect(
+        VpnTransportHandoffCoordinator.satisfiesDirectReadinessGate(
+          _snapshot(directSessionReady: true, timeSinceLastHandshakeSecs: 1),
           endpoint: const VpnTransportEndpoint(
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
+            serverIp: '192.168.1.20',
+            lanPort: kVpnAppWebsocketPort,
           ),
-          now: connectedAt,
-        );
+        ),
+        isFalse,
+      );
+    });
 
-        expect(initial.type, VpnTransportDecisionType.none);
-        expect(coordinator.pendingSwitch, isTrue);
-
-        final ready = coordinator.onVpnStatusChanged(
-          snapshot: const VpnTunnelSnapshot(
-            isActive: true,
-            isConnected: true,
-            mode: VpnTunnelMode.direct,
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-            tunPacketsIn: 2,
-            udpPacketsIn: 2,
-            wgRxBytes: 256,
+    test('disconnected native status fails the gate closed', () {
+      expect(
+        VpnTransportHandoffCoordinator.satisfiesDirectReadinessGate(
+          _snapshot(
+            isConnected: false,
+            directSessionReady: true,
+            timeSinceLastHandshakeSecs: 1,
           ),
-          primaryConnectionConnected: true,
-          activeTransportKind: TransportKind.wormholeRelay,
-          endpoint: const VpnTransportEndpoint(
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-          ),
-          now: connectedAt.add(const Duration(seconds: 3)),
-        );
-
-        expect(ready.shouldSwitch, isTrue);
-        expect(ready.transportKind, TransportKind.wireguardDirect);
-      },
-    );
-
-    test(
-      'direct handoff accepts inbound udp plus wireguard rx bytes even without tun packets',
-      () {
-        final coordinator = VpnTransportHandoffCoordinator();
-        final connectedAt = DateTime.utc(2026, 1, 1, 0, 0, 0);
-
-        coordinator.onVpnStatusChanged(
-          snapshot: const VpnTunnelSnapshot(
-            isActive: true,
-            isConnected: true,
-            mode: VpnTunnelMode.direct,
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-            tunPacketsIn: 0,
-            udpPacketsIn: 0,
-            wgRxBytes: 0,
-          ),
-          primaryConnectionConnected: true,
-          activeTransportKind: TransportKind.wormholeRelay,
-          endpoint: const VpnTransportEndpoint(
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-          ),
-          now: connectedAt,
-        );
-
-        final ready = coordinator.onVpnStatusChanged(
-          snapshot: const VpnTunnelSnapshot(
-            isActive: true,
-            isConnected: true,
-            mode: VpnTunnelMode.direct,
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-            tunPacketsIn: 0,
-            udpPacketsIn: 4,
-            wgRxBytes: 2048,
-          ),
-          primaryConnectionConnected: true,
-          activeTransportKind: TransportKind.wormholeRelay,
-          endpoint: const VpnTransportEndpoint(
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-          ),
-          now: connectedAt.add(const Duration(seconds: 3)),
-        );
-
-        expect(
-          VpnTransportHandoffCoordinator.satisfiesDirectReadinessGate(
-            const VpnTunnelSnapshot(
-              isActive: true,
-              isConnected: true,
-              mode: VpnTunnelMode.direct,
-              serverIp: '10.13.37.1',
-              lanPort: 9529,
-              tunPacketsIn: 0,
-              udpPacketsIn: 4,
-              wgRxBytes: 2048,
-            ),
-          ),
-          isTrue,
-        );
-        expect(ready.shouldSwitch, isTrue);
-        expect(ready.transportKind, TransportKind.wireguardDirect);
-      },
-    );
-
-    test(
-      'direct handoff stays pending when inbound udp has not been observed',
-      () {
-        final coordinator = VpnTransportHandoffCoordinator();
-        final connectedAt = DateTime.utc(2026, 1, 1, 0, 0, 0);
-
-        coordinator.onVpnStatusChanged(
-          snapshot: const VpnTunnelSnapshot(
-            isActive: true,
-            isConnected: true,
-            mode: VpnTunnelMode.direct,
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-            tunPacketsIn: 0,
-            udpPacketsIn: 0,
-            wgRxBytes: 0,
-          ),
-          primaryConnectionConnected: true,
-          activeTransportKind: TransportKind.wormholeRelay,
-          endpoint: const VpnTransportEndpoint(
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-          ),
-          now: connectedAt,
-        );
-
-        final notReady = coordinator.onVpnStatusChanged(
-          snapshot: const VpnTunnelSnapshot(
-            isActive: true,
-            isConnected: true,
-            mode: VpnTunnelMode.direct,
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-            tunPacketsIn: 7,
-            udpPacketsIn: 0,
-            wgRxBytes: 4096,
-          ),
-          primaryConnectionConnected: true,
-          activeTransportKind: TransportKind.wormholeRelay,
-          endpoint: const VpnTransportEndpoint(
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-          ),
-          now: connectedAt.add(const Duration(seconds: 3)),
-        );
-
-        expect(
-          VpnTransportHandoffCoordinator.satisfiesDirectReadinessGate(
-            const VpnTunnelSnapshot(
-              isActive: true,
-              isConnected: true,
-              mode: VpnTunnelMode.direct,
-              serverIp: '10.13.37.1',
-              lanPort: 9529,
-              tunPacketsIn: 7,
-              udpPacketsIn: 0,
-              wgRxBytes: 4096,
-            ),
-          ),
-          isFalse,
-        );
-        expect(notReady.type, VpnTransportDecisionType.none);
-        expect(coordinator.pendingSwitch, isTrue);
-      },
-    );
+          endpoint: _endpoint,
+        ),
+        isFalse,
+      );
+    });
 
     test('recent vpn switch suppresses immediate fallback flap', () {
       final coordinator = VpnTransportHandoffCoordinator();
       final connectedAt = DateTime.utc(2026, 1, 1, 0, 0, 0);
-      const endpoint = VpnTransportEndpoint(
-        serverIp: '10.13.37.1',
-        lanPort: 9529,
-      );
 
-      // First: connect and switch to wireguardDirect.
       coordinator.onVpnStatusChanged(
-        snapshot: const VpnTunnelSnapshot(
-          isActive: true,
-          isConnected: true,
-          mode: VpnTunnelMode.direct,
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-          tunPacketsIn: 0,
-          udpPacketsIn: 0,
-        ),
+        snapshot: _snapshot(),
         primaryConnectionConnected: true,
         activeTransportKind: TransportKind.wormholeRelay,
-        endpoint: endpoint,
+        endpoint: _endpoint,
         now: connectedAt,
       );
 
       final switched = coordinator.onVpnStatusChanged(
-        snapshot: const VpnTunnelSnapshot(
-          isActive: true,
-          isConnected: true,
-          mode: VpnTunnelMode.direct,
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-          tunPacketsIn: 1,
-          udpPacketsIn: 1,
-          wgRxBytes: 128,
-        ),
+        snapshot: _snapshot(timeSinceLastHandshakeSecs: 1),
         primaryConnectionConnected: true,
         activeTransportKind: TransportKind.wormholeRelay,
-        endpoint: endpoint,
+        endpoint: _endpoint,
         now: connectedAt.add(const Duration(seconds: 3)),
       );
       expect(switched.shouldSwitch, isTrue);
 
-      // Disconnect shortly after — within suppression window.
       final disconnectObserved = coordinator.onVpnStatusChanged(
-        snapshot: const VpnTunnelSnapshot(
-          isActive: false,
-          isConnected: false,
-          mode: VpnTunnelMode.direct,
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-        ),
+        snapshot: _snapshot(isActive: false, isConnected: false),
         primaryConnectionConnected: false,
         activeTransportKind: TransportKind.wireguardDirect,
-        endpoint: endpoint,
+        endpoint: _endpoint,
         now: connectedAt.add(const Duration(seconds: 8)),
       );
       expect(disconnectObserved.shouldFallback, isFalse);
 
       final stillSuppressed = coordinator.onVpnStatusChanged(
-        snapshot: const VpnTunnelSnapshot(
-          isActive: false,
-          isConnected: false,
-          mode: VpnTunnelMode.direct,
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-        ),
+        snapshot: _snapshot(isActive: false, isConnected: false),
         primaryConnectionConnected: false,
         activeTransportKind: TransportKind.wireguardDirect,
-        endpoint: endpoint,
+        endpoint: _endpoint,
         now: connectedAt.add(const Duration(seconds: 10)),
       );
       expect(stillSuppressed.shouldFallback, isFalse);
 
       final unsuppressed = coordinator.onVpnStatusChanged(
-        snapshot: const VpnTunnelSnapshot(
-          isActive: false,
-          isConnected: false,
-          mode: VpnTunnelMode.direct,
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-        ),
+        snapshot: _snapshot(isActive: false, isConnected: false),
         primaryConnectionConnected: false,
         activeTransportKind: TransportKind.wireguardDirect,
-        endpoint: endpoint,
+        endpoint: _endpoint,
         now: connectedAt.add(const Duration(seconds: 13)),
       );
       expect(unsuppressed.shouldFallback, isTrue);
@@ -485,90 +350,64 @@ void main() {
           fallbackSuppressionWindow: const Duration(seconds: 8),
         );
         final connectedAt = DateTime.utc(2026, 1, 1, 0, 0, 0);
-        const endpoint = VpnTransportEndpoint(
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-        );
-        const readySnapshot = VpnTunnelSnapshot(
-          isActive: true,
-          isConnected: true,
-          mode: VpnTunnelMode.direct,
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
+        final readySnapshot = _snapshot(
           tunPacketsIn: 1,
           udpPacketsIn: 5,
           wgRxBytes: 128,
           directSessionReady: true,
         );
 
-        // 1. VPN connects → pending switch armed.
         coordinator.onVpnStatusChanged(
-          snapshot: const VpnTunnelSnapshot(
-            isActive: true,
-            isConnected: true,
-            mode: VpnTunnelMode.direct,
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-            tunPacketsIn: 0,
-            udpPacketsIn: 0,
-          ),
+          snapshot: _snapshot(),
           primaryConnectionConnected: true,
           activeTransportKind: TransportKind.wormholeRelay,
-          endpoint: endpoint,
+          endpoint: _endpoint,
           now: connectedAt,
         );
         expect(coordinator.pendingSwitch, isTrue);
 
-        // 2. After 3s, readiness gate passes → switch fires, pendingSwitch consumed.
         final switched = coordinator.onVpnStatusChanged(
           snapshot: readySnapshot,
           primaryConnectionConnected: true,
           activeTransportKind: TransportKind.wormholeRelay,
-          endpoint: endpoint,
+          endpoint: _endpoint,
           now: connectedAt.add(const Duration(seconds: 3)),
         );
         expect(switched.shouldSwitch, isTrue);
         expect(coordinator.pendingSwitch, isFalse);
 
-        // 3. VPN briefly errors (handshake timeout) — within grace window, no fallback.
         final errored = coordinator.onVpnStatusChanged(
-          snapshot: const VpnTunnelSnapshot(
+          snapshot: _snapshot(
             isActive: false,
             isConnected: false,
-            mode: VpnTunnelMode.direct,
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
             error: 'WireGuard handshake timed out',
           ),
           primaryConnectionConnected: true,
           activeTransportKind: TransportKind.wormholeRelay,
-          endpoint: endpoint,
+          endpoint: _endpoint,
           now: connectedAt.add(const Duration(seconds: 5)),
         );
         expect(errored.shouldFallback, isFalse);
         expect(errored.shouldSwitch, isFalse);
 
-        // 4. VPN recovers 1s later (within grace window).
-        //    Transport is still wormholeRelay — switch didn't take effect.
-        //    But within cooldown, so no switch yet.
         final recovered = coordinator.onVpnStatusChanged(
           snapshot: readySnapshot,
           primaryConnectionConnected: true,
           activeTransportKind: TransportKind.wormholeRelay,
-          endpoint: endpoint,
+          endpoint: _endpoint,
           now: connectedAt.add(const Duration(seconds: 6)),
         );
         expect(recovered.shouldSwitch, isFalse, reason: 'within cooldown');
 
-        // 5. After cooldown (8s since last switch at t+3 → t+11), re-arm fires.
         final rearmed = coordinator.onVpnStatusChanged(
           snapshot: readySnapshot,
           primaryConnectionConnected: true,
           activeTransportKind: TransportKind.wormholeRelay,
-          endpoint: endpoint,
+          endpoint: _endpoint,
           now: connectedAt.add(const Duration(seconds: 12)),
         );
         expect(rearmed.shouldSwitch, isTrue);
+        expect(rearmed.transportKind, TransportKind.unknown);
         expect(rearmed.reason, 'vpn_rearm_after_stale_switch');
       },
     );
@@ -578,74 +417,153 @@ void main() {
       () {
         final coordinator = VpnTransportHandoffCoordinator();
         final connectedAt = DateTime.utc(2026, 1, 1, 0, 0, 0);
-        const endpoint = VpnTransportEndpoint(
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
-        );
 
-        // Connect and switch.
         coordinator.onVpnStatusChanged(
-          snapshot: const VpnTunnelSnapshot(
-            isActive: true,
-            isConnected: true,
-            mode: VpnTunnelMode.direct,
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-            tunPacketsIn: 0,
-            udpPacketsIn: 0,
-          ),
+          snapshot: _snapshot(),
           primaryConnectionConnected: true,
           activeTransportKind: TransportKind.wormholeRelay,
-          endpoint: endpoint,
+          endpoint: _endpoint,
           now: connectedAt,
         );
 
         final switched = coordinator.onVpnStatusChanged(
-          snapshot: const VpnTunnelSnapshot(
-            isActive: true,
-            isConnected: true,
-            mode: VpnTunnelMode.direct,
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-            tunPacketsIn: 1,
-            udpPacketsIn: 5,
-            wgRxBytes: 128,
-          ),
+          snapshot: _snapshot(timeSinceLastHandshakeSecs: 1),
           primaryConnectionConnected: true,
           activeTransportKind: TransportKind.wormholeRelay,
-          endpoint: endpoint,
+          endpoint: _endpoint,
           now: connectedAt.add(const Duration(seconds: 3)),
         );
         expect(switched.shouldSwitch, isTrue);
 
-        // Transport successfully switched to wireguardDirect.
-        // Re-arm should NOT fire.
         final stable = coordinator.onVpnStatusChanged(
-          snapshot: const VpnTunnelSnapshot(
-            isActive: true,
-            isConnected: true,
-            mode: VpnTunnelMode.direct,
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-            tunPacketsIn: 10,
-            udpPacketsIn: 20,
-            wgRxBytes: 4096,
-          ),
+          snapshot: _snapshot(timeSinceLastHandshakeSecs: 5),
           primaryConnectionConnected: true,
           activeTransportKind: TransportKind.wireguardDirect,
-          endpoint: endpoint,
+          endpoint: _endpoint,
           now: connectedAt.add(const Duration(seconds: 20)),
         );
         expect(stable.shouldSwitch, isFalse);
       },
     );
+
+    test('does not reconnect an in-tunnel unknown socket as Direct', () {
+      final coordinator = VpnTransportHandoffCoordinator();
+      final connectedAt = DateTime.utc(2026, 1, 1, 0, 0, 0);
+
+      coordinator.onVpnStatusChanged(
+        snapshot: _snapshot(),
+        primaryConnectionConnected: true,
+        activeTransportKind: TransportKind.wormholeRelay,
+        endpoint: _endpoint,
+        now: connectedAt,
+      );
+      coordinator.onVpnStatusChanged(
+        snapshot: _snapshot(directSessionReady: true),
+        primaryConnectionConnected: true,
+        activeTransportKind: TransportKind.wormholeRelay,
+        endpoint: _endpoint,
+        now: connectedAt.add(const Duration(seconds: 3)),
+      );
+
+      final alreadyOnTunnel = coordinator.onVpnStatusChanged(
+        snapshot: _snapshot(directSessionReady: true),
+        primaryConnectionConnected: true,
+        activeTransportKind: TransportKind.unknown,
+        endpoint: _endpoint,
+        now: connectedAt.add(const Duration(seconds: 20)),
+      );
+      expect(alreadyOnTunnel.shouldSwitch, isFalse);
+    });
+  });
+
+  group('host_info vpnPeer handling', () {
+    test('marks Direct only on 10.13.37.1 when vpnPeer is true', () {
+      expect(
+        VpnTransportHandoffCoordinator.hostInfoAction(
+          socketHost: kVpnAppWebsocketHost,
+          vpnPeer: true,
+        ),
+        VpnHostInfoAction.markDirect,
+      );
+    });
+
+    test('falls back when 10.13.37.1 socket is ready without vpnPeer', () {
+      expect(
+        VpnTransportHandoffCoordinator.hostInfoAction(
+          socketHost: kVpnAppWebsocketHost,
+          vpnPeer: false,
+        ),
+        VpnHostInfoAction.fallback,
+      );
+      expect(
+        VpnTransportHandoffCoordinator.hostInfoAction(
+          socketHost: kVpnAppWebsocketHost,
+          vpnPeer: null,
+        ),
+        VpnHostInfoAction.fallback,
+      );
+    });
+
+    test('ignores control-plane host_info even if vpnPeer is set', () {
+      expect(
+        VpnTransportHandoffCoordinator.hostInfoAction(
+          socketHost: 'wormhole.blackhole-ai.com',
+          vpnPeer: true,
+        ),
+        VpnHostInfoAction.ignore,
+      );
+      expect(
+        VpnTransportHandoffCoordinator.hostInfoAction(
+          socketHost: '192.168.1.20',
+          vpnPeer: false,
+        ),
+        VpnHostInfoAction.ignore,
+      );
+    });
+  });
+
+  group('StayOnWs', () {
+    test('is true on control-plane sockets before handoff', () {
+      expect(
+        VpnTransportHandoffCoordinator.isStayOnWs(
+          handoffPending: false,
+          activeKind: TransportKind.wormholeRelay,
+          socketHost: 'wormhole.blackhole-ai.com',
+        ),
+        isTrue,
+      );
+    });
+
+    test('is false while handoff is pending or already Direct', () {
+      expect(
+        VpnTransportHandoffCoordinator.isStayOnWs(
+          handoffPending: true,
+          activeKind: TransportKind.unknown,
+          socketHost: kVpnAppWebsocketHost,
+        ),
+        isFalse,
+      );
+      expect(
+        VpnTransportHandoffCoordinator.isStayOnWs(
+          handoffPending: false,
+          activeKind: TransportKind.wireguardDirect,
+          socketHost: kVpnAppWebsocketHost,
+        ),
+        isFalse,
+      );
+      expect(
+        VpnTransportHandoffCoordinator.isStayOnWs(
+          handoffPending: false,
+          activeKind: TransportKind.unknown,
+          socketHost: kVpnAppWebsocketHost,
+        ),
+        isFalse,
+      );
+    });
   });
 
   group('relay removal safety', () {
     test('relay mode maps to unknown transport kind, not vpn transport', () {
-      // ARCH-BLOCKER-1 validation: VpnTunnelMode.relay must NOT map to a
-      // VPN transport kind. This prevents _needsTransportSwitch from
-      // triggering a stale handoff to a nonexistent relay transport.
       expect(
         VpnTransportHandoffCoordinator.transportKindForMode(
           VpnTunnelMode.relay,
@@ -659,61 +577,39 @@ void main() {
       () {
         final coordinator = VpnTransportHandoffCoordinator();
 
-        // VPN tunnel reports relay mode (stale iOS tunnel during transition).
-        // transportKindForMode(.relay) → .unknown → _isVpnTransport false →
-        // _needsTransportSwitch returns false → no switch.
         final decision = coordinator.onVpnStatusChanged(
-          snapshot: const VpnTunnelSnapshot(
-            isActive: true,
-            isConnected: true,
+          snapshot: _snapshot(
             mode: VpnTunnelMode.relay,
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
             tunPacketsIn: 1,
             udpPacketsIn: 1,
+            directSessionReady: true,
           ),
           primaryConnectionConnected: true,
           activeTransportKind: TransportKind.wormholeRelay,
-          endpoint: const VpnTransportEndpoint(
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-          ),
-        );
-
-        // Must NOT switch — relay is a dead transport kind.
-        expect(decision.type, VpnTransportDecisionType.none);
-      },
-    );
-
-    test(
-      'relay mode does not trigger downgrade from wireguard direct',
-      () {
-        final coordinator = VpnTransportHandoffCoordinator();
-
-        // Stale tunnel status reports relay while we're on WG direct.
-        // Must not downgrade — relay maps to unknown, which is not a VPN
-        // transport, so _needsTransportSwitch returns false.
-        final decision = coordinator.onVpnStatusChanged(
-          snapshot: const VpnTunnelSnapshot(
-            isActive: true,
-            isConnected: true,
-            mode: VpnTunnelMode.relay,
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-            tunPacketsIn: 1,
-            udpPacketsIn: 1,
-          ),
-          primaryConnectionConnected: true,
-          activeTransportKind: TransportKind.wireguardDirect,
-          endpoint: const VpnTransportEndpoint(
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-          ),
+          endpoint: _endpoint,
         );
 
         expect(decision.type, VpnTransportDecisionType.none);
       },
     );
+
+    test('relay mode does not trigger downgrade from wireguard direct', () {
+      final coordinator = VpnTransportHandoffCoordinator();
+
+      final decision = coordinator.onVpnStatusChanged(
+        snapshot: _snapshot(
+          mode: VpnTunnelMode.relay,
+          tunPacketsIn: 1,
+          udpPacketsIn: 1,
+          directSessionReady: true,
+        ),
+        primaryConnectionConnected: true,
+        activeTransportKind: TransportKind.wireguardDirect,
+        endpoint: _endpoint,
+      );
+
+      expect(decision.type, VpnTransportDecisionType.none);
+    });
 
     test(
       'unknown transport kind as active does not crash or trigger switch',
@@ -721,22 +617,15 @@ void main() {
         final coordinator = VpnTransportHandoffCoordinator();
 
         final decision = coordinator.onVpnStatusChanged(
-          snapshot: const VpnTunnelSnapshot(
-            isActive: true,
-            isConnected: true,
-            mode: VpnTunnelMode.direct,
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
+          snapshot: _snapshot(
             tunPacketsIn: 1,
             udpPacketsIn: 1,
             wgRxBytes: 128,
+            timeSinceLastHandshakeSecs: 1,
           ),
           primaryConnectionConnected: true,
           activeTransportKind: TransportKind.unknown,
-          endpoint: const VpnTransportEndpoint(
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-          ),
+          endpoint: _endpoint,
           now: DateTime.utc(2026, 1, 1, 0, 0, 0),
         );
 
@@ -744,53 +633,38 @@ void main() {
       },
     );
 
-    test(
-      'transportKindForMode returns wireguardDirect for unknown vpn mode',
-      () {
-        expect(
-          VpnTransportHandoffCoordinator.transportKindForMode(
-            VpnTunnelMode.unknown,
-          ),
-          TransportKind.wireguardDirect,
-        );
-      },
-    );
+    test('transportKindForMode returns unknown for unknown vpn mode', () {
+      expect(
+        VpnTransportHandoffCoordinator.transportKindForMode(
+          VpnTunnelMode.unknown,
+        ),
+        TransportKind.unknown,
+      );
+    });
 
-    test(
-      'punch timeout: wormholeRelay stays active when desired kind equals '
-      'active kind',
-      () {
-        final coordinator = VpnTransportHandoffCoordinator();
+    test('punch timeout: wormholeRelay stays active when already Direct', () {
+      final coordinator = VpnTransportHandoffCoordinator();
 
-        final decision = coordinator.onVpnStatusChanged(
-          snapshot: const VpnTunnelSnapshot(
-            isActive: true,
-            isConnected: true,
-            mode: VpnTunnelMode.unknown,
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-            tunPacketsIn: 1,
-            udpPacketsIn: 1,
-            wgRxBytes: 128,
-          ),
-          primaryConnectionConnected: true,
-          activeTransportKind: TransportKind.wireguardDirect,
-          endpoint: const VpnTransportEndpoint(
-            serverIp: '10.13.37.1',
-            lanPort: 9529,
-          ),
-          now: DateTime.utc(2026, 1, 1, 0, 0, 0),
-        );
+      final decision = coordinator.onVpnStatusChanged(
+        snapshot: _snapshot(
+          mode: VpnTunnelMode.unknown,
+          tunPacketsIn: 1,
+          udpPacketsIn: 1,
+          wgRxBytes: 128,
+          timeSinceLastHandshakeSecs: 1,
+        ),
+        primaryConnectionConnected: true,
+        activeTransportKind: TransportKind.wireguardDirect,
+        endpoint: _endpoint,
+        now: DateTime.utc(2026, 1, 1, 0, 0, 0),
+      );
 
-        expect(decision.type, VpnTransportDecisionType.none);
-      },
-    );
+      expect(decision.type, VpnTransportDecisionType.none);
+    });
 
     test(
       'wireguard_relay wire name deserializes to unknown after enum removal',
       () {
-        // Post-removal: old Horizon sends "wireguard_relay" in transport
-        // status. New Voyager with removed enum → .unknown.
         expect(
           TransportKind.fromWireName('wireguard_relay'),
           TransportKind.unknown,

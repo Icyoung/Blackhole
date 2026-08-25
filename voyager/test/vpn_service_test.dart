@@ -345,12 +345,7 @@ void main() {
         clientIp: '10.0.0.2',
         serverIp: '10.0.0.1',
         directCandidates: [
-          {
-            'host': '192.168.1.5',
-            'port': 51821,
-            'priority': 1,
-            'type': 'lan',
-          },
+          {'host': '192.168.1.5', 'port': 51821, 'priority': 1, 'type': 'lan'},
           {
             'host': '203.0.113.5',
             'port': 51822,
@@ -395,10 +390,11 @@ void main() {
         internalRoutes: ['192.168.0.0/16', '172.16.0.0/12', '10.0.0.0/8'],
       );
       final map = config.toMap();
-      expect(
-        map['internalRoutes'],
-        ['192.168.0.0/16', '172.16.0.0/12', '10.0.0.0/8'],
-      );
+      expect(map['internalRoutes'], [
+        '192.168.0.0/16',
+        '172.16.0.0/12',
+        '10.0.0.0/8',
+      ]);
     });
   });
 
@@ -430,30 +426,30 @@ void main() {
 
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(channel, (MethodCall call) async {
-        methodCalls.add(call);
-        if (call.method == 'getStatus') {
-          return mockGetStatusResult;
-        } else if (call.method == 'generateKeypair') {
-          return mockGenerateKeypairResult;
-        } else if (call.method == 'start') {
-          if (mockStartShouldThrow) {
-            throw PlatformException(
-              code: 'START_FAILED',
-              message: 'mock start error',
-            );
-          }
-          return null;
-        } else if (call.method == 'stop') {
-          if (mockStopShouldThrow) {
-            throw PlatformException(
-              code: 'STOP_FAILED',
-              message: 'mock stop error',
-            );
-          }
-          return null;
-        }
-        return null;
-      });
+            methodCalls.add(call);
+            if (call.method == 'getStatus') {
+              return mockGetStatusResult;
+            } else if (call.method == 'generateKeypair') {
+              return mockGenerateKeypairResult;
+            } else if (call.method == 'start') {
+              if (mockStartShouldThrow) {
+                throw PlatformException(
+                  code: 'START_FAILED',
+                  message: 'mock start error',
+                );
+              }
+              return null;
+            } else if (call.method == 'stop') {
+              if (mockStopShouldThrow) {
+                throw PlatformException(
+                  code: 'STOP_FAILED',
+                  message: 'mock stop error',
+                );
+              }
+              return null;
+            }
+            return null;
+          });
 
       service = VpnService();
     });
@@ -551,6 +547,7 @@ void main() {
           'directSessionState': 'established',
           'directSessionViable': true,
           'directSessionReady': true,
+          'timeSinceLastHandshakeSecs': 3,
           'pendingDirectQueueDepth': 0,
           'directWriteAttempts': 42,
           'directWriteErrors': 3,
@@ -572,6 +569,7 @@ void main() {
         expect(service.directSessionState, 'established');
         expect(service.directSessionViable, isTrue);
         expect(service.directSessionReady, isTrue);
+        expect(service.timeSinceLastHandshakeSecs, 3);
         expect(service.pendingDirectQueueDepth, 0);
         expect(service.directWriteAttempts, 42);
         expect(service.directWriteErrors, 3);
@@ -583,10 +581,7 @@ void main() {
       });
 
       test('error payload sets status and error message', () async {
-        mockGetStatusResult = {
-          'status': 'error',
-          'error': 'tunnel died',
-        };
+        mockGetStatusResult = {'status': 'error', 'error': 'tunnel died'};
 
         await service.refreshStatus();
 
@@ -596,9 +591,7 @@ void main() {
       });
 
       test('disconnected payload', () async {
-        mockGetStatusResult = {
-          'status': 'disconnected',
-        };
+        mockGetStatusResult = {'status': 'disconnected'};
 
         await service.refreshStatus();
 
@@ -770,9 +763,7 @@ void main() {
       });
 
       test('missing list fields default to empty lists', () async {
-        mockGetStatusResult = {
-          'status': 'connected',
-        };
+        mockGetStatusResult = {'status': 'connected'};
 
         await service.refreshStatus();
 
@@ -781,9 +772,7 @@ void main() {
       });
 
       test('null numeric fields remain null', () async {
-        mockGetStatusResult = {
-          'status': 'connecting',
-        };
+        mockGetStatusResult = {'status': 'connecting'};
 
         await service.refreshStatus();
 
@@ -803,9 +792,7 @@ void main() {
       });
 
       test('null string fields remain null', () async {
-        mockGetStatusResult = {
-          'status': 'connecting',
-        };
+        mockGetStatusResult = {'status': 'connecting'};
 
         await service.refreshStatus();
 
@@ -814,6 +801,7 @@ void main() {
         expect(service.directSessionState, isNull);
         expect(service.directSessionViable, isNull);
         expect(service.directSessionReady, isNull);
+        expect(service.timeSinceLastHandshakeSecs, isNull);
         expect(service.lastDirectWriteLabel, isNull);
         expect(service.lastDirectWriteError, isNull);
         expect(service.error, isNull);
@@ -838,9 +826,7 @@ void main() {
       );
 
       test('sends correct arguments to method channel', () async {
-        mockGetStatusResult = {
-          'status': 'connecting',
-        };
+        mockGetStatusResult = {'status': 'connecting'};
 
         await service.start(testConfig);
 
@@ -894,7 +880,10 @@ void main() {
         expect(methods, contains('start'));
         expect(methods, contains('getStatus'));
         // getStatus should come after start.
-        expect(methods.indexOf('start'), lessThan(methods.indexOf('getStatus')));
+        expect(
+          methods.indexOf('start'),
+          lessThan(methods.indexOf('getStatus')),
+        );
       });
 
       test('clears packet counters on start', () async {
@@ -963,10 +952,7 @@ void main() {
       test('PlatformException sets error and rethrows', () async {
         mockStopShouldThrow = true;
 
-        expect(
-          () => service.stop(),
-          throwsA(isA<PlatformException>()),
-        );
+        expect(() => service.stop(), throwsA(isA<PlatformException>()));
 
         await Future<void>.delayed(Duration.zero);
 
@@ -988,10 +974,7 @@ void main() {
 
         expect(result['privateKey'], 'base64-private-key');
         expect(result['publicKey'], 'base64-public-key');
-        expect(
-          methodCalls.any((c) => c.method == 'generateKeypair'),
-          isTrue,
-        );
+        expect(methodCalls.any((c) => c.method == 'generateKeypair'), isTrue);
       });
 
       test('returns empty strings when native returns null', () async {
@@ -1038,10 +1021,7 @@ void main() {
       });
 
       test('returns error status', () async {
-        mockGetStatusResult = {
-          'status': 'error',
-          'error': 'broken tunnel',
-        };
+        mockGetStatusResult = {'status': 'error', 'error': 'broken tunnel'};
 
         final status = await service.getStatus();
 

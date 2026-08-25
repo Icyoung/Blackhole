@@ -22,11 +22,12 @@ void main() {
           'connectionMode': 'direct',
           'clientIp': '10.13.37.7',
           'serverIp': '10.13.37.1',
-          'lanPort': 9529,
+          'lanPort': 9527,
           'udpPacketsIn': 8,
           'tunPacketsIn': 3,
           'wgRxBytes': 1024,
           'directSessionReady': true,
+          'timeSinceLastHandshakeSecs': 2,
         },
       );
 
@@ -48,8 +49,8 @@ void main() {
           'connectionMode': 'direct',
           'clientIp': '10.13.37.7',
           'serverIp': '10.13.37.1',
-          'lanPort': 9529,
-          'udpPacketsIn': 0,
+          'lanPort': 9527,
+          'udpPacketsIn': 12,
           'tunPacketsIn': 12,
           'wgRxBytes': 2048,
           'directSessionReady': false,
@@ -60,8 +61,29 @@ void main() {
       expect(
         result.failures,
         contains(
-          'direct readiness gate is not satisfied: need udpPacketsIn>0 and (tunPacketsIn>0 or wgRxBytes>0)',
+          'direct readiness gate is not satisfied: need host 10.13.37.1, native connected, and handshake (timeSinceLastHandshakeSecs>=0 or directSessionReady)',
         ),
+      );
+    });
+
+    test('fails when serverIp is not the in-tunnel app WS host', () {
+      final result = WgAppFlowValidator.validate(
+        horizonLog: '',
+        vpnStatusJson: <String, dynamic>{
+          'status': 'connected',
+          'connectionMode': 'direct',
+          'clientIp': '10.13.37.7',
+          'serverIp': '192.168.1.20',
+          'lanPort': 9527,
+          'directSessionReady': true,
+          'timeSinceLastHandshakeSecs': 1,
+        },
+      );
+
+      expect(result.isSuccess, isFalse);
+      expect(
+        result.failures,
+        contains('vpn_status serverIp must be 10.13.37.1 for in-tunnel app WS'),
       );
     });
   });

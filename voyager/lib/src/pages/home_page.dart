@@ -167,6 +167,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   List<DirectCandidate> _vpnDirectCandidates = const <DirectCandidate>[];
   String? _lastAdvertisedVpnCandidateSignature;
   Timer? _vpnConfigTimeout;
+  Timer? _vpnPunchRetryTimer;
+  bool _vpnHandoffPending = false;
 
   bool get _vpnAvailable => VpnService.isSupportedPlatform;
 
@@ -245,13 +247,14 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
           _pairingPending = pending;
         });
       },
-      onHostInfo: (hostName) {
+      onHostInfo: (info) {
         if (!mounted) {
           return;
         }
         setState(() {
-          _remoteDeviceName = hostName;
+          _remoteDeviceName = info.hostName;
         });
+        _handleVpnHostInfo(info);
       },
       onError: (message) {
         debugPrint('[Connection] error: $message');
@@ -269,48 +272,45 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       onGroupError: (message) {
         _showError('Group error: $message');
       },
-      onPairingResult: ({
-        required approved,
-        String? assignedKey,
-        String? horizonPublicKey,
-      }) {
-        if (approved) {
-          if (assignedKey != null && assignedKey.isNotEmpty) {
-            _deviceKey = assignedKey;
-            _saveSettings();
-            // Rebuild the reconnect URI so auto-reconnects include the
-            // assigned device_key.  Without this, reconnects reuse the
-            // original URI (which lacked device_key) and Horizon treats
-            // every reconnect as a new device.
-            if (_useWormhole) {
-              _connectionManager.updateReconnectUri(_buildWormholeUri());
+      onPairingResult:
+          ({required approved, String? assignedKey, String? horizonPublicKey}) {
+            if (approved) {
+              if (assignedKey != null && assignedKey.isNotEmpty) {
+                _deviceKey = assignedKey;
+                _saveSettings();
+                // Rebuild the reconnect URI so auto-reconnects include the
+                // assigned device_key.  Without this, reconnects reuse the
+                // original URI (which lacked device_key) and Horizon treats
+                // every reconnect as a new device.
+                if (_useWormhole) {
+                  _connectionManager.updateReconnectUri(_buildWormholeUri());
+                }
+              }
+              // Setup encryption if Horizon provided public key
+              if (horizonPublicKey != null && horizonPublicKey.isNotEmpty) {
+                _setupEncryption(horizonPublicKey);
+              }
+              if (mounted) {
+                setState(() {
+                  _pairingPending = false;
+                });
+              }
+              debugPrint(
+                '[Voyager] Pairing approved, deviceKey: $_deviceKey, hasHorizonPublicKey: ${horizonPublicKey != null}',
+              );
+              _sendListSessions();
+              _maybeStartVpnUpgrade(force: true);
+            } else {
+              if (mounted) {
+                _showError('Connection rejected by host');
+                setState(() {
+                  _pairingPending = false;
+                  _connected = false;
+                });
+              }
+              debugPrint('[Voyager] Pairing rejected');
             }
-          }
-          // Setup encryption if Horizon provided public key
-          if (horizonPublicKey != null && horizonPublicKey.isNotEmpty) {
-            _setupEncryption(horizonPublicKey);
-          }
-          if (mounted) {
-            setState(() {
-              _pairingPending = false;
-            });
-          }
-          debugPrint(
-            '[Voyager] Pairing approved, deviceKey: $_deviceKey, hasHorizonPublicKey: ${horizonPublicKey != null}',
-          );
-          _sendListSessions();
-          _maybeStartVpnUpgrade(force: true);
-        } else {
-          if (mounted) {
-            _showError('Connection rejected by host');
-            setState(() {
-              _pairingPending = false;
-              _connected = false;
-            });
-          }
-          debugPrint('[Voyager] Pairing rejected');
-        }
-      },
+          },
       onSessionList: (sessions, {activeSessionId, activeGroupId}) {
         _handleSessionList(
           sessions,
@@ -750,6 +750,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
 
   void _handleDisconnected() {
     _vpnConfigTimeout?.cancel();
+    _vpnPunchRetryTimer?.cancel();
+    _vpnPunchRetryTimer = null;
+    _vpnHandoffPending = false;
     if (_vpnAvailable && !_vpnService.isConnected) {
       _vpnEndpointInfo = null;
       _vpnPrivateKey = null;
@@ -906,18 +909,17 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     if (!reset && currentOffset != null && startOffset < currentOffset) {
       final alreadyRendered = currentOffset - startOffset;
       if (alreadyRendered >= contentBytes.length) {
-        _sessionSyncOffsets[sessionId] =
-            currentOffset > responseNextOffset
-                ? currentOffset
-                : responseNextOffset;
+        _sessionSyncOffsets[sessionId] = currentOffset > responseNextOffset
+            ? currentOffset
+            : responseNextOffset;
         return;
       }
       writeBytes = Uint8List.fromList(contentBytes.sublist(alreadyRendered));
     }
     _sessionSyncOffsets[sessionId] =
         (_sessionSyncOffsets[sessionId] ?? 0) > responseNextOffset
-            ? _sessionSyncOffsets[sessionId]!
-            : responseNextOffset;
+        ? _sessionSyncOffsets[sessionId]!
+        : responseNextOffset;
     if (writeBytes.isEmpty) {
       return;
     }
@@ -967,10 +969,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
 
   Future<List<TransportCandidate>> _buildTransportCandidates() async {
     final lanUri = _tryParseUri(_urlController.text.trim());
-    final wormholeUri =
-        _useWormhole
-            ? _buildWormholeUri()
-            : _tryParseUri(_wormholeController.text.trim());
+    final wormholeUri = _useWormhole
+        ? _buildWormholeUri()
+        : _tryParseUri(_wormholeController.text.trim());
 
     if (TransportRolloutConfig.forceWormholeRelay && wormholeUri != null) {
       return [
@@ -1034,10 +1035,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       return [
         TransportCandidate(
           id: _useWormhole ? 'wormhole-fallback' : 'lan-fallback',
-          kind:
-              _useWormhole
-                  ? TransportKind.wormholeRelay
-                  : TransportKind.lanDirect,
+          kind: _useWormhole
+              ? TransportKind.wormholeRelay
+              : TransportKind.lanDirect,
           uri: fallbackUri,
           waitForPairing: _useWormhole,
           priority: 1,
@@ -1324,15 +1324,14 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   }
 
   String _applyCtrl(String data) {
-    final codes =
-        data.runes.map((rune) {
-          final ch = String.fromCharCode(rune);
-          final upper = ch.toUpperCase();
-          if (upper.codeUnitAt(0) >= 65 && upper.codeUnitAt(0) <= 90) {
-            return String.fromCharCode(upper.codeUnitAt(0) - 64);
-          }
-          return ch;
-        }).join();
+    final codes = data.runes.map((rune) {
+      final ch = String.fromCharCode(rune);
+      final upper = ch.toUpperCase();
+      if (upper.codeUnitAt(0) >= 65 && upper.codeUnitAt(0) <= 90) {
+        return String.fromCharCode(upper.codeUnitAt(0) - 64);
+      }
+      return ch;
+    }).join();
     return codes;
   }
 
@@ -1460,10 +1459,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       return _activeSessionId;
     }
 
-    final sessions =
-        _visibleSessions.isNotEmpty
-            ? _visibleSessions
-            : (_activeSessionId != null ? [_activeSessionId!] : <String>[]);
+    final sessions = _visibleSessions.isNotEmpty
+        ? _visibleSessions
+        : (_activeSessionId != null ? [_activeSessionId!] : <String>[]);
 
     for (final sessionId in sessions) {
       final key = _terminalCardKeys[sessionId];
@@ -1634,8 +1632,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
 
     final scaffold = Scaffold(
       key: _scaffoldKey,
-      backgroundColor:
-          _multiWindow ? multiWindowBackground : terminalBackground,
+      backgroundColor: _multiWindow
+          ? multiWindowBackground
+          : terminalBackground,
       onDrawerChanged: (isOpened) {
         if (!isOpened) {
           _groupStore.setDeferredSync(false);
@@ -1666,11 +1665,10 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                   }
                 });
               },
-              onDragExited:
-                  (_) => setState(() {
-                    _dragging = false;
-                    _dragTargetSessionId = null;
-                  }),
+              onDragExited: (_) => setState(() {
+                _dragging = false;
+                _dragTargetSessionId = null;
+              }),
               onDragUpdated: (details) {
                 if (_multiWindow) {
                   final targetId = _findTerminalAtPosition(
@@ -1687,129 +1685,134 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                 children: [
                   _multiWindow
                       ? LayoutBuilder(
-                        builder: (context, constraints) {
-                          final width = constraints.maxWidth;
-                          final columns = _voyagerMultiWindowColumnsForWidth(
-                            width,
-                          );
-                          final sessions =
-                              _visibleSessions.isNotEmpty
-                                  ? _visibleSessions
-                                  : (_activeSessionId != null
+                          builder: (context, constraints) {
+                            final width = constraints.maxWidth;
+                            final columns = _voyagerMultiWindowColumnsForWidth(
+                              width,
+                            );
+                            final sessions = _visibleSessions.isNotEmpty
+                                ? _visibleSessions
+                                : (_activeSessionId != null
                                       ? [_activeSessionId!]
                                       : <String>[]);
-                          final displaySessions =
-                              sessions.isEmpty ? <String>[] : sessions;
-                          final padding = EdgeInsets.fromLTRB(
-                            16,
-                            16,
-                            16,
-                            _bottomBarHeight + 16,
-                          );
-
-                          if (displaySessions.isEmpty) {
-                            return Padding(
-                              padding: padding,
-                              child: TerminalView(
-                                _idleTerminal,
-                                key: _idleTerminalViewKey,
-                                controller: _idleController,
-                                scrollController: _idleScrollController,
-                                theme: kTerminalThemeLight,
-                                autoResize: true,
-                                autofocus: true,
-                                deleteDetection: deleteDetection,
-                                hardwareKeyboardOnly: _useHardwareKeyboardOnly,
-                                readOnly: _showHHKB,
-                                keyboardType:
-                                    _showHHKB
-                                        ? TextInputType.none
-                                        : TextInputType.text,
-                                backgroundOpacity: 1.0,
-                                padding: const EdgeInsets.all(10),
-                                textStyle: buildTerminalStyle(fontSize: 12),
-                              ),
+                            final displaySessions = sessions.isEmpty
+                                ? <String>[]
+                                : sessions;
+                            final padding = EdgeInsets.fromLTRB(
+                              16,
+                              16,
+                              16,
+                              _bottomBarHeight + 16,
                             );
-                          }
 
-                          final layout = _multiWindowLayoutController
-                              .effectiveLayout(
-                                displaySessions,
-                                defaultColumns: columns,
+                            if (displaySessions.isEmpty) {
+                              return Padding(
+                                padding: padding,
+                                child: TerminalView(
+                                  _idleTerminal,
+                                  key: _idleTerminalViewKey,
+                                  controller: _idleController,
+                                  scrollController: _idleScrollController,
+                                  theme: kTerminalThemeLight,
+                                  autoResize: true,
+                                  autofocus: true,
+                                  deleteDetection: deleteDetection,
+                                  hardwareKeyboardOnly:
+                                      _useHardwareKeyboardOnly,
+                                  readOnly: _showHHKB,
+                                  keyboardType: _showHHKB
+                                      ? TextInputType.none
+                                      : TextInputType.text,
+                                  backgroundOpacity: 1.0,
+                                  padding: const EdgeInsets.all(10),
+                                  textStyle: buildTerminalStyle(fontSize: 12),
+                                ),
                               );
+                            }
 
-                          return MultiWindowGrid(
-                            padding: padding,
-                            gap: 0,
-                            splitterVisualGap: 16,
-                            desktopHitSize: 12,
-                            touchMinHitSize: 44,
-                            mobileBreakpoint: 600,
-                            scrollPhysics: const BouncingScrollPhysics(),
-                            layout: layout,
-                            onResizeSplit:
-                                _multiWindowLayoutController.resizeSplit,
-                            onResizeEnd:
-                                () => unawaited(_commitMultiWindowLayout()),
-                            onMoveCell:
-                                (from, to, side) => unawaited(
-                                  _moveMultiWindowCell(from, to, side),
-                                ),
-                            cellBuilder: (context, sessionId, index) {
-                              final label =
-                                  _terminalManager.getTitle(sessionId) ??
-                                  _groupStore.getSessionName(sessionId, index);
-                              return SessionWindowCard(
-                                key: _terminalCardKeyFor(sessionId),
-                                sessionId: sessionId,
-                                terminal: _terminalFor(sessionId),
-                                controller: _controllerFor(sessionId),
-                                scrollController: _scrollControllerFor(
-                                  sessionId,
-                                ),
-                                viewKey: _viewKeyFor(sessionId),
-                                label: label,
-                                isActive: sessionId == _activeSessionId,
-                                showHHKB: _showHHKB,
-                                deleteDetection: deleteDetection,
-                                hardwareKeyboardOnly: _useHardwareKeyboardOnly,
-                                isDragTarget:
-                                    _dragging &&
-                                    _dragTargetSessionId == sessionId,
-                                terminalStyle: buildTerminalStyle(fontSize: 8),
-                                onTap:
-                                    () => _setActiveSession(
+                            final layout = _multiWindowLayoutController
+                                .effectiveLayout(
+                                  displaySessions,
+                                  defaultColumns: columns,
+                                );
+
+                            return MultiWindowGrid(
+                              padding: padding,
+                              gap: 0,
+                              splitterVisualGap: 16,
+                              desktopHitSize: 12,
+                              touchMinHitSize: 44,
+                              mobileBreakpoint: 600,
+                              scrollPhysics: const BouncingScrollPhysics(),
+                              layout: layout,
+                              onResizeSplit:
+                                  _multiWindowLayoutController.resizeSplit,
+                              onResizeEnd: () =>
+                                  unawaited(_commitMultiWindowLayout()),
+                              onMoveCell: (from, to, side) => unawaited(
+                                _moveMultiWindowCell(from, to, side),
+                              ),
+                              cellBuilder: (context, sessionId, index) {
+                                final label =
+                                    _terminalManager.getTitle(sessionId) ??
+                                    _groupStore.getSessionName(
                                       sessionId,
-                                      requestKeyboard: true,
-                                    ),
-                                onClose: () => _sendCloseSession(sessionId),
-                              );
-                            },
-                          );
-                        },
-                      )
+                                      index,
+                                    );
+                                return SessionWindowCard(
+                                  key: _terminalCardKeyFor(sessionId),
+                                  sessionId: sessionId,
+                                  terminal: _terminalFor(sessionId),
+                                  controller: _controllerFor(sessionId),
+                                  scrollController: _scrollControllerFor(
+                                    sessionId,
+                                  ),
+                                  viewKey: _viewKeyFor(sessionId),
+                                  label: label,
+                                  isActive: sessionId == _activeSessionId,
+                                  showHHKB: _showHHKB,
+                                  deleteDetection: deleteDetection,
+                                  hardwareKeyboardOnly:
+                                      _useHardwareKeyboardOnly,
+                                  isDragTarget:
+                                      _dragging &&
+                                      _dragTargetSessionId == sessionId,
+                                  terminalStyle: buildTerminalStyle(
+                                    fontSize: 8,
+                                  ),
+                                  onTap: () => _setActiveSession(
+                                    sessionId,
+                                    requestKeyboard: true,
+                                  ),
+                                  onClose: () => _sendCloseSession(sessionId),
+                                );
+                              },
+                            );
+                          },
+                        )
                       : TerminalView(
-                        terminal,
-                        key: _activeViewKey ?? _idleTerminalViewKey,
-                        controller: controller,
-                        scrollController: scrollController,
-                        theme: kTerminalThemeLight,
-                        autoResize: false,
-                        autofocus: true,
-                        deleteDetection: deleteDetection,
-                        hardwareKeyboardOnly: _useHardwareKeyboardOnly,
-                        readOnly: _showHHKB,
-                        keyboardType:
-                            _showHHKB ? TextInputType.none : TextInputType.text,
-                        backgroundOpacity: 1.0,
-                        padding: EdgeInsets.fromLTRB(
-                          10,
-                          4,
-                          10,
-                          _bottomBarHeight + 10,
+                          terminal,
+                          key: _activeViewKey ?? _idleTerminalViewKey,
+                          controller: controller,
+                          scrollController: scrollController,
+                          theme: kTerminalThemeLight,
+                          autoResize: false,
+                          autofocus: true,
+                          deleteDetection: deleteDetection,
+                          hardwareKeyboardOnly: _useHardwareKeyboardOnly,
+                          readOnly: _showHHKB,
+                          keyboardType: _showHHKB
+                              ? TextInputType.none
+                              : TextInputType.text,
+                          backgroundOpacity: 1.0,
+                          padding: EdgeInsets.fromLTRB(
+                            10,
+                            4,
+                            10,
+                            _bottomBarHeight + 10,
+                          ),
+                          textStyle: buildTerminalStyle(fontSize: 12),
                         ),
-                        textStyle: buildTerminalStyle(fontSize: 12),
-                      ),
                   if (_dragging && !_multiWindow)
                     Positioned.fill(
                       child: Container(
@@ -1859,8 +1862,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                 return _terminalManager.getTitle(sessionId) ??
                     _groupStore.getSessionName(sessionId, index);
               },
-              onSelectSession:
-                  (id) => _setActiveSession(id, requestKeyboard: true),
+              onSelectSession: (id) =>
+                  _setActiveSession(id, requestKeyboard: true),
               onCloseSession: _sendCloseSession,
               onReorderSessions: _reorderSessions,
               connectionContent: _buildConnectionContent(context),
@@ -1872,8 +1875,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                   _scheduleActiveResize();
                 });
               },
-              onResetMultiWindowLayout:
-                  () => unawaited(_resetMultiWindowLayout()),
+              onResetMultiWindowLayout: () =>
+                  unawaited(_resetMultiWindowLayout()),
             ),
           ),
           Positioned(
@@ -1887,25 +1890,22 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                 children: [
                   KeyedSubtree(
                     key: _quickBarKey,
-                    child:
-                        _showKeyboardTools
-                            ? QuickActionsBar(
-                              connected: _connected,
-                              ctrl: _ctrl,
-                              alt: _alt,
-                              meta: _meta,
-                              onToggleCtrl:
-                                  () => setState(() => _ctrl = !_ctrl),
-                              onToggleAlt: () => setState(() => _alt = !_alt),
-                              onToggleMeta:
-                                  () => setState(() => _meta = !_meta),
-                              onKey: _sendKey,
-                              onPaste: _pasteClipboard,
-                              onCopy: _copySelection,
-                              onSend: _sendRaw,
-                              onScrollToBottom: _scrollToBottom,
-                            )
-                            : const SizedBox.shrink(),
+                    child: _showKeyboardTools
+                        ? QuickActionsBar(
+                            connected: _connected,
+                            ctrl: _ctrl,
+                            alt: _alt,
+                            meta: _meta,
+                            onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
+                            onToggleAlt: () => setState(() => _alt = !_alt),
+                            onToggleMeta: () => setState(() => _meta = !_meta),
+                            onKey: _sendKey,
+                            onPaste: _pasteClipboard,
+                            onCopy: _copySelection,
+                            onSend: _sendRaw,
+                            onScrollToBottom: _scrollToBottom,
+                          )
+                        : const SizedBox.shrink(),
                   ),
                   if (_showCommandInput)
                     CommandInputBar(
@@ -2006,10 +2006,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
 
   Widget _buildConnectionContent(BuildContext context) {
     // Title: "Voyager · deviceName" or just "Voyager"
-    final title =
-        _remoteDeviceName != null && _remoteDeviceName!.isNotEmpty
-            ? 'Voyager · $_remoteDeviceName'
-            : 'Voyager';
+    final title = _remoteDeviceName != null && _remoteDeviceName!.isNotEmpty
+        ? 'Voyager · $_remoteDeviceName'
+        : 'Voyager';
 
     // Subtitle: transport-aware live state.
     String subtitle;
@@ -2026,8 +2025,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
           subtitle = 'Connected via WireGuard Direct';
           break;
         case TransportKind.unknown:
-          subtitle =
-              _useWormhole ? 'Connected to Wormhole' : 'Connected to LAN';
+          subtitle = _useWormhole
+              ? 'Connected to Wormhole'
+              : 'Connected to LAN';
           break;
       }
       final fallback = _connectionManager.activeFallbackReason;
@@ -2151,8 +2151,8 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       embedded: false,
       manager: _groupStore,
       activeSessionId: _activeSessionId,
-      onSelectSession:
-          (sessionId) => _setActiveSession(sessionId, requestKeyboard: true),
+      onSelectSession: (sessionId) =>
+          _setActiveSession(sessionId, requestKeyboard: true),
       onCloseSession: _sendCloseSession,
       onAddSession: _sendCreateSessionInGroup,
       sessionLabelBuilder: (sessionId, index) {
@@ -2303,7 +2303,10 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     if (!value) {
       _vpnUpgradeAttempted = false;
       _vpnNativeStartInFlight = false;
+      _vpnHandoffPending = false;
       _vpnConfigTimeout?.cancel();
+      _vpnPunchRetryTimer?.cancel();
+      _vpnPunchRetryTimer = null;
       _vpnEndpointInfo = null;
       _vpnHandoff.reset();
       _vpnPrivateKey = null;
@@ -2324,6 +2327,14 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     _maybeStartVpnUpgrade(force: true);
   }
 
+  bool get _vpnStayOnWs {
+    return VpnTransportHandoffCoordinator.isStayOnWs(
+      handoffPending: _vpnHandoffPending,
+      activeKind: _connectionManager.activeTransportKind,
+      socketHost: _connectionManager.activeUri?.host,
+    );
+  }
+
   void _maybeStartVpnUpgrade({bool force = false}) {
     if (!_vpnAvailable || !_vpnEnabled) {
       return;
@@ -2331,8 +2342,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     if (!_connected || _pairingPending) {
       return;
     }
-    if (_connectionManager.activeTransportKind ==
-        TransportKind.wireguardDirect) {
+    if (!_vpnStayOnWs) {
       return;
     }
     if (_vpnService.isActive ||
@@ -2388,22 +2398,6 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       port: localPort,
       previous: _vpnEndpointInfo?.voyagerCandidates,
     );
-    _vpnConfigTimeout?.cancel();
-    _vpnConfigTimeout = Timer(const Duration(seconds: 12), () {
-      if (!mounted || !_vpnService.isActive || _vpnService.isConnected) {
-        return;
-      }
-      _pendingVpnPublicKey = null;
-      _vpnPrivateKey = null;
-      _vpnPublicKey = null;
-      _vpnNativeStartInFlight = false;
-      _vpnLocalPort = null;
-      _vpnDirectCandidates = const <DirectCandidate>[];
-      _lastAdvertisedVpnCandidateSignature = null;
-      _vpnService.failNegotiation(
-        'Timed out waiting for Horizon VPN config. Verify VPN is enabled on Horizon and restart the host if needed.',
-      );
-    });
     final activeTransport = _connectionManager.activeTransportKind;
     if (activeTransport == TransportKind.wormholeRelay) {
       _vpnLog('Requesting endpoint_info with local WG public key');
@@ -2418,6 +2412,23 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       _sendVpnPeerEndpoint(publicKey, force: true);
       _pendingVpnPublicKey = null;
     }
+    _vpnConfigTimeout?.cancel();
+    _vpnConfigTimeout = Timer(const Duration(seconds: 30), () {
+      if (!mounted || _vpnPrivateKey == null || _vpnService.isConnected) {
+        return;
+      }
+      _pendingVpnPublicKey = null;
+      _vpnPrivateKey = null;
+      _vpnPublicKey = null;
+      _vpnNativeStartInFlight = false;
+      _vpnLocalPort = null;
+      _vpnDirectCandidates = const <DirectCandidate>[];
+      _lastAdvertisedVpnCandidateSignature = null;
+      _vpnService.failNegotiation(
+        'Timed out waiting for Horizon VPN config. Verify VPN is enabled on Horizon and restart the host if needed.',
+      );
+    });
+    _armVpnPunchRetry();
   }
 
   void _handleVpnEndpointInfo(EndpointInfo info) async {
@@ -2494,7 +2505,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
               localPort: _vpnLocalPort,
               netcheckHost: netcheckHost,
               netcheckPort: netcheckPort,
-              lanPort: mergedInfo.lanPort ?? 9527,
+              lanPort: mergedInfo.lanPort ?? kVpnAppWebsocketPort,
               subnet: mergedInfo.subnet ?? '10.13.37.0/24',
               dns: mergedInfo.dns ?? const ['10.13.37.1'],
               internalRoutes: mergedInfo.internalRoutes ?? [],
@@ -2719,10 +2730,6 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     return info.serverIp ?? '10.13.37.1';
   }
 
-  int _defaultVpnLanPort() {
-    return _useWormhole ? 9529 : 9527;
-  }
-
   VpnTunnelMode _currentVpnTunnelMode() {
     return switch (_vpnService.connectionMode) {
       VpnConnectionMode.direct => VpnTunnelMode.direct,
@@ -2733,14 +2740,10 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   VpnTransportEndpoint? _currentVpnTransportEndpoint() {
     final info = _vpnEndpointInfo;
     if (info == null) return null;
-    // Use the resolved server host (LAN candidate or horizonAddr) instead of
-    // the VPN subnet IP (10.13.37.1). macOS utun ptp routing prevents TCP
-    // connections to the TUN local address from working, so we connect via
-    // LAN/WAN and let Horizon identify it as a VPN peer by other means.
-    final host = _resolveVpnServerHost(info);
+    final host = info.serverIp ?? kVpnAppWebsocketHost;
     return VpnTransportEndpoint(
       serverIp: host,
-      lanPort: info.lanPort ?? _defaultVpnLanPort(),
+      lanPort: info.lanPort ?? kVpnAppWebsocketPort,
     );
   }
 
@@ -2758,12 +2761,13 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       udpPacketsIn: _vpnService.udpPacketsIn,
       wgRxBytes: _vpnService.wgRxBytes,
       directSessionReady: _vpnService.directSessionReady,
+      timeSinceLastHandshakeSecs: _vpnService.timeSinceLastHandshakeSecs,
       error: _vpnService.error,
     );
     final restoredEndpoint = _vpnHandoff.restoreEndpointFromNativeStatus(
       currentEndpoint: _currentVpnTransportEndpoint(),
       snapshot: snapshot,
-      defaultLanPort: _defaultVpnLanPort(),
+      defaultLanPort: kVpnAppWebsocketPort,
     );
     if (restoredEndpoint != null) {
       _vpnEndpointInfo = EndpointInfo(
@@ -2788,18 +2792,16 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       'error=${_vpnService.error ?? "-"}',
     );
     final activeVpnPublicKey = _vpnPublicKey;
-    final activeTransport = _connectionManager.activeTransportKind;
     if (activeVpnPublicKey != null &&
         _connectionManager.connected &&
-        activeTransport != TransportKind.wireguardDirect) {
+        _vpnStayOnWs) {
       _sendVpnPeerEndpoint(activeVpnPublicKey);
+    } else if (!_vpnStayOnWs) {
+      _vpnPunchRetryTimer?.cancel();
+      _vpnPunchRetryTimer = null;
     }
-    final isConnected = _vpnService.isConnected;
     if (!_vpnService.isActive) {
       _vpnNativeStartInFlight = false;
-    }
-    if (isConnected) {
-      _vpnConfigTimeout?.cancel();
     }
     final handoffEndpoint = _currentVpnTransportEndpoint();
     final handoffDecision = _vpnHandoff.onVpnStatusChanged(
@@ -2810,7 +2812,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     );
     if (handoffDecision.shouldSwitch || snapshot.directSessionReady == true) {
       debugPrint(
-        '[VPN-Handoff] shouldSwitch=${handoffDecision.shouldSwitch} shouldFallback=${handoffDecision.shouldFallback} endpoint=${handoffEndpoint?.websocketUri} gate=${VpnTransportHandoffCoordinator.satisfiesDirectReadinessGate(snapshot)} udpIn=${snapshot.udpPacketsIn} tunIn=${snapshot.tunPacketsIn} wgRx=${snapshot.wgRxBytes} directReady=${snapshot.directSessionReady} transportKind=${_connectionManager.activeTransportKind}',
+        '[VPN-Handoff] shouldSwitch=${handoffDecision.shouldSwitch} shouldFallback=${handoffDecision.shouldFallback} endpoint=${handoffEndpoint?.websocketUri} gate=${VpnTransportHandoffCoordinator.satisfiesDirectReadinessGate(snapshot, endpoint: handoffEndpoint)} handshakeSecs=${snapshot.timeSinceLastHandshakeSecs} directReady=${snapshot.directSessionReady} transportKind=${_connectionManager.activeTransportKind} uriHost=${_connectionManager.activeUri?.host}',
       );
     }
     if (handoffDecision.shouldSwitch) {
@@ -2826,6 +2828,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     _reconnecting = false;
     _vpnHandoff.suppressNextFallback();
     _vpnConfigTimeout?.cancel();
+    _vpnPunchRetryTimer?.cancel();
+    _vpnPunchRetryTimer = null;
+    _vpnHandoffPending = false;
     _vpnEndpointInfo = null;
     _vpnNativeStartInFlight = false;
     _vpnHandoff.cancelPendingSwitch();
@@ -2843,41 +2848,110 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     }
   }
 
+  void _handleVpnHostInfo(HostInfo info) {
+    final action = VpnTransportHandoffCoordinator.hostInfoAction(
+      socketHost: _connectionManager.activeUri?.host,
+      vpnPeer: info.vpnPeer,
+    );
+    switch (action) {
+      case VpnHostInfoAction.ignore:
+        return;
+      case VpnHostInfoAction.markDirect:
+        _vpnHandoffPending = false;
+        _vpnPunchRetryTimer?.cancel();
+        _vpnPunchRetryTimer = null;
+        _connectionManager.updateTransportKind(TransportKind.wireguardDirect);
+        _vpnLog(
+          'in-tunnel host_info vpnPeer=true remoteAddr=${info.remoteAddr ?? "-"}',
+        );
+        return;
+      case VpnHostInfoAction.fallback:
+        _vpnLog(
+          'in-tunnel host_info vpnPeer=${info.vpnPeer} remoteAddr=${info.remoteAddr ?? "-"} — falling back',
+        );
+        _vpnHandoffPending = false;
+        _vpnHandoff.suppressSwitch();
+        _fallbackToPrimaryTransport();
+        _armVpnPunchRetry();
+        return;
+    }
+  }
+
+  void _armVpnPunchRetry() {
+    if (_vpnPunchRetryTimer?.isActive ?? false) {
+      return;
+    }
+    _vpnPunchRetryTimer?.cancel();
+    _vpnPunchRetryTimer = Timer(const Duration(seconds: 30), _onVpnPunchRetry);
+  }
+
+  void _onVpnPunchRetry() {
+    _vpnPunchRetryTimer = null;
+    if (!mounted || !_vpnStayOnWs) {
+      return;
+    }
+    _vpnHandoff.clearSwitchSuppression();
+    final key = _vpnPublicKey;
+    if (key != null && _connectionManager.connected) {
+      _sendVpnPeerEndpoint(key, force: true);
+      _armVpnPunchRetry();
+      return;
+    }
+    _maybeStartVpnUpgrade(force: true);
+  }
+
   void _switchToVpnTransport({VpnTransportDecision? decision}) {
     final endpoint = decision?.endpoint ?? _currentVpnTransportEndpoint();
     if (endpoint == null) return;
+    if (!isVpnAppWebsocketHost(endpoint.serverIp)) {
+      _vpnLog(
+        'refusing VPN transport switch to non-tunnel host ${endpoint.serverIp}',
+      );
+      return;
+    }
+    if (isVpnAppWebsocketHost(_connectionManager.activeUri?.host)) {
+      return;
+    }
     final vpnUri = endpoint.websocketUri;
+    _vpnHandoffPending = true;
+    _vpnPunchRetryTimer?.cancel();
+    _vpnPunchRetryTimer = null;
     _vpnLog('Switching transport to $vpnUri');
-    final vpnTransportKind =
-        decision?.transportKind ??
-        VpnTransportHandoffCoordinator.transportKindForMode(
-          _currentVpnTunnelMode(),
-        );
     Future<void>.delayed(const Duration(milliseconds: 750), () {
       if (!mounted || !_vpnService.isConnected) {
+        _vpnHandoffPending = false;
         return;
       }
-      unawaited(
-        _connectionManager.connect(
-          uri: vpnUri,
-          waitForPairing: false,
-          autoReconnect: _autoReconnect,
-          transportKind: vpnTransportKind,
-          readyTimeout: const Duration(seconds: 5),
-          handoffExisting: true,
-        ),
-      );
+      unawaited(_openInTunnelWebsocket(vpnUri));
     });
+  }
+
+  Future<void> _openInTunnelWebsocket(Uri vpnUri) async {
+    await _connectionManager.connect(
+      uri: vpnUri,
+      waitForPairing: false,
+      autoReconnect: _autoReconnect,
+      transportKind: TransportKind.unknown,
+      readyTimeout: const Duration(seconds: 5),
+      handoffExisting: true,
+    );
+    if (!mounted) {
+      return;
+    }
+    if (!isVpnAppWebsocketHost(_connectionManager.activeUri?.host)) {
+      _vpnHandoffPending = false;
+    }
   }
 
   void _fallbackToPrimaryTransport() {
     _vpnConfigTimeout?.cancel();
+    _vpnHandoffPending = false;
     _vpnNativeStartInFlight = false;
     _vpnPublicKey = null;
     _vpnLocalPort = null;
     _vpnDirectCandidates = const <DirectCandidate>[];
     _lastAdvertisedVpnCandidateSignature = null;
-    _vpnLog('VPN disconnected, falling back to primary transport');
+    _vpnLog('falling back to primary transport');
     _connectionManager.disconnect(silent: true);
     _connect(resetVpnUpgrade: false);
   }

@@ -149,6 +149,7 @@ class VpnService extends ChangeNotifier {
   String? _directSessionState;
   bool? _directSessionViable;
   bool? _directSessionReady;
+  int? _timeSinceLastHandshakeSecs;
   int? _pendingDirectQueueDepth;
   int? _directWriteAttempts;
   int? _directWriteErrors;
@@ -181,6 +182,7 @@ class VpnService extends ChangeNotifier {
   String? get directSessionState => _directSessionState;
   bool? get directSessionViable => _directSessionViable;
   bool? get directSessionReady => _directSessionReady;
+  int? get timeSinceLastHandshakeSecs => _timeSinceLastHandshakeSecs;
   int? get pendingDirectQueueDepth => _pendingDirectQueueDepth;
   int? get directWriteAttempts => _directWriteAttempts;
   int? get directWriteErrors => _directWriteErrors;
@@ -220,6 +222,7 @@ class VpnService extends ChangeNotifier {
     _directSessionState = null;
     _directSessionViable = null;
     _directSessionReady = null;
+    _timeSinceLastHandshakeSecs = null;
     _pendingDirectQueueDepth = null;
     _directWriteAttempts = null;
     _directWriteErrors = null;
@@ -269,6 +272,7 @@ class VpnService extends ChangeNotifier {
     _directSessionState = null;
     _directSessionViable = null;
     _directSessionReady = null;
+    _timeSinceLastHandshakeSecs = null;
     _pendingDirectQueueDepth = null;
     _directWriteAttempts = null;
     _directWriteErrors = null;
@@ -307,8 +311,9 @@ class VpnService extends ChangeNotifier {
     bool notify = true,
   }) {
     final payloadStatus = VpnStatus.fromString(payload['status'] as String?);
-    final payloadTimestamp =
-        DateTime.tryParse(payload['timestamp'] as String? ?? '')?.toUtc();
+    final payloadTimestamp = DateTime.tryParse(
+      payload['timestamp'] as String? ?? '',
+    )?.toUtc();
     final negotiationStartedAt = _negotiationStartedAt;
     final staleDuringNegotiation =
         negotiationStartedAt != null &&
@@ -354,16 +359,18 @@ class VpnService extends ChangeNotifier {
     _directSessionState = payload['directSessionState'] as String?;
     _directSessionViable = payload['directSessionViable'] as bool?;
     _directSessionReady = payload['directSessionReady'] as bool?;
-    _pendingDirectQueueDepth =
-        (payload['pendingDirectQueueDepth'] as num?)?.toInt();
+    _timeSinceLastHandshakeSecs =
+        (payload['timeSinceLastHandshakeSecs'] as num?)?.toInt();
+    _pendingDirectQueueDepth = (payload['pendingDirectQueueDepth'] as num?)
+        ?.toInt();
     _directWriteAttempts = (payload['directWriteAttempts'] as num?)?.toInt();
     _directWriteErrors = (payload['directWriteErrors'] as num?)?.toInt();
     _directHandshakePacketsPrepared =
         (payload['directHandshakePacketsPrepared'] as num?)?.toInt();
     _directHandshakePacketsSuppressed =
         (payload['directHandshakePacketsSuppressed'] as num?)?.toInt();
-    _directProbeWriteAttempts =
-        (payload['directProbeWriteAttempts'] as num?)?.toInt();
+    _directProbeWriteAttempts = (payload['directProbeWriteAttempts'] as num?)
+        ?.toInt();
     _lastDirectWriteLabel = payload['lastDirectWriteLabel'] as String?;
     _lastDirectWriteError = payload['lastDirectWriteError'] as String?;
     _error = payload['error'] as String?;
@@ -376,7 +383,8 @@ class VpnService extends ChangeNotifier {
     _vpnLog(
       'status=$_status mode=$_connectionMode '
       'udpIn=$_udpPacketsIn tunIn=$_tunPacketsIn wgRx=$_wgRxBytes '
-      'directReady=$_directSessionReady directViable=$_directSessionViable '
+      'directReady=$_directSessionReady handshakeSecs=$_timeSinceLastHandshakeSecs '
+      'directViable=$_directSessionViable '
       'probes=$_directProbeWriteAttempts writeErr=$_directWriteErrors',
     );
     if (notify) {
@@ -424,6 +432,7 @@ class VpnService extends ChangeNotifier {
       _directSessionState = null;
       _directSessionViable = null;
       _directSessionReady = null;
+      _timeSinceLastHandshakeSecs = null;
       _pendingDirectQueueDepth = null;
       _directWriteAttempts = null;
       _directWriteErrors = null;

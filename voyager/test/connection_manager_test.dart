@@ -15,11 +15,12 @@ ConnectionManager createTestManager() {
     onError: (_) {},
     onGroupSync: (_) {},
     onGroupError: (_) {},
-    onPairingResult: ({
-      required bool approved,
-      String? assignedKey,
-      String? horizonPublicKey,
-    }) {},
+    onPairingResult:
+        ({
+          required bool approved,
+          String? assignedKey,
+          String? horizonPublicKey,
+        }) {},
     onSessionList: (_, {activeSessionId, activeGroupId}) {},
     onSessionCreated: (_) {},
     onSessionClosed: (_) {},
@@ -28,6 +29,39 @@ ConnectionManager createTestManager() {
 }
 
 void main() {
+  group('HostInfo.fromMap', () {
+    test('parses hostName vpnPeer and remoteAddr', () {
+      final info = HostInfo.fromMap({
+        'hostName': 'Horizon',
+        'vpnPeer': true,
+        'remoteAddr': '10.13.37.2:4242',
+      });
+
+      expect(info.hostName, 'Horizon');
+      expect(info.vpnPeer, isTrue);
+      expect(info.remoteAddr, '10.13.37.2:4242');
+    });
+
+    test('treats empty hostName as null and keeps vpnPeer omitted', () {
+      final info = HostInfo.fromMap({'hostName': ''});
+
+      expect(info.hostName, isNull);
+      expect(info.vpnPeer, isNull);
+      expect(info.remoteAddr, isNull);
+    });
+
+    test('preserves vpnPeer false', () {
+      final info = HostInfo.fromMap({
+        'hostName': 'Horizon',
+        'vpnPeer': false,
+        'remoteAddr': '192.168.1.20:9',
+      });
+
+      expect(info.vpnPeer, isFalse);
+      expect(info.remoteAddr, '192.168.1.20:9');
+    });
+  });
+
   group('DirectCandidate', () {
     group('fromMap', () {
       test('parses valid data', () {
@@ -269,9 +303,7 @@ void main() {
       });
 
       test('returns null candidates for non-list value', () {
-        final info = EndpointInfo.fromMap({
-          'horizonCandidates': 'not_a_list',
-        });
+        final info = EndpointInfo.fromMap({'horizonCandidates': 'not_a_list'});
 
         expect(info.horizonCandidates, isNull);
       });
@@ -296,9 +328,7 @@ void main() {
           wgUdpPort: 51820,
           clientIp: '10.0.0.2',
         );
-        const current = EndpointInfo(
-          wgPublicKey: 'new_key',
-        );
+        const current = EndpointInfo(wgPublicKey: 'new_key');
 
         final merged = current.mergeWith(previous);
 
@@ -486,10 +516,7 @@ void main() {
           netcheckHost: '38.60.162.209',
           netcheckPort: 6666,
         );
-        const current = EndpointInfo(
-          netcheckHost: '',
-          netcheckPort: 0,
-        );
+        const current = EndpointInfo(netcheckHost: '', netcheckPort: 0);
 
         final merged = current.mergeWith(previous);
 
@@ -498,10 +525,7 @@ void main() {
       });
 
       test('uses current when previous is invalid', () {
-        const previous = EndpointInfo(
-          netcheckHost: null,
-          netcheckPort: null,
-        );
+        const previous = EndpointInfo(netcheckHost: null, netcheckPort: null);
         const current = EndpointInfo(
           netcheckHost: '10.0.0.1',
           netcheckPort: 5555,
@@ -546,10 +570,7 @@ void main() {
       });
 
       test('treats IPv6-like host as IP literal', () {
-        const previous = EndpointInfo(
-          netcheckHost: '::1',
-          netcheckPort: 6666,
-        );
+        const previous = EndpointInfo(netcheckHost: '::1', netcheckPort: 6666);
         const current = EndpointInfo(
           netcheckHost: 'relay.example.com',
           netcheckPort: 7777,
@@ -588,6 +609,20 @@ void main() {
 
       expect(manager.endpointInfo, isNull);
     });
+
+    test('activeUri starts null', () {
+      final manager = createTestManager();
+
+      expect(manager.activeUri, isNull);
+    });
+
+    test('updateTransportKind changes activeTransportKind', () {
+      final manager = createTestManager();
+
+      manager.updateTransportKind(TransportKind.wireguardDirect);
+
+      expect(manager.activeTransportKind, TransportKind.wireguardDirect);
+    });
   });
 
   group('ConnectionManager.disconnect', () {
@@ -604,11 +639,12 @@ void main() {
         onError: (_) {},
         onGroupSync: (_) {},
         onGroupError: (_) {},
-        onPairingResult: ({
-          required bool approved,
-          String? assignedKey,
-          String? horizonPublicKey,
-        }) {},
+        onPairingResult:
+            ({
+              required bool approved,
+              String? assignedKey,
+              String? horizonPublicKey,
+            }) {},
         onSessionList: (_, {activeSessionId, activeGroupId}) {},
         onSessionCreated: (_) {},
         onSessionClosed: (_) {},
@@ -633,11 +669,12 @@ void main() {
         onError: (_) {},
         onGroupSync: (_) {},
         onGroupError: (_) {},
-        onPairingResult: ({
-          required bool approved,
-          String? assignedKey,
-          String? horizonPublicKey,
-        }) {},
+        onPairingResult:
+            ({
+              required bool approved,
+              String? assignedKey,
+              String? horizonPublicKey,
+            }) {},
         onSessionList: (_, {activeSessionId, activeGroupId}) {},
         onSessionCreated: (_) {},
         onSessionClosed: (_) {},
@@ -719,19 +756,22 @@ void main() {
     // connect() – error paths (no real server ⇒ triggers error callback)
     // -----------------------------------------------------------------------
     group('connect error paths', () {
-      test('fires onError callback when connecting to unreachable host', () async {
-        await manager.connect(
-          uri: Uri.parse('ws://127.0.0.1:1'),
-          waitForPairing: false,
-          autoReconnect: false,
-          transportKind: TransportKind.lanDirect,
-          transportId: 'test-1',
-        );
+      test(
+        'fires onError callback when connecting to unreachable host',
+        () async {
+          await manager.connect(
+            uri: Uri.parse('ws://127.0.0.1:1'),
+            waitForPairing: false,
+            autoReconnect: false,
+            transportKind: TransportKind.lanDirect,
+            transportId: 'test-1',
+          );
 
-        expect(tracker.errors, isNotEmpty);
-        expect(tracker.errors.first, contains('Failed to connect'));
-        expect(manager.connected, isFalse);
-      });
+          expect(tracker.errors, isNotEmpty);
+          expect(tracker.errors.first, contains('Failed to connect'));
+          expect(manager.connected, isFalse);
+        },
+      );
 
       test('fires onConnectedChanged(false) on failed connect', () async {
         // onConnectedChanged starts at false, so it won't fire false again
@@ -785,45 +825,54 @@ void main() {
         expect(manager.activePathId, 'relay-1');
       });
 
-      test('switchReason and fallbackReason are null after fresh connect', () async {
-        await manager.connect(
-          uri: Uri.parse('ws://127.0.0.1:1'),
-          waitForPairing: false,
-          autoReconnect: false,
-          transportKind: TransportKind.lanDirect,
-          transportId: 't1',
-        );
+      test(
+        'switchReason and fallbackReason are null after fresh connect',
+        () async {
+          await manager.connect(
+            uri: Uri.parse('ws://127.0.0.1:1'),
+            waitForPairing: false,
+            autoReconnect: false,
+            transportKind: TransportKind.lanDirect,
+            transportId: 't1',
+          );
 
-        expect(manager.activeSwitchReason, isNull);
-        expect(manager.activeFallbackReason, isNull);
-        expect(manager.activeProbeRttMs, isNull);
-      });
+          expect(manager.activeSwitchReason, isNull);
+          expect(manager.activeFallbackReason, isNull);
+          expect(manager.activeProbeRttMs, isNull);
+        },
+      );
 
-      test('disconnect after failed connect still fires onDisconnected', () async {
-        await manager.connect(
-          uri: Uri.parse('ws://127.0.0.1:1'),
-          waitForPairing: false,
-          autoReconnect: false,
-        );
-        tracker.disconnectCount = 0; // reset from the connect failure
+      test(
+        'disconnect after failed connect still fires onDisconnected',
+        () async {
+          await manager.connect(
+            uri: Uri.parse('ws://127.0.0.1:1'),
+            waitForPairing: false,
+            autoReconnect: false,
+          );
+          tracker.disconnectCount = 0; // reset from the connect failure
 
-        manager.disconnect();
+          manager.disconnect();
 
-        expect(tracker.disconnectCount, 1);
-      });
+          expect(tracker.disconnectCount, 1);
+        },
+      );
 
-      test('disconnect silent:true suppresses callback after failed connect', () async {
-        await manager.connect(
-          uri: Uri.parse('ws://127.0.0.1:1'),
-          waitForPairing: false,
-          autoReconnect: false,
-        );
-        tracker.disconnectCount = 0;
+      test(
+        'disconnect silent:true suppresses callback after failed connect',
+        () async {
+          await manager.connect(
+            uri: Uri.parse('ws://127.0.0.1:1'),
+            waitForPairing: false,
+            autoReconnect: false,
+          );
+          tracker.disconnectCount = 0;
 
-        manager.disconnect(silent: true);
+          manager.disconnect(silent: true);
 
-        expect(tracker.disconnectCount, 0);
-      });
+          expect(tracker.disconnectCount, 0);
+        },
+      );
 
       test('connect with very short timeout triggers error', () async {
         await manager.connect(
@@ -835,6 +884,17 @@ void main() {
 
         expect(tracker.errors, isNotEmpty);
         expect(manager.connected, isFalse);
+      });
+
+      test('does not keep wireguardDirect on a non-10.13.37.1 URI', () async {
+        await manager.connect(
+          uri: Uri.parse('ws://127.0.0.1:1'),
+          waitForPairing: false,
+          autoReconnect: false,
+          transportKind: TransportKind.wireguardDirect,
+        );
+
+        expect(manager.activeTransportKind, TransportKind.unknown);
       });
     });
 
@@ -872,61 +932,67 @@ void main() {
         expect(tracker.errors, isNotEmpty);
       });
 
-      test('multiple candidates with unreachable URIs still set metadata', () async {
-        await manager.connectWithCandidates(
-          candidates: [
-            TransportCandidate(
-              id: 'lan-1',
-              kind: TransportKind.lanDirect,
-              uri: Uri.parse('ws://127.0.0.1:1'),
-              waitForPairing: false,
-              priority: 100,
-              probeByConnect: true,
-            ),
-            TransportCandidate(
-              id: 'relay-1',
-              kind: TransportKind.wormholeRelay,
-              uri: Uri.parse('ws://127.0.0.1:2'),
-              waitForPairing: false,
-              priority: 50,
-              probeByConnect: true,
-            ),
-          ],
-          autoReconnect: false,
-        );
+      test(
+        'multiple candidates with unreachable URIs still set metadata',
+        () async {
+          await manager.connectWithCandidates(
+            candidates: [
+              TransportCandidate(
+                id: 'lan-1',
+                kind: TransportKind.lanDirect,
+                uri: Uri.parse('ws://127.0.0.1:1'),
+                waitForPairing: false,
+                priority: 100,
+                probeByConnect: true,
+              ),
+              TransportCandidate(
+                id: 'relay-1',
+                kind: TransportKind.wormholeRelay,
+                uri: Uri.parse('ws://127.0.0.1:2'),
+                waitForPairing: false,
+                priority: 50,
+                probeByConnect: true,
+              ),
+            ],
+            autoReconnect: false,
+          );
 
-        // Both probes fail, falls back to first candidate.
-        expect(tracker.errors, isNotEmpty);
-        expect(manager.connected, isFalse);
-      });
+          // Both probes fail, falls back to first candidate.
+          expect(tracker.errors, isNotEmpty);
+          expect(manager.connected, isFalse);
+        },
+      );
 
-      test('multiple candidates with probeByConnect=false skip actual probe', () async {
-        await manager.connectWithCandidates(
-          candidates: [
-            TransportCandidate(
-              id: 'skip-1',
-              kind: TransportKind.lanDirect,
-              uri: Uri.parse('ws://127.0.0.1:1'),
-              waitForPairing: false,
-              priority: 100,
-              probeByConnect: false,
-            ),
-            TransportCandidate(
-              id: 'skip-2',
-              kind: TransportKind.wormholeRelay,
-              uri: Uri.parse('ws://127.0.0.1:2'),
-              waitForPairing: false,
-              priority: 50,
-              probeByConnect: false,
-            ),
-          ],
-          autoReconnect: false,
-        );
+      test(
+        'multiple candidates with probeByConnect=false skip actual probe',
+        () async {
+          await manager.connectWithCandidates(
+            candidates: [
+              TransportCandidate(
+                id: 'skip-1',
+                kind: TransportKind.lanDirect,
+                uri: Uri.parse('ws://127.0.0.1:1'),
+                waitForPairing: false,
+                priority: 100,
+                probeByConnect: false,
+              ),
+              TransportCandidate(
+                id: 'skip-2',
+                kind: TransportKind.wormholeRelay,
+                uri: Uri.parse('ws://127.0.0.1:2'),
+                waitForPairing: false,
+                priority: 50,
+                probeByConnect: false,
+              ),
+            ],
+            autoReconnect: false,
+          );
 
-        // Probes are skipped (instant 999ms rtt), but connect itself still fails.
-        expect(tracker.errors, isNotEmpty);
-        expect(manager.connected, isFalse);
-      });
+          // Probes are skipped (instant 999ms rtt), but connect itself still fails.
+          expect(tracker.errors, isNotEmpty);
+          expect(manager.connected, isFalse);
+        },
+      );
     });
 
     // -----------------------------------------------------------------------
@@ -944,7 +1010,8 @@ void main() {
     group('sendEndpointRequest', () {
       test('does nothing when not connected', () {
         expect(
-          () => manager.sendEndpointRequest(wgPublicKey: 'key', wgUdpPort: 51820),
+          () =>
+              manager.sendEndpointRequest(wgPublicKey: 'key', wgUdpPort: 51820),
           returnsNormally,
         );
       });
@@ -1042,14 +1109,17 @@ void main() {
         expect(tracker.disconnectCount, countAfterFirst + 1);
       });
 
-      test('disconnect with shouldReconnect=true does not reconnect if autoReconnect disabled', () async {
-        manager.updateAutoReconnect(false);
-        manager.disconnect(shouldReconnect: true);
+      test(
+        'disconnect with shouldReconnect=true does not reconnect if autoReconnect disabled',
+        () async {
+          manager.updateAutoReconnect(false);
+          manager.disconnect(shouldReconnect: true);
 
-        // Give a moment for any timer to fire (there shouldn't be one).
-        await Future<void>.delayed(const Duration(milliseconds: 50));
-        expect(manager.connected, isFalse);
-      });
+          // Give a moment for any timer to fire (there shouldn't be one).
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          expect(manager.connected, isFalse);
+        },
+      );
     });
   });
 
@@ -1106,9 +1176,18 @@ void main() {
   group('TransportKind', () {
     test('fromWireName returns correct kinds', () {
       expect(TransportKind.fromWireName('lan_direct'), TransportKind.lanDirect);
-      expect(TransportKind.fromWireName('wormhole_relay'), TransportKind.wormholeRelay);
-      expect(TransportKind.fromWireName('wireguard_direct'), TransportKind.wireguardDirect);
-      expect(TransportKind.fromWireName('wireguard_relay'), TransportKind.unknown);
+      expect(
+        TransportKind.fromWireName('wormhole_relay'),
+        TransportKind.wormholeRelay,
+      );
+      expect(
+        TransportKind.fromWireName('wireguard_direct'),
+        TransportKind.wireguardDirect,
+      );
+      expect(
+        TransportKind.fromWireName('wireguard_relay'),
+        TransportKind.unknown,
+      );
       expect(TransportKind.fromWireName('unknown'), TransportKind.unknown);
     });
 
@@ -1150,7 +1229,10 @@ void main() {
     });
 
     test('fromType returns unknown for unrecognized string', () {
-      expect(TransportControlType.fromType('nope'), TransportControlType.unknown);
+      expect(
+        TransportControlType.fromType('nope'),
+        TransportControlType.unknown,
+      );
     });
   });
 
@@ -1291,7 +1373,10 @@ void main() {
 
     test('IPv6 loopback is detected as IP', () {
       const previous = EndpointInfo(netcheckHost: '::1', netcheckPort: 100);
-      const current = EndpointInfo(netcheckHost: 'host.example.com', netcheckPort: 200);
+      const current = EndpointInfo(
+        netcheckHost: 'host.example.com',
+        netcheckPort: 200,
+      );
 
       final merged = current.mergeWith(previous);
       expect(merged.netcheckHost, '::1');
@@ -1307,7 +1392,10 @@ void main() {
     });
 
     test('two IPs: current wins', () {
-      const previous = EndpointInfo(netcheckHost: '10.0.0.1', netcheckPort: 100);
+      const previous = EndpointInfo(
+        netcheckHost: '10.0.0.1',
+        netcheckPort: 100,
+      );
       const current = EndpointInfo(netcheckHost: '10.0.0.2', netcheckPort: 200);
 
       final merged = current.mergeWith(previous);
@@ -1316,8 +1404,14 @@ void main() {
     });
 
     test('current is IP, previous is domain: current wins', () {
-      const previous = EndpointInfo(netcheckHost: 'host.com', netcheckPort: 100);
-      const current = EndpointInfo(netcheckHost: '192.168.1.1', netcheckPort: 200);
+      const previous = EndpointInfo(
+        netcheckHost: 'host.com',
+        netcheckPort: 100,
+      );
+      const current = EndpointInfo(
+        netcheckHost: '192.168.1.1',
+        netcheckPort: 200,
+      );
 
       final merged = current.mergeWith(previous);
       expect(merged.netcheckHost, '192.168.1.1');
@@ -1340,15 +1434,17 @@ void main() {
     });
 
     test('previous is empty list, current has items', () {
-      const current = EndpointInfo(horizonCandidates: [
-        DirectCandidate(
-          addr: '1.2.3.4',
-          port: 100,
-          scope: 'lan',
-          priority: 10,
-          source: 'test',
-        ),
-      ]);
+      const current = EndpointInfo(
+        horizonCandidates: [
+          DirectCandidate(
+            addr: '1.2.3.4',
+            port: 100,
+            scope: 'lan',
+            priority: 10,
+            source: 'test',
+          ),
+        ],
+      );
       const previous = EndpointInfo(horizonCandidates: []);
 
       final merged = current.mergeWith(previous);
@@ -1356,24 +1452,28 @@ void main() {
     });
 
     test('same addr:port/scope in both lists: current wins', () {
-      const previous = EndpointInfo(horizonCandidates: [
-        DirectCandidate(
-          addr: '1.1.1.1',
-          port: 51820,
-          scope: 'lan',
-          priority: 10,
-          source: 'old',
-        ),
-      ]);
-      const current = EndpointInfo(horizonCandidates: [
-        DirectCandidate(
-          addr: '1.1.1.1',
-          port: 51820,
-          scope: 'lan',
-          priority: 99,
-          source: 'new',
-        ),
-      ]);
+      const previous = EndpointInfo(
+        horizonCandidates: [
+          DirectCandidate(
+            addr: '1.1.1.1',
+            port: 51820,
+            scope: 'lan',
+            priority: 10,
+            source: 'old',
+          ),
+        ],
+      );
+      const current = EndpointInfo(
+        horizonCandidates: [
+          DirectCandidate(
+            addr: '1.1.1.1',
+            port: 51820,
+            scope: 'lan',
+            priority: 99,
+            source: 'new',
+          ),
+        ],
+      );
 
       final merged = current.mergeWith(previous);
       expect(merged.horizonCandidates, hasLength(1));
@@ -1382,24 +1482,28 @@ void main() {
     });
 
     test('different scope creates separate entries', () {
-      const previous = EndpointInfo(horizonCandidates: [
-        DirectCandidate(
-          addr: '1.1.1.1',
-          port: 51820,
-          scope: 'lan',
-          priority: 10,
-          source: 'a',
-        ),
-      ]);
-      const current = EndpointInfo(horizonCandidates: [
-        DirectCandidate(
-          addr: '1.1.1.1',
-          port: 51820,
-          scope: 'public',
-          priority: 20,
-          source: 'b',
-        ),
-      ]);
+      const previous = EndpointInfo(
+        horizonCandidates: [
+          DirectCandidate(
+            addr: '1.1.1.1',
+            port: 51820,
+            scope: 'lan',
+            priority: 10,
+            source: 'a',
+          ),
+        ],
+      );
+      const current = EndpointInfo(
+        horizonCandidates: [
+          DirectCandidate(
+            addr: '1.1.1.1',
+            port: 51820,
+            scope: 'public',
+            priority: 20,
+            source: 'b',
+          ),
+        ],
+      );
 
       final merged = current.mergeWith(previous);
       expect(merged.horizonCandidates, hasLength(2));
@@ -1549,7 +1653,7 @@ class CallbackTracker {
   final pairingPendingChanges = <bool>[];
   final groupSyncs = <Map<String, dynamic>>[];
   final groupErrors = <String>[];
-  final hostInfos = <String?>[];
+  final hostInfos = <HostInfo>[];
   final sessionLists = <List<String>>[];
   final sessionsCreated = <String>[];
   final sessionsClosed = <String>[];
@@ -1557,7 +1661,8 @@ class CallbackTracker {
   int disconnectCount = 0;
   int connectedCount = 0;
   bool lastWaitForPairing = false;
-  final pairingResults = <({bool approved, String? assignedKey, String? horizonPublicKey})>[];
+  final pairingResults =
+      <({bool approved, String? assignedKey, String? horizonPublicKey})>[];
   final endpointInfos = <EndpointInfo>[];
   final vpnConfigs = <EndpointInfo>[];
 
@@ -1576,8 +1681,8 @@ class CallbackTracker {
       onPairingPendingChanged: (pending) {
         pairingPendingChanges.add(pending);
       },
-      onHostInfo: (hostName) {
-        hostInfos.add(hostName);
+      onHostInfo: (info) {
+        hostInfos.add(info);
       },
       onError: (message) {
         errors.add(message);
@@ -1588,17 +1693,18 @@ class CallbackTracker {
       onGroupError: (message) {
         groupErrors.add(message);
       },
-      onPairingResult: ({
-        required bool approved,
-        String? assignedKey,
-        String? horizonPublicKey,
-      }) {
-        pairingResults.add((
-          approved: approved,
-          assignedKey: assignedKey,
-          horizonPublicKey: horizonPublicKey,
-        ));
-      },
+      onPairingResult:
+          ({
+            required bool approved,
+            String? assignedKey,
+            String? horizonPublicKey,
+          }) {
+            pairingResults.add((
+              approved: approved,
+              assignedKey: assignedKey,
+              horizonPublicKey: horizonPublicKey,
+            ));
+          },
       onSessionList: (sessions, {activeSessionId, activeGroupId}) {
         sessionLists.add(sessions);
       },

@@ -14,7 +14,7 @@
       "isConnected": false,
       "mode": "unknown",
       "serverIp": "10.13.37.1",
-      "lanPort": 9529,
+      "lanPort": 9527,
       "primaryConnectionConnected": true,
       "activeTransportKind": "wormhole_relay"
     },
@@ -24,7 +24,7 @@
       "isConnected": false,
       "mode": "direct",
       "serverIp": "10.13.37.1",
-      "lanPort": 9529,
+      "lanPort": 9527,
       "primaryConnectionConnected": true,
       "activeTransportKind": "wormhole_relay"
     },
@@ -34,7 +34,7 @@
       "isConnected": false,
       "mode": "direct",
       "serverIp": "10.13.37.1",
-      "lanPort": 9529,
+      "lanPort": 9527,
       "primaryConnectionConnected": true,
       "activeTransportKind": "wormhole_relay"
     },
@@ -44,7 +44,7 @@
       "isConnected": false,
       "mode": "relay",
       "serverIp": "10.13.37.1",
-      "lanPort": 9529,
+      "lanPort": 9527,
       "primaryConnectionConnected": true,
       "activeTransportKind": "wormhole_relay"
     },
@@ -54,7 +54,7 @@
       "isConnected": true,
       "mode": "relay",
       "serverIp": "10.13.37.1",
-      "lanPort": 9529,
+      "lanPort": 9527,
       "primaryConnectionConnected": true,
       "activeTransportKind": "wormhole_relay"
     },
@@ -64,7 +64,7 @@
       "isConnected": true,
       "mode": "relay",
       "serverIp": "10.13.37.1",
-      "lanPort": 9529,
+      "lanPort": 9527,
       "primaryConnectionConnected": true,
       "activeTransportKind": "wormhole_relay"
     }

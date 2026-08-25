@@ -82,8 +82,15 @@ class WgAppFlowValidator {
     final connectionMode = vpnStatusJson['connectionMode'] as String?;
     final directSessionReady =
         vpnStatusJson['directSessionReady'] as bool? ?? false;
+    final endpoint = VpnTransportEndpoint(
+      serverIp: snapshot.serverIp ?? '',
+      lanPort: snapshot.lanPort ?? kVpnAppWebsocketPort,
+    );
     final directReadinessGateSatisfied =
-        VpnTransportHandoffCoordinator.satisfiesDirectReadinessGate(snapshot);
+        VpnTransportHandoffCoordinator.satisfiesDirectReadinessGate(
+          snapshot,
+          endpoint: endpoint,
+        );
     final vpnStatusConnectedDirect =
         status == 'connected' && connectionMode == 'direct';
 
@@ -153,6 +160,11 @@ class WgAppFlowValidator {
     if (clientIp == null || clientIp.isEmpty) {
       failures.add('missing clientIp in vpn_status.json');
     }
+    if (snapshot.serverIp != kVpnAppWebsocketHost) {
+      failures.add(
+        'vpn_status serverIp must be $kVpnAppWebsocketHost for in-tunnel app WS',
+      );
+    }
     if (!vpnStatusConnectedDirect) {
       failures.add(
         'vpn_status does not show status=connected and connectionMode=direct',
@@ -163,7 +175,7 @@ class WgAppFlowValidator {
     }
     if (!directReadinessGateSatisfied) {
       failures.add(
-        'direct readiness gate is not satisfied: need udpPacketsIn>0 and (tunPacketsIn>0 or wgRxBytes>0)',
+        'direct readiness gate is not satisfied: need host $kVpnAppWebsocketHost, native connected, and handshake (timeSinceLastHandshakeSecs>=0 or directSessionReady)',
       );
     }
     if (!addedPeer) {

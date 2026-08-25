@@ -25,42 +25,78 @@ void main(List<String> args) async {
 
 void _runBuiltInScenarios() {
   final scenarios = <_Scenario>[
-    _Scenario('restore relay endpoint from native status', () {
+    _Scenario('restore in-tunnel endpoint from native status', () {
       final coordinator = VpnTransportHandoffCoordinator();
       final restored = coordinator.restoreEndpointFromNativeStatus(
         currentEndpoint: null,
         snapshot: const VpnTunnelSnapshot(
           isActive: true,
           isConnected: true,
-          mode: VpnTunnelMode.relay,
-          serverIp: '10.13.37.1',
+          mode: VpnTunnelMode.direct,
+          serverIp: kVpnAppWebsocketHost,
         ),
-        defaultLanPort: 9527,
+        defaultLanPort: kVpnAppWebsocketPort,
       );
       _expect(restored != null, 'expected endpoint to be restored');
-      _expect(restored!.lanPort == 9529, 'expected relay default lanPort 9529');
+      _expect(
+        restored!.serverIp == kVpnAppWebsocketHost,
+        'expected URI host $kVpnAppWebsocketHost',
+      );
+      _expect(
+        restored.lanPort == kVpnAppWebsocketPort,
+        'expected default lanPort $kVpnAppWebsocketPort',
+      );
     }),
-    _Scenario('switch immediately when vpn connects and primary is ready', () {
+    _Scenario('switch to 10.13.37.1 as unknown after handshake dwell', () {
       final coordinator = VpnTransportHandoffCoordinator();
-      final decision = coordinator.onVpnStatusChanged(
+      final connectedAt = DateTime.utc(2026, 1, 1, 0, 0, 0);
+      coordinator.onVpnStatusChanged(
         snapshot: const VpnTunnelSnapshot(
           isActive: true,
           isConnected: true,
-          mode: VpnTunnelMode.relay,
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
+          mode: VpnTunnelMode.direct,
+          serverIp: kVpnAppWebsocketHost,
+          lanPort: kVpnAppWebsocketPort,
         ),
         primaryConnectionConnected: true,
         activeTransportKind: TransportKind.wormholeRelay,
         endpoint: const VpnTransportEndpoint(
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
+          serverIp: kVpnAppWebsocketHost,
+          lanPort: kVpnAppWebsocketPort,
         ),
+        now: connectedAt,
+      );
+      final decision = coordinator.onVpnStatusChanged(
+        snapshot: const VpnTunnelSnapshot(
+          isActive: true,
+          isConnected: true,
+          mode: VpnTunnelMode.direct,
+          serverIp: kVpnAppWebsocketHost,
+          lanPort: kVpnAppWebsocketPort,
+          timeSinceLastHandshakeSecs: 1,
+          directSessionReady: true,
+        ),
+        primaryConnectionConnected: true,
+        activeTransportKind: TransportKind.wormholeRelay,
+        endpoint: const VpnTransportEndpoint(
+          serverIp: kVpnAppWebsocketHost,
+          lanPort: kVpnAppWebsocketPort,
+        ),
+        now: connectedAt.add(const Duration(seconds: 3)),
       );
       _expect(decision.shouldSwitch, 'expected handoff switch decision');
       _expect(
-        decision.endpoint?.websocketUri.toString() == 'ws://10.13.37.1:9529/ws',
-        'expected relay websocket target',
+        decision.transportKind == TransportKind.unknown,
+        'expected in-tunnel WS to open as unknown',
+      );
+      _expect(
+        decision.endpoint?.websocketUri.host == kVpnAppWebsocketHost,
+        'expected URI host $kVpnAppWebsocketHost',
+      );
+      _expect(
+        decision.endpoint?.websocketUri.toString() ==
+            'ws://$kVpnAppWebsocketHost:$kVpnAppWebsocketPort/ws',
+        'expected in-tunnel websocket target',
       );
     }),
     _Scenario('delay switch until primary websocket is connected', () {
@@ -70,15 +106,17 @@ void _runBuiltInScenarios() {
           isActive: true,
           isConnected: true,
           mode: VpnTunnelMode.direct,
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
+          serverIp: kVpnAppWebsocketHost,
+          lanPort: kVpnAppWebsocketPort,
+          timeSinceLastHandshakeSecs: 1,
         ),
         primaryConnectionConnected: false,
         activeTransportKind: TransportKind.unknown,
         endpoint: const VpnTransportEndpoint(
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
+          serverIp: kVpnAppWebsocketHost,
+          lanPort: kVpnAppWebsocketPort,
         ),
+        now: DateTime.utc(2026, 1, 1, 0, 0, 0),
       );
       _expect(
         !initial.shouldSwitch,
@@ -94,47 +132,92 @@ void _runBuiltInScenarios() {
         vpnMode: VpnTunnelMode.direct,
         activeTransportKind: TransportKind.wormholeRelay,
         endpoint: const VpnTransportEndpoint(
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
+          serverIp: kVpnAppWebsocketHost,
+          lanPort: kVpnAppWebsocketPort,
         ),
+        now: DateTime.utc(2026, 1, 1, 0, 0, 3),
       );
       _expect(resumed.shouldSwitch, 'expected switch after primary connection');
+      _expect(
+        resumed.endpoint?.websocketUri.host == kVpnAppWebsocketHost,
+        'expected URI host $kVpnAppWebsocketHost',
+      );
     }),
     _Scenario('fallback after vpn disconnects', () {
       final coordinator = VpnTransportHandoffCoordinator();
+      final connectedAt = DateTime.utc(2026, 1, 1, 0, 0, 0);
       coordinator.onVpnStatusChanged(
         snapshot: const VpnTunnelSnapshot(
           isActive: true,
           isConnected: true,
-          mode: VpnTunnelMode.relay,
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
+          mode: VpnTunnelMode.direct,
+          serverIp: kVpnAppWebsocketHost,
+          lanPort: kVpnAppWebsocketPort,
+          timeSinceLastHandshakeSecs: 1,
         ),
         primaryConnectionConnected: true,
         activeTransportKind: TransportKind.wormholeRelay,
         endpoint: const VpnTransportEndpoint(
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
+          serverIp: kVpnAppWebsocketHost,
+          lanPort: kVpnAppWebsocketPort,
         ),
+        now: connectedAt,
+      );
+      coordinator.onVpnStatusChanged(
+        snapshot: const VpnTunnelSnapshot(
+          isActive: false,
+          isConnected: false,
+          mode: VpnTunnelMode.direct,
+          serverIp: kVpnAppWebsocketHost,
+          lanPort: kVpnAppWebsocketPort,
+        ),
+        primaryConnectionConnected: false,
+        activeTransportKind: TransportKind.unknown,
+        endpoint: const VpnTransportEndpoint(
+          serverIp: kVpnAppWebsocketHost,
+          lanPort: kVpnAppWebsocketPort,
+        ),
+        now: connectedAt.add(const Duration(seconds: 1)),
       );
       final fallback = coordinator.onVpnStatusChanged(
         snapshot: const VpnTunnelSnapshot(
           isActive: false,
           isConnected: false,
-          mode: VpnTunnelMode.relay,
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
+          mode: VpnTunnelMode.direct,
+          serverIp: kVpnAppWebsocketHost,
+          lanPort: kVpnAppWebsocketPort,
         ),
         primaryConnectionConnected: false,
-        activeTransportKind: TransportKind.wireguardDirect,
+        activeTransportKind: TransportKind.unknown,
         endpoint: const VpnTransportEndpoint(
-          serverIp: '10.13.37.1',
-          lanPort: 9529,
+          serverIp: kVpnAppWebsocketHost,
+          lanPort: kVpnAppWebsocketPort,
         ),
+        now: connectedAt.add(const Duration(seconds: 6)),
       );
       _expect(
         fallback.shouldFallback,
         'expected fallback to primary transport',
+      );
+    }),
+    _Scenario('vpnPeer true on 10.13.37.1 marks Direct', () {
+      _expect(
+        VpnTransportHandoffCoordinator.hostInfoAction(
+              socketHost: kVpnAppWebsocketHost,
+              vpnPeer: true,
+            ) ==
+            VpnHostInfoAction.markDirect,
+        'expected vpnPeer=true on $kVpnAppWebsocketHost to mark Direct',
+      );
+    }),
+    _Scenario('control-plane host_info does not clear Direct', () {
+      _expect(
+        VpnTransportHandoffCoordinator.hostInfoAction(
+              socketHost: 'wormhole.blackhole-ai.com',
+              vpnPeer: false,
+            ) ==
+            VpnHostInfoAction.ignore,
+        'expected control-plane host_info to be ignored',
       );
     }),
   ];
@@ -163,7 +246,8 @@ Future<void> _runScenarioFile(String path) async {
   final file = File(path);
   final decoded = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
   final coordinator = VpnTransportHandoffCoordinator();
-  final defaultLanPort = (decoded['defaultLanPort'] as num?)?.toInt() ?? 9527;
+  final defaultLanPort =
+      (decoded['defaultLanPort'] as num?)?.toInt() ?? kVpnAppWebsocketPort;
   VpnTransportEndpoint? endpoint;
 
   final events = (decoded['events'] as List<dynamic>? ?? const []);
