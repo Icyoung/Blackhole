@@ -16,7 +16,6 @@ mod vpn_helper_protocol;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::Command;
@@ -65,8 +64,7 @@ fn run(socket_path: PathBuf, pid_path: PathBuf) -> Result<(), String> {
 
     let listener = UnixListener::bind(&socket_path)
         .map_err(|e| format!("failed to bind socket {}: {e}", socket_path.display()))?;
-    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o666))
-        .map_err(|e| format!("failed to set socket permissions: {e}"))?;
+    vpn_helper_protocol::restrict_helper_socket(&socket_path)?;
     fs::write(&pid_path, format!("{}\n", std::process::id()))
         .map_err(|e| format!("failed to write pid file: {e}"))?;
 
@@ -184,6 +182,9 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<ActiveVpnState>>) -> Resu
             };
             cleanup_vpn(interface_name, subnet, bridge_stop, bridge_thread);
             send_response(&stream, &HelperResponse::stopped(), None)?;
+        }
+        HelperRequest::DisableWsRedirect { .. } => {
+            send_response(&stream, &HelperResponse::ws_redirect_disabled(), None)?;
         }
     }
 

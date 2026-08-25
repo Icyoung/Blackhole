@@ -61,6 +61,7 @@ fn main() {
         "10.13.37.0/24",
         "255.255.255.0",
         9527,
+        false,
     )
     .expect("failed to start VPN via helper");
 

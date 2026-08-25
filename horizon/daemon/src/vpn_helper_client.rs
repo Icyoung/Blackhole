@@ -43,6 +43,23 @@ impl HelperSession {
             Err("VPN helper is not supported on this platform".to_string())
         }
     }
+
+    pub fn disable_ws_redirect(&self) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            let response = send_request(&self.socket_path, &HelperRequest::disable_ws_redirect())?;
+            match response {
+                HelperResponse::WsRedirectDisabled { .. } => Ok(()),
+                HelperResponse::Error { message, .. } => Err(message),
+                other => Err(format!("unexpected helper response: {:?}", other)),
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            Err("VPN helper is not supported on this platform".to_string())
+        }
+    }
 }
 
 pub fn socket_path(data_dir: &Path) -> PathBuf {
@@ -74,18 +91,31 @@ pub fn start_vpn(
     subnet: &str,
     netmask: &str,
     app_port: u16,
+    ws_redirect: bool,
 ) -> Result<PreparedTun, String> {
     #[cfg(unix)]
     {
         let socket_path = socket_path(data_dir);
-        match start_vpn_once(&socket_path, server_ip, subnet, netmask, app_port) {
+        match start_vpn_once(
+            &socket_path,
+            server_ip,
+            subnet,
+            netmask,
+            app_port,
+            ws_redirect,
+        ) {
             Ok(prepared) => Ok(prepared),
             Err(message) if message == HELPER_ALREADY_ACTIVE_MESSAGE => {
                 let response = send_request(&socket_path, &HelperRequest::stop_vpn())?;
                 match response {
-                    HelperResponse::Stopped { .. } => {
-                        start_vpn_once(&socket_path, server_ip, subnet, netmask, app_port)
-                    }
+                    HelperResponse::Stopped { .. } => start_vpn_once(
+                        &socket_path,
+                        server_ip,
+                        subnet,
+                        netmask,
+                        app_port,
+                        ws_redirect,
+                    ),
                     HelperResponse::Error { message, .. } => Err(format!(
                         "failed to recover stale helper-backed VPN: {message}"
                     )),
@@ -101,7 +131,7 @@ pub fn start_vpn(
 
     #[cfg(not(unix))]
     {
-        let _ = (data_dir, server_ip, subnet, netmask, app_port);
+        let _ = (data_dir, server_ip, subnet, netmask, app_port, ws_redirect);
         Err("VPN helper is not supported on this platform".to_string())
     }
 }
@@ -113,14 +143,16 @@ fn start_vpn_once(
     subnet: &str,
     netmask: &str,
     app_port: u16,
+    ws_redirect: bool,
 ) -> Result<PreparedTun, String> {
     let (response, fd) = send_request_with_optional_fd(
         socket_path,
-        &HelperRequest::start_vpn(
+        &HelperRequest::start_vpn_with_redirect(
             server_ip.to_string(),
             subnet.to_string(),
             netmask.to_string(),
             app_port,
+            ws_redirect,
         ),
     )?;
 

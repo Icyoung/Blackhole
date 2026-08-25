@@ -34,6 +34,36 @@ pub fn setup_nat(
     }
 }
 
+/// Drop the local WebSocket rdr while keeping masquerade NAT.
+/// Used before binding 10.13.37.1 so rdr and the explicit bind are never both active.
+pub fn disable_local_ws_redirect() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let subnet = ACTIVE_SUBNET.lock().ok().and_then(|s| s.clone());
+        match subnet {
+            Some(subnet) => setup_nat(&subnet, None, None),
+            None => Ok(()),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(())
+    }
+}
+
+/// pf rdr that DNATs in-tunnel TCP to the loopback listener. `inbound_iface` must
+/// be the TUN name; rdr on lo0 never sees utun packets.
+pub fn local_ws_rdr_rule(
+    inbound_iface: &str,
+    vpn_subnet: &str,
+    server_ip: &str,
+    app_port: u16,
+) -> String {
+    format!(
+        "rdr pass on {inbound_iface} inet proto tcp from {vpn_subnet} to {server_ip} port {app_port} -> 127.0.0.1 port {app_port}\n"
+    )
+}
+
 /// Remove NAT rules that were previously installed by `setup_nat`.
 pub fn teardown_nat() -> Result<(), String> {
     let _subnet = ACTIVE_SUBNET.lock().ok().and_then(|mut s| s.take());
@@ -136,13 +166,16 @@ fn setup_nat_macos(
         iface, vpn_subnet, iface
     );
     if let Some((server_ip, app_port, inbound_iface)) = local_ws_redirect {
-        let redirect_iface = inbound_iface.unwrap_or("lo0");
-        let rdr_rule = format!(
-            "rdr pass on {} inet proto tcp from {} to {} port {} -> 127.0.0.1 port {}\n",
-            redirect_iface, vpn_subnet, server_ip, app_port, app_port
-        );
-        info!("loading pf local redirect rule: {}", rdr_rule.trim());
-        rules.push_str(&rdr_rule);
+        match inbound_iface.filter(|iface| !iface.is_empty()) {
+            Some(redirect_iface) => {
+                let rdr_rule = local_ws_rdr_rule(redirect_iface, vpn_subnet, server_ip, app_port);
+                info!("loading pf local redirect rule: {}", rdr_rule.trim());
+                rules.push_str(&rdr_rule);
+            }
+            None => {
+                warn!("skipping pf local redirect: inbound TUN iface not provided");
+            }
+        }
     }
     info!(
         "loading pf rules into anchor 'blackhole': {}",
@@ -371,4 +404,18 @@ fn enable_ip_forwarding_linux() -> Result<(), String> {
 
     info!("IP forwarding enabled");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_ws_rdr_rule;
+
+    #[test]
+    fn local_ws_rdr_rule_uses_utun_not_lo0() {
+        let rule = local_ws_rdr_rule("utun4", "10.13.37.0/24", "10.13.37.1", 9527);
+        assert!(rule.starts_with("rdr pass on utun4 inet proto tcp"));
+        assert!(rule.contains("from 10.13.37.0/24 to 10.13.37.1 port 9527"));
+        assert!(rule.contains("-> 127.0.0.1 port 9527"));
+        assert!(!rule.contains("on lo0"));
+    }
 }

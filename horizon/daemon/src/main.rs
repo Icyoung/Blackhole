@@ -7,33 +7,38 @@ mod vpn_config;
 mod vpn_helper_client;
 mod vpn_helper_protocol;
 mod vpn_signaling;
+mod vpn_tcp_delivery;
 mod wg_server;
 
 use std::collections::HashMap;
 use std::env;
 #[cfg(unix)]
 use std::ffi::CStr;
+use std::fmt;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use axum::extract::connect_info::Connected;
 use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::ConnectInfo;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
+use axum::serve::IncomingStream;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use tracing::{debug, info, warn};
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -93,6 +98,39 @@ struct AppState {
     /// Dedupes endpoint_register floods on the same candidate set.
     last_endpoint_register_sig: Mutex<Option<String>>,
     endpoint_register_retrying: AtomicBool,
+    /// When true, bind 10.13.37.1:lanPort after pf rdr has been removed.
+    vpn_explicit_ws: watch::Sender<bool>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ClientConnectInfo {
+    remote: SocketAddr,
+    local: SocketAddr,
+}
+
+impl Deref for ClientConnectInfo {
+    type Target = SocketAddr;
+
+    fn deref(&self) -> &Self::Target {
+        &self.remote
+    }
+}
+
+impl fmt::Display for ClientConnectInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.remote.fmt(f)
+    }
+}
+
+impl Connected<IncomingStream<'_>> for ClientConnectInfo {
+    fn connect_info(target: IncomingStream<'_>) -> Self {
+        Self {
+            remote: target.remote_addr(),
+            local: target
+                .local_addr()
+                .unwrap_or_else(|_| SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)),
+        }
+    }
 }
 
 /// Commands sent to the WgServer event loop for adding/removing peers.
@@ -356,6 +394,9 @@ async fn run_server(
 
     let paired_devices = load_paired_devices(&data_dir).unwrap_or_default();
     let (groups, session_names) = load_groups(&data_dir);
+    let explicit_vpn_ws = config.vpn
+        && vpn_tcp_delivery::uses_explicit_bind(vpn_tcp_delivery::vpn_tcp_delivery_mode());
+    let (vpn_explicit_ws, vpn_explicit_rx) = watch::channel(explicit_vpn_ws);
     let state = Arc::new(AppState {
         sessions: Arc::new(Mutex::new(HashMap::new())),
         inject_tasks: Mutex::new(HashMap::new()),
@@ -393,6 +434,7 @@ async fn run_server(
         last_punch_epoch: AtomicU64::new(0),
         last_endpoint_register_sig: Mutex::new(None),
         endpoint_register_retrying: AtomicBool::new(false),
+        vpn_explicit_ws,
     });
 
     let pid_path = daemon_pid_path(&state.data_dir);
@@ -468,46 +510,16 @@ async fn run_server(
         .route("/ws", get(ws_handler))
         .with_state(state.clone());
 
-    if let Some(vpn_ws_addr) = secondary_vpn_ws_addr(config.bind, config.port, config.vpn_ws_bind) {
-        let vpn_app = app.clone();
-        tokio::spawn(async move {
-            let mut waiting_logged = false;
-            loop {
-                if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
-                    return;
-                }
-                match tokio::net::TcpListener::bind(vpn_ws_addr).await {
-                    Ok(listener) => {
-                        info!("horizon-daemon VPN websocket listener on {vpn_ws_addr}");
-                        let result = axum::serve(
-                            listener,
-                            vpn_app.into_make_service_with_connect_info::<SocketAddr>(),
-                        )
-                        .with_graceful_shutdown(shutdown_signal())
-                        .await;
-                        if let Err(err) = result {
-                            warn!(
-                                "VPN websocket listener ended with error on {vpn_ws_addr}: {err}"
-                            );
-                        }
-                        return;
-                    }
-                    Err(err) if err.kind() == std::io::ErrorKind::AddrNotAvailable => {
-                        if !waiting_logged {
-                            info!(
-                                "waiting for VPN websocket bind address {vpn_ws_addr} to become available"
-                            );
-                            waiting_logged = true;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    }
-                    Err(err) => {
-                        warn!("failed to bind VPN websocket listener on {vpn_ws_addr}: {err}");
-                        return;
-                    }
-                }
-            }
-        });
+    if config.vpn {
+        spawn_explicit_vpn_ws_listener(
+            app.clone(),
+            config.bind,
+            config.port,
+            config.vpn_ws_bind,
+            vpn_explicit_rx,
+        );
+    } else {
+        drop(vpn_explicit_rx);
     }
 
     let addr = SocketAddr::new(config.bind, config.port);
@@ -535,7 +547,7 @@ async fn run_server(
     }
     let result = axum::serve(
         listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
+        app.into_make_service_with_connect_info::<ClientConnectInfo>(),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await;
@@ -1017,34 +1029,45 @@ fn save_headless_config(path: &Path, config: &HeadlessCliConfig) -> Result<(), S
 }
 
 async fn ws_handler(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(addr): ConnectInfo<ClientConnectInfo>,
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let vpn_peer = matches!(addr.ip(), IpAddr::V4(ip) if ip.octets()[0..3] == [10, 13, 37]);
+    let vpn_peer = vpn_tcp_delivery::classify_vpn_peer(addr.remote, addr.local);
     info!(
-        remote_addr = %addr,
+        remote_addr = %addr.remote,
+        local_addr = %addr.local,
         vpn_peer = vpn_peer,
         "websocket upgrade requested"
     );
-    ws.on_upgrade(move |socket| handle_lan_socket(state, socket, addr))
+    ws.on_upgrade(move |socket| handle_lan_socket(state, socket, addr, vpn_peer))
 }
 
-async fn handle_lan_socket(state: Arc<AppState>, socket: WebSocket, remote_addr: SocketAddr) {
+async fn handle_lan_socket(
+    state: Arc<AppState>,
+    socket: WebSocket,
+    remote: ClientConnectInfo,
+    vpn_peer: bool,
+) {
     state.lan_client_count.fetch_add(1, Ordering::SeqCst);
     let (mut sink, mut stream) = socket.split();
     let mut broadcast_rx = state.lan_broadcast.subscribe();
-    let vpn_peer = matches!(remote_addr.ip(), IpAddr::V4(ip) if ip.octets()[0..3] == [10, 13, 37]);
+    let remote_addr = remote.remote;
     let mut first_vpn_stdout_logged = false;
 
     info!(
         remote_addr = %remote_addr,
+        local_addr = %remote.local,
         vpn_peer = vpn_peer,
         "websocket accepted"
     );
 
     // Initial info.
-    let host_info = encode_json(json!({"type": "host_info", "hostName": state.host_name}));
+    let host_info = encode_json(vpn_tcp_delivery::host_info_json(
+        &state.host_name,
+        vpn_peer,
+        remote_addr,
+    ));
     if sink.send(AxumMessage::Text(host_info)).await.is_err() {
         warn!(
             remote_addr = %remote_addr,
@@ -1058,7 +1081,7 @@ async fn handle_lan_socket(state: Arc<AppState>, socket: WebSocket, remote_addr:
         vpn_peer = vpn_peer,
         "initial host_info sent on websocket"
     );
-    if send_session_list(&state, &mut sink, remote_addr)
+    if send_session_list(&state, &mut sink, remote_addr, vpn_peer)
         .await
         .is_err()
     {
@@ -1079,7 +1102,10 @@ async fn handle_lan_socket(state: Arc<AppState>, socket: WebSocket, remote_addr:
         tokio::select! {
             msg = stream.next() => {
                 let Some(Ok(msg)) = msg else { break };
-                if handle_lan_incoming(&state, msg, &mut sink, remote_addr).await.is_err() {
+                if handle_lan_incoming(&state, msg, &mut sink, remote_addr, vpn_peer)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -1120,7 +1146,7 @@ async fn handle_lan_socket(state: Arc<AppState>, socket: WebSocket, remote_addr:
 }
 
 async fn status_handler(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(addr): ConnectInfo<ClientConnectInfo>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     if !addr.ip().is_loopback() {
@@ -1177,7 +1203,7 @@ async fn status_handler(
     .into_response()
 }
 
-async fn shutdown_handler(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> impl IntoResponse {
+async fn shutdown_handler(ConnectInfo(addr): ConnectInfo<ClientConnectInfo>) -> impl IntoResponse {
     if !addr.ip().is_loopback() {
         return (StatusCode::FORBIDDEN, "forbidden").into_response();
     }
@@ -1186,7 +1212,7 @@ async fn shutdown_handler(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> impl In
 }
 
 async fn pairing_pending(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(addr): ConnectInfo<ClientConnectInfo>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     if !addr.ip().is_loopback() {
@@ -1202,7 +1228,7 @@ struct PairingApproveBody {
 }
 
 async fn pairing_approve(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(addr): ConnectInfo<ClientConnectInfo>,
     State(state): State<Arc<AppState>>,
     axum::Json(body): axum::Json<PairingApproveBody>,
 ) -> impl IntoResponse {
@@ -1257,7 +1283,7 @@ async fn pairing_approve(
 }
 
 async fn pairing_reject(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(addr): ConnectInfo<ClientConnectInfo>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     if !addr.ip().is_loopback() {
@@ -1273,7 +1299,7 @@ async fn pairing_reject(
 }
 
 async fn paired_devices_list(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(addr): ConnectInfo<ClientConnectInfo>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     if !addr.ip().is_loopback() {
@@ -1284,7 +1310,7 @@ async fn paired_devices_list(
 }
 
 async fn paired_devices_delete(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(addr): ConnectInfo<ClientConnectInfo>,
     State(state): State<Arc<AppState>>,
     AxumPath(key): AxumPath<String>,
 ) -> impl IntoResponse {
@@ -1962,8 +1988,8 @@ async fn handle_lan_incoming(
     msg: AxumMessage,
     sink: &mut futures_util::stream::SplitSink<WebSocket, AxumMessage>,
     remote_addr: SocketAddr,
+    vpn_peer: bool,
 ) -> Result<(), ()> {
-    let vpn_peer = matches!(remote_addr.ip(), IpAddr::V4(ip) if ip.octets()[0..3] == [10, 13, 37]);
     match msg {
         AxumMessage::Text(text) => {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -1994,7 +2020,7 @@ async fn handle_lan_incoming(
                     let _ = sink.send(AxumMessage::Binary(build_pong_message())).await;
                 }
                 "list" => {
-                    let _ = send_session_list(state, sink, remote_addr).await;
+                    let _ = send_session_list(state, sink, remote_addr, vpn_peer).await;
                 }
                 "create" => {
                     let group_id = value.get("groupId").and_then(|v| v.as_str());
@@ -2164,6 +2190,7 @@ async fn send_session_list(
     state: &Arc<AppState>,
     sink: &mut futures_util::stream::SplitSink<WebSocket, AxumMessage>,
     remote_addr: SocketAddr,
+    vpn_peer: bool,
 ) -> Result<(), ()> {
     let ids = list_session_ids(state).await;
     sink.send(AxumMessage::Text(encode_json(json!({
@@ -2175,10 +2202,9 @@ async fn send_session_list(
 
     // Send host_info
     let _ = sink
-        .send(AxumMessage::Text(encode_json(json!({
-            "type": "host_info",
-            "hostName": state.host_name,
-        }))))
+        .send(AxumMessage::Text(encode_json(
+            vpn_tcp_delivery::host_info_json(&state.host_name, vpn_peer, remote_addr),
+        )))
         .await;
 
     // Reconcile and send group_sync
@@ -3692,6 +3718,21 @@ mod websocket_bind_tests {
 
         assert_eq!(websocket_bind_ips(primary, Some(vpn)), vec![primary]);
         assert_eq!(secondary_vpn_ws_addr(primary, 9527, Some(vpn)), None);
+    }
+
+    #[test]
+    fn fallback_bind_uses_vpn_ip_when_primary_is_unspecified() {
+        let primary = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let vpn = default_vpn_ws_bind();
+        assert_eq!(
+            crate::vpn_tcp_delivery::vpn_ws_fallback_addr(
+                primary,
+                9527,
+                Some(vpn),
+                secondary_vpn_ws_addr(primary, 9527, Some(vpn)),
+            ),
+            Some(SocketAddr::new(vpn, 9527))
+        );
     }
 }
 
@@ -5279,6 +5320,102 @@ fn secondary_vpn_ws_addr(
     Some(SocketAddr::new(vpn_bind, port))
 }
 
+fn enable_explicit_vpn_ws_bind(
+    state: &AppState,
+    helper_session: Option<&vpn_helper_client::HelperSession>,
+) {
+    let torn_down = if let Some(session) = helper_session {
+        session.disable_ws_redirect()
+    } else {
+        nat::disable_local_ws_redirect()
+    };
+    match torn_down {
+        Ok(()) => {
+            let _ = state.vpn_explicit_ws.send(true);
+        }
+        Err(e) => {
+            warn!("refusing explicit VPN websocket bind until rdr is down: {e}");
+        }
+    }
+}
+
+fn spawn_explicit_vpn_ws_listener(
+    app: Router,
+    primary_bind: IpAddr,
+    port: u16,
+    vpn_ws_bind: Option<IpAddr>,
+    mut enabled: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        loop {
+            if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                return;
+            }
+            if !*enabled.borrow() {
+                tokio::select! {
+                    result = enabled.changed() => {
+                        if result.is_err() {
+                            return;
+                        }
+                    }
+                    _ = shutdown_signal() => return,
+                }
+                continue;
+            }
+
+            let Some(vpn_ws_addr) = vpn_tcp_delivery::vpn_ws_fallback_addr(
+                primary_bind,
+                port,
+                vpn_ws_bind,
+                secondary_vpn_ws_addr(primary_bind, port, vpn_ws_bind),
+            ) else {
+                warn!("explicit VPN websocket bind requested but no address is configured");
+                return;
+            };
+
+            let mut waiting_logged = false;
+            loop {
+                if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                    return;
+                }
+                if !*enabled.borrow() {
+                    break;
+                }
+                match tokio::net::TcpListener::bind(vpn_ws_addr).await {
+                    Ok(listener) => {
+                        info!("horizon-daemon VPN websocket listener on {vpn_ws_addr}");
+                        let result = axum::serve(
+                            listener,
+                            app.into_make_service_with_connect_info::<ClientConnectInfo>(),
+                        )
+                        .with_graceful_shutdown(shutdown_signal())
+                        .await;
+                        if let Err(err) = result {
+                            warn!(
+                                "VPN websocket listener ended with error on {vpn_ws_addr}: {err}"
+                            );
+                        }
+                        return;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::AddrNotAvailable => {
+                        if !waiting_logged {
+                            info!(
+                                "waiting for VPN websocket bind address {vpn_ws_addr} to become available"
+                            );
+                            waiting_logged = true;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
+                    Err(err) => {
+                        warn!("failed to bind VPN websocket listener on {vpn_ws_addr}: {err}");
+                        return;
+                    }
+                }
+            }
+        }
+    });
+}
+
 // ============ VPN Server ============
 
 async fn start_vpn_server(
@@ -5360,6 +5497,16 @@ async fn start_vpn_server(
     }
 
     let server_ip = VPN_SERVER_IP_STR;
+    let explicit_bind = *state.vpn_explicit_ws.borrow();
+    let ws_redirect = !explicit_bind;
+    let env_mode = vpn_tcp_delivery::vpn_tcp_delivery_mode();
+    info!(
+        explicit_bind,
+        ws_redirect,
+        env_rdr = vpn_tcp_delivery::uses_pf_rdr(env_mode),
+        app_port = state.port,
+        "VPN TCP delivery mode"
+    );
     let mut helper_session = None;
     let tun = if cfg!(target_os = "macos") && vpn_helper_client::is_available(&state.data_dir) {
         let prepared = vpn_helper_client::start_vpn(
@@ -5368,6 +5515,7 @@ async fn start_vpn_server(
             subnet,
             "255.255.255.0",
             state.port,
+            ws_redirect,
         )
         .map_err(|e| format!("failed to start VPN via helper: {e}"))?;
         info!("created helper-backed TUN device: {}", prepared.tun.name);
@@ -5385,12 +5533,21 @@ async fn start_vpn_server(
         if let Err(e) = nat::enable_ip_forwarding() {
             warn!("failed to enable IP forwarding: {e}");
         }
-        if let Err(e) = nat::setup_nat(subnet, None, Some((server_ip, state.port, None))) {
+        let local_ws_redirect = if ws_redirect {
+            Some((server_ip, state.port, Some(tun.name.as_str())))
+        } else {
+            None
+        };
+        if let Err(e) = nat::setup_nat(subnet, None, local_ws_redirect) {
             warn!("failed to setup NAT: {e}");
         }
 
         tun
     };
+
+    if explicit_bind {
+        enable_explicit_vpn_ws_bind(&state, helper_session.as_ref());
+    }
 
     if helper_session.is_none() {
         // Start DNS forwarder
@@ -5449,7 +5606,7 @@ async fn start_vpn_server(
 }
 
 async fn vpn_status_handler(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(addr): ConnectInfo<ClientConnectInfo>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     if !addr.ip().is_loopback() {

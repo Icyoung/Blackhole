@@ -10,7 +10,6 @@ mod vpn_helper_protocol;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::Command;
@@ -29,6 +28,7 @@ struct ActiveVpnState {
     interface_name: Option<String>,
     subnet: Option<String>,
     server_ip: Option<String>,
+    ws_redirect: bool,
     bridge_stop: Option<Arc<AtomicBool>>,
     bridge_thread: Option<JoinHandle<()>>,
     dns_stop: Option<Arc<AtomicBool>>,
@@ -69,8 +69,7 @@ fn run(socket_path: PathBuf, pid_path: PathBuf) -> Result<(), String> {
             socket_path.display()
         )
     })?;
-    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o666))
-        .map_err(|e| format!("failed to set helper socket permissions: {e}"))?;
+    vpn_helper_protocol::restrict_helper_socket(&socket_path)?;
     fs::write(&pid_path, format!("{}\n", std::process::id()))
         .map_err(|e| format!("failed to write helper pid file: {e}"))?;
 
@@ -124,7 +123,8 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<ActiveVpnState>>) -> Resu
             server_ip,
             subnet,
             netmask,
-            app_port: _app_port,
+            app_port,
+            ws_redirect,
             ..
         } => {
             {
@@ -156,7 +156,12 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<ActiveVpnState>>) -> Resu
             if let Err(error) = nat::enable_ip_forwarding() {
                 warn!("helper failed to enable IP forwarding: {error}");
             }
-            if let Err(error) = nat::setup_nat(&subnet, None, None) {
+            let local_ws_redirect = if ws_redirect && app_port != 0 {
+                Some((server_ip.as_str(), app_port, Some(interface_name.as_str())))
+            } else {
+                None
+            };
+            if let Err(error) = nat::setup_nat(&subnet, None, local_ws_redirect) {
                 warn!("helper failed to setup NAT: {error}");
             }
 
@@ -205,6 +210,7 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<ActiveVpnState>>) -> Resu
                 state.interface_name = Some(interface_name);
                 state.subnet = Some(subnet);
                 state.server_ip = Some(server_ip);
+                state.ws_redirect = ws_redirect && app_port != 0;
                 state.bridge_stop = Some(bridge_stop);
                 state.bridge_thread = Some(bridge_thread);
                 state.dns_stop = Some(dns_stop);
@@ -224,6 +230,7 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<ActiveVpnState>>) -> Resu
                 let mut state = state
                     .lock()
                     .map_err(|_| "failed to lock helper state".to_string())?;
+                state.ws_redirect = false;
                 (
                     state.interface_name.take(),
                     state.subnet.take(),
@@ -245,6 +252,35 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<ActiveVpnState>>) -> Resu
                 dns_thread,
             );
             send_response(&stream, &HelperResponse::stopped(), None)?;
+        }
+        HelperRequest::DisableWsRedirect { .. } => {
+            let subnet = {
+                let mut state = state
+                    .lock()
+                    .map_err(|_| "failed to lock helper state".to_string())?;
+                if state.interface_name.is_none() {
+                    None
+                } else {
+                    state.ws_redirect = false;
+                    state.subnet.clone()
+                }
+            };
+            match subnet {
+                Some(subnet) => {
+                    if let Err(error) = nat::setup_nat(&subnet, None, None) {
+                        send_response(&stream, &HelperResponse::error(error), None)?;
+                        return Ok(());
+                    }
+                    send_response(&stream, &HelperResponse::ws_redirect_disabled(), None)?;
+                }
+                None => {
+                    send_response(
+                        &stream,
+                        &HelperResponse::error("VPN helper is not active"),
+                        None,
+                    )?;
+                }
+            }
         }
     }
 
