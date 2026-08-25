@@ -1245,6 +1245,41 @@ void main() {
       expect((candidateCalls[1].arguments as Map)['addr'], '203.0.113.5');
     });
 
+    test(
+      'exhausted candidates surface status=error without connected Direct',
+      () async {
+        var now = DateTime.utc(2026, 1, 1);
+        service.dispose();
+        service = rotationService(() => now);
+        await service.start(
+          const VpnConfig(
+            privateKey: 'pk',
+            peerPublicKey: 'ppk',
+            serverAddr: '203.0.113.5',
+            serverPort: 51822,
+            clientIp: '10.13.37.2',
+            serverIp: '10.13.37.1',
+            directCandidates: [
+              {
+                'addr': '203.0.113.5',
+                'port': 51822,
+                'scope': 'public_observed',
+                'priority': 180,
+              },
+            ],
+          ),
+        );
+
+        now = now.add(const Duration(seconds: 12));
+        await service.tickUserspaceCandidatesForTest();
+
+        expect(service.status, VpnStatus.error);
+        expect(service.isConnected, isFalse);
+        expect(service.connectionMode, isNot(VpnConnectionMode.direct));
+        expect(service.error, 'WireGuard handshake timed out');
+      },
+    );
+
     test('fails when 30s handshake budget expires', () async {
       var now = DateTime.utc(2026, 1, 1);
       service.dispose();

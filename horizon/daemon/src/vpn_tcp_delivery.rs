@@ -507,6 +507,17 @@ mod tests {
     }
 
     #[test]
+    fn measured_in_tunnel_accept_sets_host_info_vpn_peer_true() {
+        let remote = addr([10, 13, 37, 7], 54012);
+        let local = addr([10, 13, 37, 1], 9527);
+        let vpn_peer = classify_vpn_peer(remote, local);
+        assert!(vpn_peer);
+        let payload = host_info_json("Horizon", vpn_peer, remote);
+        assert_eq!(payload["vpnPeer"], true);
+        assert_eq!(payload["remoteAddr"], "10.13.37.7:54012");
+    }
+
+    #[test]
     fn host_info_includes_vpn_peer_and_remote_addr() {
         let payload = host_info_json("Horizon", true, addr([10, 13, 37, 2], 4242));
         assert_eq!(payload["type"], "host_info");

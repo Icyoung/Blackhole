@@ -200,7 +200,7 @@ void _runBuiltInScenarios() {
         'expected fallback to primary transport',
       );
     }),
-    _Scenario('vpnPeer true on 10.13.37.1 marks Direct', () {
+    _Scenario('LAN: vpnPeer true on 10.13.37.1 marks Direct', () {
       _expect(
         VpnTransportHandoffCoordinator.hostInfoAction(
               socketHost: kVpnAppWebsocketHost,
@@ -220,6 +220,118 @@ void _runBuiltInScenarios() {
         'expected control-plane host_info to be ignored',
       );
     }),
+    _Scenario('WAN cone: handshake gates switch; UDP counters do not', () {
+      final coordinator = VpnTransportHandoffCoordinator();
+      final connectedAt = DateTime.utc(2026, 1, 1, 0, 0, 0);
+      final counters = coordinator.onVpnStatusChanged(
+        snapshot: const VpnTunnelSnapshot(
+          isActive: true,
+          isConnected: true,
+          mode: VpnTunnelMode.direct,
+          serverIp: kVpnAppWebsocketHost,
+          lanPort: kVpnAppWebsocketPort,
+          udpPacketsIn: 9,
+          tunPacketsIn: 3,
+          wgRxBytes: 2048,
+        ),
+        primaryConnectionConnected: true,
+        activeTransportKind: TransportKind.wormholeRelay,
+        endpoint: const VpnTransportEndpoint(
+          serverIp: kVpnAppWebsocketHost,
+          lanPort: kVpnAppWebsocketPort,
+        ),
+        now: connectedAt,
+      );
+      _expect(
+        !counters.shouldSwitch,
+        'expected UDP counters not to satisfy the handshake gate',
+      );
+      final ready = coordinator.onVpnStatusChanged(
+        snapshot: const VpnTunnelSnapshot(
+          isActive: true,
+          isConnected: true,
+          mode: VpnTunnelMode.direct,
+          serverIp: kVpnAppWebsocketHost,
+          lanPort: kVpnAppWebsocketPort,
+          timeSinceLastHandshakeSecs: 0,
+        ),
+        primaryConnectionConnected: true,
+        activeTransportKind: TransportKind.wormholeRelay,
+        endpoint: const VpnTransportEndpoint(
+          serverIp: kVpnAppWebsocketHost,
+          lanPort: kVpnAppWebsocketPort,
+        ),
+        now: connectedAt.add(const Duration(seconds: 3)),
+      );
+      _expect(ready.shouldSwitch, 'expected handshake-gated handoff');
+      _expect(
+        ready.endpoint?.websocketUri.host == kVpnAppWebsocketHost,
+        'expected URI host $kVpnAppWebsocketHost',
+      );
+    }),
+    _Scenario('symmetric NAT: native error stays on WS, no fake Direct', () {
+      final coordinator = VpnTransportHandoffCoordinator();
+      final snapshot = VpnTunnelSnapshot.fromJson({
+        'status': 'error',
+        'connectionMode': 'direct',
+        'serverIp': kVpnAppWebsocketHost,
+        'lanPort': kVpnAppWebsocketPort,
+        'error': 'WireGuard handshake timed out',
+      });
+      _expect(!snapshot.isConnected, 'expected error status not connected');
+      final decision = coordinator.onVpnStatusChanged(
+        snapshot: snapshot,
+        primaryConnectionConnected: true,
+        activeTransportKind: TransportKind.wormholeRelay,
+        endpoint: const VpnTransportEndpoint(
+          serverIp: kVpnAppWebsocketHost,
+          lanPort: kVpnAppWebsocketPort,
+        ),
+        now: DateTime.utc(2026, 1, 1),
+      );
+      _expect(!decision.shouldSwitch, 'expected no Direct switch after error');
+      _expect(
+        VpnTransportHandoffCoordinator.isStayOnWs(
+          handoffPending: false,
+          activeKind: TransportKind.wormholeRelay,
+          socketHost: 'wormhole.blackhole-ai.com',
+          connected: true,
+        ),
+        'expected StayOnWs on the control-plane socket',
+      );
+    }),
+    _Scenario(
+      'reconnect: vpnPeer=false keeps punch identity and 30s retry sends peer_endpoint',
+      () {
+        _expect(
+          kVpnPunchRetryInterval == const Duration(seconds: 30),
+          'expected 30s punch retry interval',
+        );
+        _expect(
+          VpnTransportHandoffCoordinator.hostInfoAction(
+                socketHost: kVpnAppWebsocketHost,
+                vpnPeer: false,
+              ) ==
+              VpnHostInfoAction.fallback,
+          'expected vpnPeer=false on $kVpnAppWebsocketHost to fallback',
+        );
+        _expect(
+          VpnTransportHandoffCoordinator.keepPunchIdentity(
+            VpnFallbackReason.inTunnelNotPeer,
+          ),
+          'expected fallback to keep punch identity',
+        );
+        final retry = VpnTransportHandoffCoordinator.onPunchRetryTimer(
+          stayOnWs: true,
+          connected: true,
+          publicKey: 'pk',
+        );
+        _expect(
+          retry.action == VpnPunchRetryAction.sendPeerEndpoint,
+          'expected 30s retry to send peer_endpoint',
+        );
+      },
+    ),
   ];
 
   var failures = 0;
@@ -274,6 +386,25 @@ Future<void> _runScenarioFile(String path) async {
         );
         stdout.writeln(
           '[$i] primary_connected => ${_formatDecision(decision)}',
+        );
+        break;
+      case 'host_info':
+        final action = VpnTransportHandoffCoordinator.hostInfoAction(
+          socketHost: event['socketHost'] as String? ?? endpoint?.serverIp,
+          vpnPeer: event['vpnPeer'] as bool?,
+        );
+        stdout.writeln(
+          '[$i] host_info socketHost=${event['socketHost']} vpnPeer=${event['vpnPeer']} => $action',
+        );
+        break;
+      case 'punch_retry':
+        final retry = VpnTransportHandoffCoordinator.onPunchRetryTimer(
+          stayOnWs: event['stayOnWs'] as bool? ?? false,
+          connected: event['connected'] as bool? ?? false,
+          publicKey: event['publicKey'] as String?,
+        );
+        stdout.writeln(
+          '[$i] punch_retry => action=${retry.action} clear=${retry.clearSwitchSuppression} rearm=${retry.rearm}',
         );
         break;
       case 'vpn':

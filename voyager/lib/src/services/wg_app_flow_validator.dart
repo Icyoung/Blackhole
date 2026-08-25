@@ -7,6 +7,9 @@ class WgAppFlowValidationResult {
     required this.clientIp,
     required this.peerPublicKey,
     required this.directAcceptedPeer,
+    required this.appWebsocketUri,
+    required this.appWebsocketHostSatisfied,
+    required this.vpnPeerTrue,
     required this.vpnStatusConnectedDirect,
     required this.directSessionReady,
     required this.directReadinessGateSatisfied,
@@ -24,6 +27,9 @@ class WgAppFlowValidationResult {
   final String? clientIp;
   final String? peerPublicKey;
   final String? directAcceptedPeer;
+  final String appWebsocketUri;
+  final bool appWebsocketHostSatisfied;
+  final bool vpnPeerTrue;
   final bool vpnStatusConnectedDirect;
   final bool directSessionReady;
   final bool directReadinessGateSatisfied;
@@ -44,6 +50,9 @@ class WgAppFlowValidationResult {
       'clientIp': clientIp,
       'peerPublicKey': peerPublicKey,
       'directAcceptedPeer': directAcceptedPeer,
+      'appWebsocketUri': appWebsocketUri,
+      'appWebsocketHostSatisfied': appWebsocketHostSatisfied,
+      'vpnPeerTrue': vpnPeerTrue,
       'vpnStatusConnectedDirect': vpnStatusConnectedDirect,
       'directSessionReady': directSessionReady,
       'directReadinessGateSatisfied': directReadinessGateSatisfied,
@@ -86,6 +95,10 @@ class WgAppFlowValidator {
       serverIp: snapshot.serverIp ?? '',
       lanPort: snapshot.lanPort ?? kVpnAppWebsocketPort,
     );
+    final appWebsocketUri = endpoint.websocketUri;
+    final appWebsocketHostSatisfied =
+        isVpnAppWebsocketHost(snapshot.serverIp) &&
+        appWebsocketUri.host == kVpnAppWebsocketHost;
     final directReadinessGateSatisfied =
         VpnTransportHandoffCoordinator.satisfiesDirectReadinessGate(
           snapshot,
@@ -160,9 +173,15 @@ class WgAppFlowValidator {
     if (clientIp == null || clientIp.isEmpty) {
       failures.add('missing clientIp in vpn_status.json');
     }
-    if (snapshot.serverIp != kVpnAppWebsocketHost) {
+    if (snapshot.serverIp != kVpnAppWebsocketHost ||
+        !appWebsocketHostSatisfied) {
       failures.add(
         'vpn_status serverIp must be $kVpnAppWebsocketHost for in-tunnel app WS',
+      );
+    }
+    if (appWebsocketUri.host != kVpnAppWebsocketHost) {
+      failures.add(
+        'app websocket URI host must be $kVpnAppWebsocketHost (got ${appWebsocketUri.host})',
       );
     }
     if (!vpnStatusConnectedDirect) {
@@ -218,6 +237,9 @@ class WgAppFlowValidator {
       clientIp: clientIp,
       peerPublicKey: peerPublicKey,
       directAcceptedPeer: directAcceptedPeer,
+      appWebsocketUri: appWebsocketUri.toString(),
+      appWebsocketHostSatisfied: appWebsocketHostSatisfied,
+      vpnPeerTrue: vpnWebsocketAccepted,
       vpnStatusConnectedDirect: vpnStatusConnectedDirect,
       directSessionReady: directSessionReady,
       directReadinessGateSatisfied: directReadinessGateSatisfied,

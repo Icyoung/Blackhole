@@ -313,6 +313,26 @@ final class TunnelRuntimeCoordinatorTests: XCTestCase {
         XCTAssertEqual(runtime.snapshot.error, "WireGuard handshake timed out")
     }
 
+    func testUdpTrafficWithoutHandshakeStaysConnecting() {
+        let runtime = TunnelRuntimeCoordinator(handshakeTimeout: 12)
+        let startedAt = Date(timeIntervalSince1970: 100)
+
+        runtime.start(now: startedAt)
+
+        let action = runtime.refresh(
+            handshakeAgeSeconds: nil,
+            inboundWireGuardBytes: 2048,
+            inboundUdpPackets: 12,
+            availableDirectCandidateCount: 1,
+            now: startedAt.addingTimeInterval(1)
+        )
+
+        XCTAssertEqual(action, .none)
+        XCTAssertEqual(runtime.snapshot.status, .connecting)
+        XCTAssertNotEqual(runtime.snapshot.status, .connected)
+        XCTAssertNil(runtime.snapshot.error)
+    }
+
     func testHandshakeCompletionMarksConnected() {
         let runtime = TunnelRuntimeCoordinator(handshakeTimeout: 12)
         let startedAt = Date(timeIntervalSince1970: 100)

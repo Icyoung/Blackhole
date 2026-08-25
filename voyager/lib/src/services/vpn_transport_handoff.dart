@@ -2,6 +2,7 @@ import 'transport_models.dart';
 
 const kVpnAppWebsocketHost = '10.13.37.1';
 const kVpnAppWebsocketPort = 9527;
+const kVpnPunchRetryInterval = Duration(seconds: 30);
 
 bool isVpnAppWebsocketHost(String? host) => host == kVpnAppWebsocketHost;
 

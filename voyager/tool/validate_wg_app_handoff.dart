@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:voyager/src/services/vpn_transport_handoff.dart';
 import 'package:voyager/src/services/wg_app_flow_validator.dart';
 
 Future<void> main(List<String> args) async {
@@ -47,6 +48,12 @@ void _printResult(WgAppFlowValidationResult result) {
   stdout.writeln('');
 
   _printCheck('vpn_status connected/direct', result.vpnStatusConnectedDirect);
+  _printCheck(
+    'URI host $kVpnAppWebsocketHost',
+    result.appWebsocketHostSatisfied,
+  );
+  stdout.writeln('app websocket: ${result.appWebsocketUri}');
+  _printCheck('vpnPeer=true', result.vpnPeerTrue);
   _printCheck('directSessionReady=true', result.directSessionReady);
   _printCheck(
     'direct readiness gate satisfied',

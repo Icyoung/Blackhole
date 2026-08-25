@@ -97,9 +97,30 @@ private func expect(
     }
 }
 
+private func expectSnapshot(
+    _ snapshot: TunnelRuntimeSnapshot,
+    status: TunnelRuntimeStatus,
+    error: String? = nil,
+    scenario: String,
+    step: String
+) {
+    if snapshot.status != status || snapshot.error != error {
+        fputs(
+            """
+            [\(scenario)] \(step) failed
+              expected: status=\(status.rawValue) error=\(error ?? "-")
+              actual:   \(describe(snapshot))
+
+            """,
+            stderr
+        )
+        exit(1)
+    }
+}
+
 private func runScenarios() {
     let scenarios: [Scenario] = [
-        Scenario(name: "direct-timeout-falls-back-to-relay") {
+        Scenario(name: "direct-timeout-errors") {
             let runtime = TunnelRuntimeCoordinator(handshakeTimeout: 12)
             let startedAt = Date(timeIntervalSince1970: 100)
             runtime.start(now: startedAt)
@@ -109,23 +130,19 @@ private func runScenarios() {
                 handshakeAgeSeconds: nil,
                 inboundWireGuardBytes: 0,
                 inboundUdpPackets: 0,
-                relayUrl: "wss://relay.example/wg-relay",
                 availableDirectCandidateCount: 1,
                 now: startedAt.addingTimeInterval(12.1)
             )
             print("  timeout => action=\(action) \(describe(runtime.snapshot))")
-
-            _ = runtime.refresh(
-                handshakeAgeSeconds: 0,
-                inboundWireGuardBytes: 0,
-                inboundUdpPackets: 0,
-                relayUrl: "wss://relay.example/wg-relay",
-                availableDirectCandidateCount: 1,
-                now: startedAt.addingTimeInterval(12.2)
+            expectSnapshot(
+                runtime.snapshot,
+                status: .error,
+                error: "WireGuard handshake timed out",
+                scenario: "direct-timeout-errors",
+                step: "timeout"
             )
-            print("  handshake => \(describe(runtime.snapshot))")
         },
-        Scenario(name: "direct-timeout-errors-without-relay") {
+        Scenario(name: "direct-timeout-retries-next-candidate") {
             let runtime = TunnelRuntimeCoordinator(handshakeTimeout: 12)
             let startedAt = Date(timeIntervalSince1970: 100)
             runtime.start(now: startedAt)
@@ -135,82 +152,95 @@ private func runScenarios() {
                 handshakeAgeSeconds: nil,
                 inboundWireGuardBytes: 0,
                 inboundUdpPackets: 0,
-                relayUrl: nil,
-                availableDirectCandidateCount: 1,
-                now: startedAt.addingTimeInterval(12.1)
-            )
-            print("  timeout => action=\(action) \(describe(runtime.snapshot))")
-        },
-        Scenario(name: "direct-timeout-retries-next-candidate-before-relay") {
-            let runtime = TunnelRuntimeCoordinator(handshakeTimeout: 12)
-            let startedAt = Date(timeIntervalSince1970: 100)
-            runtime.start(now: startedAt)
-            print("  start => \(describe(runtime.snapshot))")
-
-            let action = runtime.refresh(
-                handshakeAgeSeconds: nil,
-                inboundWireGuardBytes: 0,
-                inboundUdpPackets: 0,
-                relayUrl: "wss://relay.example/wg-relay",
                 availableDirectCandidateCount: 3,
                 now: startedAt.addingTimeInterval(12.1)
             )
             print("  timeout => action=\(action) \(describe(runtime.snapshot))")
+            if action != .retryDirect(1) {
+                fputs(
+                    "[direct-timeout-retries-next-candidate] expected retryDirect(1), got \(action)\n",
+                    stderr
+                )
+                exit(1)
+            }
         },
-        Scenario(name: "relay-disconnect-surfaces-error") {
+        Scenario(name: "wan-cone-handshake-gated-connected") {
             let runtime = TunnelRuntimeCoordinator(handshakeTimeout: 12)
             let startedAt = Date(timeIntervalSince1970: 100)
             runtime.start(now: startedAt)
-            _ = runtime.refresh(
+            let withoutHandshake = runtime.refresh(
                 handshakeAgeSeconds: nil,
-                inboundWireGuardBytes: 0,
-                inboundUdpPackets: 0,
-                relayUrl: "wss://relay.example/wg-relay",
+                inboundWireGuardBytes: 2048,
+                inboundUdpPackets: 9,
                 availableDirectCandidateCount: 1,
-                now: startedAt.addingTimeInterval(12.1)
+                now: startedAt.addingTimeInterval(1)
             )
-            print("  relay-enter => \(describe(runtime.snapshot))")
+            print("  udp-only => action=\(withoutHandshake) \(describe(runtime.snapshot))")
+            expectSnapshot(
+                runtime.snapshot,
+                status: .connecting,
+                scenario: "wan-cone-handshake-gated-connected",
+                step: "udp-only"
+            )
 
-            runtime.noteRelayDisconnected("closed")
-            print("  relay-close => \(describe(runtime.snapshot))")
-        },
-        Scenario(name: "relay-promotes-back-to-direct-after-grace") {
-            let runtime = TunnelRuntimeCoordinator(
-                handshakeTimeout: 12,
-                directHealthGracePeriod: 8,
-                promotionGracePeriod: 2
+            let withHandshake = runtime.refresh(
+                handshakeAgeSeconds: 0,
+                inboundWireGuardBytes: 2048,
+                inboundUdpPackets: 9,
+                availableDirectCandidateCount: 1,
+                now: startedAt.addingTimeInterval(2)
             )
+            print("  handshake => action=\(withHandshake) \(describe(runtime.snapshot))")
+            expectSnapshot(
+                runtime.snapshot,
+                status: .connected,
+                scenario: "wan-cone-handshake-gated-connected",
+                step: "handshake"
+            )
+        },
+        Scenario(name: "symmetric-nat-candidates-exhausted-errors") {
+            let runtime = TunnelRuntimeCoordinator(handshakeTimeout: 12)
             let startedAt = Date(timeIntervalSince1970: 100)
             runtime.start(now: startedAt)
-            _ = runtime.refresh(
+
+            let retry1 = runtime.refresh(
                 handshakeAgeSeconds: nil,
                 inboundWireGuardBytes: 0,
                 inboundUdpPackets: 0,
-                relayUrl: "wss://relay.example/wg-relay",
-                availableDirectCandidateCount: 1,
+                availableDirectCandidateCount: 3,
                 now: startedAt.addingTimeInterval(12.1)
             )
-            print("  relay-enter => \(describe(runtime.snapshot))")
-
-            let tooEarly = runtime.refresh(
+            let retry2 = runtime.refresh(
                 handshakeAgeSeconds: nil,
                 inboundWireGuardBytes: 0,
-                inboundUdpPackets: 1,
-                relayUrl: "wss://relay.example/wg-relay",
-                availableDirectCandidateCount: 1,
-                now: startedAt.addingTimeInterval(13)
+                inboundUdpPackets: 0,
+                availableDirectCandidateCount: 3,
+                now: startedAt.addingTimeInterval(24.2)
             )
-            print("  direct-seen-too-early => action=\(tooEarly) \(describe(runtime.snapshot))")
-
-            let promoted = runtime.refresh(
+            let exhausted = runtime.refresh(
                 handshakeAgeSeconds: nil,
                 inboundWireGuardBytes: 0,
-                inboundUdpPackets: 2,
-                relayUrl: "wss://relay.example/wg-relay",
-                availableDirectCandidateCount: 1,
-                now: startedAt.addingTimeInterval(14.5)
+                inboundUdpPackets: 0,
+                availableDirectCandidateCount: 3,
+                now: startedAt.addingTimeInterval(30.0)
             )
-            print("  direct-promoted => action=\(promoted) \(describe(runtime.snapshot))")
+            print("  retry1 => \(retry1)")
+            print("  retry2 => \(retry2)")
+            print("  exhausted => action=\(exhausted) \(describe(runtime.snapshot))")
+            if retry1 != .retryDirect(1) || retry2 != .retryDirect(2) || exhausted != .none {
+                fputs(
+                    "[symmetric-nat-candidates-exhausted-errors] unexpected retry sequence\n",
+                    stderr
+                )
+                exit(1)
+            }
+            expectSnapshot(
+                runtime.snapshot,
+                status: .error,
+                error: "WireGuard handshake timed out",
+                scenario: "symmetric-nat-candidates-exhausted-errors",
+                step: "exhausted"
+            )
         },
         Scenario(name: "healthy-direct-degrades-only-after-grace-window") {
             let runtime = TunnelRuntimeCoordinator(
@@ -223,7 +253,6 @@ private func runScenarios() {
                 handshakeAgeSeconds: 0,
                 inboundWireGuardBytes: 1024,
                 inboundUdpPackets: 1,
-                relayUrl: "wss://relay.example/wg-relay",
                 availableDirectCandidateCount: 1,
                 now: startedAt.addingTimeInterval(1)
             )
@@ -233,7 +262,6 @@ private func runScenarios() {
                 handshakeAgeSeconds: nil,
                 inboundWireGuardBytes: 0,
                 inboundUdpPackets: 0,
-                relayUrl: "wss://relay.example/wg-relay",
                 availableDirectCandidateCount: 1,
                 now: startedAt.addingTimeInterval(13)
             )
@@ -243,7 +271,6 @@ private func runScenarios() {
                 handshakeAgeSeconds: nil,
                 inboundWireGuardBytes: 0,
                 inboundUdpPackets: 0,
-                relayUrl: "wss://relay.example/wg-relay",
                 availableDirectCandidateCount: 1,
                 now: startedAt.addingTimeInterval(21.5)
             )

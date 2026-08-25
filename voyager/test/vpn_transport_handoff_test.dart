@@ -446,6 +446,36 @@ void main() {
       },
     );
 
+    test('native status=error does not switch to Direct', () {
+      final coordinator = VpnTransportHandoffCoordinator();
+      final snapshot = VpnTunnelSnapshot.fromJson({
+        'status': 'error',
+        'connectionMode': 'direct',
+        'serverIp': kVpnAppWebsocketHost,
+        'lanPort': kVpnAppWebsocketPort,
+        'error': 'WireGuard handshake timed out',
+      });
+
+      expect(snapshot.isConnected, isFalse);
+      expect(
+        VpnTransportHandoffCoordinator.satisfiesDirectReadinessGate(
+          snapshot,
+          endpoint: _endpoint,
+        ),
+        isFalse,
+      );
+
+      final decision = coordinator.onVpnStatusChanged(
+        snapshot: snapshot,
+        primaryConnectionConnected: true,
+        activeTransportKind: TransportKind.wormholeRelay,
+        endpoint: _endpoint,
+        now: DateTime.utc(2026, 1, 1),
+      );
+      expect(decision.shouldSwitch, isFalse);
+      expect(decision.transportKind, isNot(TransportKind.wireguardDirect));
+    });
+
     test('does not reconnect an in-tunnel unknown socket as Direct', () {
       final coordinator = VpnTransportHandoffCoordinator();
       final connectedAt = DateTime.utc(2026, 1, 1, 0, 0, 0);
@@ -595,6 +625,10 @@ void main() {
         ),
         isFalse,
       );
+    });
+
+    test('punch retry interval is 30s', () {
+      expect(kVpnPunchRetryInterval, const Duration(seconds: 30));
     });
 
     test(

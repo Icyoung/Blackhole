@@ -392,13 +392,14 @@ mod tests {
     use std::sync::Arc;
 
     use serde_json::json;
-    use tokio::sync::{broadcast, mpsc, Mutex};
+    use tokio::sync::{broadcast, mpsc, watch, Mutex, Notify};
 
     use crate::{BroadcastMsg, WgPeerCommand, WormholeState};
 
     fn test_state() -> Arc<AppState> {
         let (lan_tx, _) = broadcast::channel::<BroadcastMsg>(8);
         let (wormhole_tx, _) = broadcast::channel::<BroadcastMsg>(8);
+        let (vpn_explicit_ws, _) = watch::channel(false);
         Arc::new(AppState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             inject_tasks: Mutex::new(HashMap::new()),
@@ -430,9 +431,12 @@ mod tests {
             wg_observed_endpoints: Mutex::new(Vec::new()),
             wg_internal_routes: Mutex::new(vec!["192.168.1.0/24".to_string()]),
             wg_peer_tx: Mutex::new(None),
+            vpn_explicit_ws,
+            vpn_tcp_probe: Mutex::new(None),
             last_punch_epoch: AtomicU64::new(0),
             last_endpoint_register_sig: Mutex::new(None),
             endpoint_register_retrying: AtomicBool::new(false),
+            wg_netcheck_notify: Notify::new(),
         })
     }
 
@@ -450,6 +454,7 @@ mod tests {
                             mtu: 1420,
                         }));
                     }
+                    WgPeerCommand::BeginNetcheck { .. } => {}
                 }
             }
         });
@@ -534,9 +539,65 @@ mod tests {
                 reply.get("clientIp").and_then(|v| v.as_str()),
                 Some("10.13.37.2")
             );
+            assert_eq!(
+                reply.get("serverIp").and_then(|v| v.as_str()),
+                Some("10.13.37.1")
+            );
+            assert_eq!(
+                reply
+                    .get("dns")
+                    .and_then(|v| v.as_array())
+                    .and_then(|dns| dns.first())
+                    .and_then(|v| v.as_str()),
+                Some("10.13.37.1")
+            );
             assert_eq!(reply.get("lanPort").and_then(|v| v.as_u64()), Some(9527));
             assert!(reply_rx.try_recv().is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn wan_netcheck_public_observed_is_advertised_in_vpn_config() {
+        let state = test_state();
+        {
+            let mut observed = state.wg_observed_endpoints.lock().await;
+            record_observed_direct_candidate(
+                &mut observed,
+                Some("203.0.113.50"),
+                Some(41234),
+                "wormhole_netcheck",
+            );
+        }
+        let peer_tx = spawn_add_peer_responder();
+        *state.wg_peer_tx.lock().await = Some(peer_tx);
+
+        let (reply_tx, mut reply_rx) = mpsc::unbounded_channel();
+        assert!(
+            handle_vpn_control(
+                &state,
+                &candidate_update("direct_candidates_update"),
+                reply_tx
+            )
+            .await
+        );
+        let reply = recv_reply(&mut reply_rx).await;
+        assert_eq!(
+            reply.get("serverIp").and_then(|v| v.as_str()),
+            Some("10.13.37.1")
+        );
+        let candidates = reply
+            .get("horizonCandidates")
+            .and_then(|v| v.as_array())
+            .expect("horizonCandidates");
+        assert!(
+            candidates.iter().any(|candidate| {
+                candidate.get("scope").and_then(|v| v.as_str()) == Some("public_observed")
+                    && candidate.get("addr").and_then(|v| v.as_str()) == Some("203.0.113.50")
+                    && candidate.get("port").and_then(|v| v.as_u64()) == Some(41234)
+                    && candidate.get("source").and_then(|v| v.as_str()) == Some("wormhole_netcheck")
+            }),
+            "netcheck_response demux should advertise public_observed: {candidates:?}"
+        );
     }
 
     #[tokio::test]

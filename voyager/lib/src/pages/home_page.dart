@@ -2903,7 +2903,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       return;
     }
     _vpnPunchRetryTimer?.cancel();
-    _vpnPunchRetryTimer = Timer(const Duration(seconds: 30), _onVpnPunchRetry);
+    _vpnPunchRetryTimer = Timer(kVpnPunchRetryInterval, _onVpnPunchRetry);
   }
 
   void _onVpnPunchRetry() {

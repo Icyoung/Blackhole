@@ -6610,6 +6610,23 @@ mod tests {
     }
 
     #[test]
+    fn netcheck_response_demux_records_public_observed() {
+        let mut store = Vec::new();
+        record_observed_direct_candidate(
+            &mut store,
+            Some("203.0.113.50"),
+            Some(41234),
+            "wormhole_netcheck",
+        );
+        assert_eq!(store.len(), 1);
+        assert_eq!(store[0].addr, "203.0.113.50");
+        assert_eq!(store[0].port, 41234);
+        assert_eq!(store[0].scope, "public_observed");
+        assert_eq!(store[0].source, "wormhole_netcheck");
+        assert_eq!(store[0].priority, 180);
+    }
+
+    #[test]
     fn record_observed_direct_candidate_promotes_new_endpoint_and_keeps_last_known() {
         let mut store = Vec::new();
 

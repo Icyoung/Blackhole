@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:voyager/src/services/vpn_transport_handoff.dart';
 import 'package:voyager/src/services/wg_app_flow_validator.dart';
 
 void main() {
@@ -34,6 +35,12 @@ void main() {
       expect(result.isSuccess, isTrue);
       expect(result.failures, isEmpty);
       expect(result.directAcceptedPeer, '192.168.1.219:51820');
+      expect(result.appWebsocketHostSatisfied, isTrue);
+      expect(
+        result.appWebsocketUri,
+        'ws://$kVpnAppWebsocketHost:$kVpnAppWebsocketPort/ws',
+      );
+      expect(result.vpnPeerTrue, isTrue);
     });
 
     test('fails when the direct readiness gate is not satisfied', () {
@@ -84,6 +91,46 @@ void main() {
       expect(
         result.failures,
         contains('vpn_status serverIp must be 10.13.37.1 for in-tunnel app WS'),
+      );
+      expect(
+        result.failures,
+        contains(
+          'app websocket URI host must be 10.13.37.1 (got 192.168.1.20)',
+        ),
+      );
+      expect(result.appWebsocketHostSatisfied, isFalse);
+      expect(result.vpnPeerTrue, isFalse);
+    });
+
+    test('fails when the vpnPeer=true accept signal is missing', () {
+      const horizonLog = '''
+2026-03-22T00:00:00Z INFO horizon_daemon::wg_server: added WireGuard peer peer_public_key="peer-key-1" client_ip=10.13.37.7
+2026-03-22T00:00:00Z INFO horizon_daemon: vpn_config sent: client_ip=10.13.37.7 server_ip=10.13.37.1 wg_port=Some(51820)
+2026-03-22T00:00:00Z INFO horizon_daemon::wg_server: sent direct handshake probe to candidate peer=192.168.1.219:51820 peer_public_key="peer-key-1"
+2026-03-22T00:00:03Z INFO horizon_daemon::wg_server: accepted direct WireGuard traffic; ending direct probe window peer_public_key="peer-key-1" peer=192.168.1.219:51820
+2026-03-22T00:00:04Z INFO horizon_daemon: websocket accepted remote_addr=10.13.37.7:54012 vpn_peer=false
+''';
+
+      final result = WgAppFlowValidator.validate(
+        horizonLog: horizonLog,
+        vpnStatusJson: <String, dynamic>{
+          'status': 'connected',
+          'connectionMode': 'direct',
+          'clientIp': '10.13.37.7',
+          'serverIp': kVpnAppWebsocketHost,
+          'lanPort': kVpnAppWebsocketPort,
+          'directSessionReady': true,
+          'timeSinceLastHandshakeSecs': 1,
+        },
+      );
+
+      expect(result.isSuccess, isFalse);
+      expect(result.vpnPeerTrue, isFalse);
+      expect(
+        result.failures,
+        contains(
+          'Horizon log is missing a vpn_peer websocket accepted event for the client IP',
+        ),
       );
     });
   });
