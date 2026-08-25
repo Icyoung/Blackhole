@@ -758,23 +758,86 @@ fn parse_args(args: Vec<String>) -> ParsedArgs {
 }
 
 fn default_pid_path() -> PathBuf {
-    let home = std::env::var("HOME")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    home.join(".blackhole")
-        .join("horizon")
-        .join("vpn-helper.pid")
+    default_data_dir().join("vpn-helper.pid")
 }
 
 fn default_socket_path() -> PathBuf {
-    let home = std::env::var("HOME")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    home.join(".blackhole")
+    default_data_dir().join(DEFAULT_SOCKET_NAME)
+}
+
+fn default_data_dir() -> PathBuf {
+    helper_home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".blackhole")
         .join("horizon")
-        .join(DEFAULT_SOCKET_NAME)
+}
+
+fn helper_home_dir() -> Option<PathBuf> {
+    if let Ok(home) = std::env::var("HOME") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() && !is_root_home(trimmed) {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = macos_console_user_home() {
+            return Some(home);
+        }
+    }
+    None
+}
+
+fn is_root_home(home: &str) -> bool {
+    home == "/var/root" || home == "/root"
+}
+
+#[cfg(target_os = "macos")]
+fn macos_console_user_home() -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+
+    let uid = std::fs::metadata("/dev/console").ok()?.uid();
+    if uid == 0 {
+        return None;
+    }
+    unsafe {
+        let pw = libc::getpwuid(uid);
+        if pw.is_null() {
+            return None;
+        }
+        let dir = (*pw).pw_dir;
+        if dir.is_null() {
+            return None;
+        }
+        let home = std::ffi::CStr::from_ptr(dir).to_string_lossy();
+        if home.is_empty() || is_root_home(home.as_ref()) {
+            return None;
+        }
+        Some(PathBuf::from(home.as_ref()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_args_prefers_explicit_paths() {
+        let parsed = parse_args(vec![
+            "--socket".into(),
+            "/tmp/custom.sock".into(),
+            "--pid-file".into(),
+            "/tmp/custom.pid".into(),
+        ]);
+        assert_eq!(parsed.socket_path, PathBuf::from("/tmp/custom.sock"));
+        assert_eq!(parsed.pid_path, PathBuf::from("/tmp/custom.pid"));
+    }
+
+    #[test]
+    fn is_root_home_detects_launchd_root() {
+        assert!(is_root_home("/var/root"));
+        assert!(is_root_home("/root"));
+        assert!(!is_root_home("/Users/tester"));
+        assert!(!is_root_home("/home/tester"));
+    }
 }

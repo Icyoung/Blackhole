@@ -1,6 +1,7 @@
 import Cocoa
 import FlutterMacOS
 import Darwin
+import ServiceManagement
 
 @main
 class AppDelegate: FlutterAppDelegate {
@@ -9,6 +10,9 @@ class AppDelegate: FlutterAppDelegate {
   private let vpnHelperSocketRelativePath = ".blackhole/horizon/vpn-helper.sock"
   private let vpnHelperPidRelativePath = ".blackhole/horizon/vpn-helper.pid"
   private let vpnHelperLogRelativePath = ".blackhole/horizon/vpn-helper.log"
+  private let vpnHelperLaunchdPlistName = "dev.icyou.blackhole.horizon.vpn-helper.plist"
+  private let vpnHelperLaunchdLabel = "dev.icyou.blackhole.horizon.vpn-helper"
+  private var didOpenVpnHelperLoginItems = false
   private var statusItem: NSStatusItem?
   private var allowTerminate = false
   private var systemChannel: FlutterMethodChannel?
@@ -865,6 +869,71 @@ class AppDelegate: FlutterAppDelegate {
       )
     }
 
+    if try startVpnHelperViaSMAppServiceIfAvailable() {
+      return
+    }
+
+    try startVpnHelperViaAdministratorShell(helperURL: helperURL)
+  }
+
+  private func startVpnHelperViaSMAppServiceIfAvailable() throws -> Bool {
+    guard #available(macOS 13.0, *) else {
+      return false
+    }
+    let service = SMAppService.daemon(plistName: vpnHelperLaunchdPlistName)
+    switch service.status {
+    case .enabled:
+      kickstartVpnHelperLaunchdJob()
+      try waitUntilVpnHelperRunning()
+      return true
+    case .requiresApproval:
+      openVpnHelperLoginItemsIfNeeded()
+      return false
+    case .notRegistered, .notFound:
+      do {
+        try service.register()
+      } catch {
+        NSLog("VPN helper SMAppService register failed: %@", error.localizedDescription)
+      }
+      if service.status == .enabled {
+        try waitUntilVpnHelperRunning()
+        return true
+      }
+      if service.status == .requiresApproval {
+        openVpnHelperLoginItemsIfNeeded()
+      }
+      return false
+    @unknown default:
+      return false
+    }
+  }
+
+  @available(macOS 13.0, *)
+  private func openVpnHelperLoginItemsIfNeeded() {
+    if didOpenVpnHelperLoginItems {
+      return
+    }
+    didOpenVpnHelperLoginItems = true
+    DispatchQueue.main.async {
+      SMAppService.openSystemSettingsLoginItems()
+    }
+  }
+
+  private func kickstartVpnHelperLaunchdJob() {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    process.arguments = ["kickstart", "-k", "system/\(vpnHelperLaunchdLabel)"]
+    process.standardOutput = Pipe()
+    process.standardError = Pipe()
+    do {
+      try process.run()
+      process.waitUntilExit()
+    } catch {
+      NSLog("VPN helper launchctl kickstart failed: %@", error.localizedDescription)
+    }
+  }
+
+  private func startVpnHelperViaAdministratorShell(helperURL: URL) throws {
     let dataDir = vpnHelperDataDirectoryURL()
     let socketURL = vpnHelperSocketURL()
     let pidURL = vpnHelperPidURL()
@@ -881,7 +950,10 @@ class AppDelegate: FlutterAppDelegate {
       "</dev/null >> \(shellQuote(logURL.path)) 2>&1 &"
 
     try runAdministratorShell(command)
+    try waitUntilVpnHelperRunning()
+  }
 
+  private func waitUntilVpnHelperRunning() throws {
     let deadline = Date().addingTimeInterval(10)
     while Date() < deadline {
       if isVpnHelperRunning() {
@@ -898,7 +970,13 @@ class AppDelegate: FlutterAppDelegate {
   }
 
   private func bundledVpnHelperURL() -> URL? {
-    Bundle.main.resourceURL?.appendingPathComponent("horizon-vpn-helper")
+    guard
+      let url = Bundle.main.resourceURL?.appendingPathComponent("horizon-vpn-helper"),
+      FileManager.default.fileExists(atPath: url.path)
+    else {
+      return nil
+    }
+    return url
   }
 
   private func vpnHelperDataDirectoryURL() -> URL {
