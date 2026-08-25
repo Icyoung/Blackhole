@@ -51,6 +51,7 @@ const WG_NETCHECK_RESOLVE_RETRY: Duration = Duration::from_secs(5);
 const WG_NETCHECK_RESOLVE_ATTEMPTS: u8 = 12;
 const DEFAULT_HEADLESS_BIND: &str = "0.0.0.0";
 const DEFAULT_WORMHOLE_URL: &str = "wss://wormhole.blackhole-ai.com/ws";
+const PTY_SINK_CAPACITY: usize = 512;
 
 #[derive(Clone)]
 enum BroadcastMsg {
@@ -59,7 +60,7 @@ enum BroadcastMsg {
 }
 
 struct PtySink {
-    tx: mpsc::UnboundedSender<BroadcastMsg>,
+    tx: mpsc::Sender<BroadcastMsg>,
     device_key: Option<String>,
     data_plane: bool,
 }
@@ -79,10 +80,9 @@ struct AppState {
     inject_tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     lan_broadcast: broadcast::Sender<BroadcastMsg>,
     wormhole_broadcast: broadcast::Sender<BroadcastMsg>,
-    /// Per-socket PTY binary sinks. Std mutex so the PTY reader thread can fan out.
+    /// Std mutex: the PTY reader thread fans out without a Tokio runtime.
     pty_sinks: StdMutex<HashMap<u64, PtySink>>,
     pty_sink_next_id: AtomicU64,
-    /// Wormhole Voyager device_keys (refcount). Dual-plane gating is per-key.
     wormhole_device_keys: StdMutex<HashMap<String, usize>>,
     config_id: Option<String>,
     host_name: String,
@@ -1101,8 +1101,12 @@ async fn handle_lan_socket(
     state.lan_client_count.fetch_add(1, Ordering::SeqCst);
     let (mut sink, mut stream) = socket.split();
     let mut broadcast_rx = state.lan_broadcast.subscribe();
-    let (pty_tx, mut pty_rx) = mpsc::unbounded_channel();
+    let (pty_tx, mut pty_rx) = mpsc::channel(PTY_SINK_CAPACITY);
     let sink_id = register_pty_sink(&state, pty_tx);
+    let _guard = PtySinkGuard {
+        state: state.clone(),
+        sink_id,
+    };
     let remote_addr = remote.remote;
     let mut first_vpn_stdout_logged = false;
 
@@ -1162,7 +1166,6 @@ async fn handle_lan_socket(
             }
             out = broadcast_rx.recv() => {
                 let Ok(out) = out else { break };
-                // Data-plane sockets carry binary PTY only; JSON stays on control.
                 if pty_sink_is_data_plane(&state, sink_id) {
                     continue;
                 }
@@ -1175,7 +1178,7 @@ async fn handle_lan_socket(
                 }
             }
             out = pty_rx.recv() => {
-                let Some(out) = out else { continue };
+                let Some(out) = out else { break };
                 if vpn_peer && !first_vpn_stdout_logged {
                     if let BroadcastMsg::Binary(bytes) = &out {
                         if let Some(decoded) = decode_binary(bytes) {
@@ -1202,13 +1205,23 @@ async fn handle_lan_socket(
         }
     }
 
-    unregister_pty_sink(&state, sink_id);
-    state.lan_client_count.fetch_sub(1, Ordering::SeqCst);
     info!(
         remote_addr = %remote_addr,
         vpn_peer = vpn_peer,
         "websocket closed"
     );
+}
+
+struct PtySinkGuard {
+    state: Arc<AppState>,
+    sink_id: u64,
+}
+
+impl Drop for PtySinkGuard {
+    fn drop(&mut self) {
+        unregister_pty_sink(&self.state, self.sink_id);
+        self.state.lan_client_count.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 fn pty_sinks_lock(state: &AppState) -> std::sync::MutexGuard<'_, HashMap<u64, PtySink>> {
@@ -1224,7 +1237,7 @@ fn wormhole_device_keys_lock(
         .unwrap_or_else(|e| e.into_inner())
 }
 
-fn register_pty_sink(state: &AppState, tx: mpsc::UnboundedSender<BroadcastMsg>) -> u64 {
+fn register_pty_sink(state: &AppState, tx: mpsc::Sender<BroadcastMsg>) -> u64 {
     let id = state.pty_sink_next_id.fetch_add(1, Ordering::SeqCst);
     pty_sinks_lock(state).insert(
         id,
@@ -1280,25 +1293,43 @@ fn track_wormhole_device_key(state: &AppState, device_key: Option<&str>, add: bo
     }
 }
 
+fn track_assigned_wormhole_key(state: &AppState, original: Option<&str>, assigned: Option<&str>) {
+    let original_known = original
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .is_some();
+    if original_known {
+        return;
+    }
+    track_wormhole_device_key(state, assigned, true);
+}
+
 fn fanout_pty_binary(state: &AppState, msg: BroadcastMsg) {
+    let subscriber_count = state.wormhole_subscriber_count.load(Ordering::SeqCst);
     let (txs, send_wormhole) = {
         let sinks = pty_sinks_lock(state);
         let wormhole_keys = wormhole_device_keys_lock(state);
         let metas: Vec<_> = sinks.iter().map(|(id, sink)| sink.meta(*id)).collect();
+        let tracked: usize = wormhole_keys.values().copied().sum();
         let keys: Vec<String> = wormhole_keys.keys().cloned().collect();
-        let plan = pty_fanout::plan_pty_binary_fanout(metas, keys);
+        let plan = pty_fanout::plan_pty_binary_fanout(metas, keys, tracked, subscriber_count);
         let txs: Vec<_> = plan
             .lan_sink_ids
             .iter()
-            .filter_map(|id| sinks.get(id).map(|sink| sink.tx.clone()))
+            .filter_map(|id| sinks.get(id).map(|sink| (*id, sink.tx.clone())))
             .collect();
         (txs, plan.send_wormhole)
     };
-    for tx in txs {
-        let _ = tx.send(msg.clone());
+    let mut stale = Vec::new();
+    for (id, tx) in txs {
+        if tx.try_send(msg.clone()).is_err() {
+            stale.push(id);
+        }
     }
-    // subscriber_count is "is anyone on Wormhole at all?", not the dual-plane gate.
-    if send_wormhole && state.wormhole_subscriber_count.load(Ordering::SeqCst) > 0 {
+    for id in stale {
+        unregister_pty_sink(state, id);
+    }
+    if send_wormhole {
         let _ = state.wormhole_broadcast.send(msg);
     }
 }
@@ -1548,6 +1579,9 @@ async fn send_pairing_response(
         "assignedKey": assigned_key,
     }));
     let _ = tx.send(tokio_tungstenite::tungstenite::Message::Text(msg));
+    if approved {
+        track_assigned_wormhole_key(state, device_key, assigned_key);
+    }
 }
 
 fn resolve_data_dir() -> PathBuf {
@@ -6689,6 +6723,7 @@ async fn handle_voyager_connect_wormhole(
         let _ = write
             .send(tokio_tungstenite::tungstenite::Message::Text(response))
             .await;
+        track_assigned_wormhole_key(state, device_key.as_deref(), Some(assigned_key.as_str()));
         return;
     }
 

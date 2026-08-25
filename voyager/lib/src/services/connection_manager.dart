@@ -65,7 +65,6 @@ class HostInfo {
     final hostName = map['hostName'];
     return HostInfo(
       hostName: hostName is String && hostName.isNotEmpty ? hostName : null,
-      // Control-plane host_info must not drive Direct/fallback.
       vpnPeer: fromInTunnel ? map['vpnPeer'] as bool? : null,
       remoteAddr: fromInTunnel ? map['remoteAddr'] as String? : null,
       fromInTunnel: fromInTunnel,
@@ -366,7 +365,6 @@ class ConnectionManager {
   /// Called when Horizon sends a vpn_config response after peer registration.
   final void Function(EndpointInfo info)? onVpnConfig;
 
-  /// In-tunnel data-plane socket closed; control WS is still up.
   final VoidCallback? onDataPlaneClosed;
 
   EndpointInfo? _endpointInfo;
@@ -442,10 +440,13 @@ class ConnectionManager {
     if (transportKind == TransportKind.wireguardDirect) {
       transportKind = TransportKind.unknown;
     }
+    final keepDirectKind = _dataChannel != null;
     if (!keepExisting) {
       _lastUri = uri;
       _lastWaitForPairing = waitForPairing;
-      _activeTransportKind = transportKind;
+      if (!keepDirectKind) {
+        _activeTransportKind = transportKind;
+      }
       _activeTransportId = transportId;
       _activePathId = pathId ?? transportId;
       _activeSwitchReason = null;
@@ -510,7 +511,9 @@ class ConnectionManager {
       _subscription = subscription;
       _lastUri = uri;
       _lastWaitForPairing = waitForPairing;
-      _activeTransportKind = transportKind;
+      if (!keepDirectKind) {
+        _activeTransportKind = transportKind;
+      }
       _activeTransportId = transportId;
       _activePathId = pathId ?? transportId;
       _activeSwitchReason = null;
@@ -532,6 +535,7 @@ class ConnectionManager {
       );
       onConnected(waitForPairing: waitForPairing);
       _startHeartbeat();
+      _bindControlDeviceKey();
     } catch (error) {
       debugPrint('[Connection] connect threw uri=$uri error=$error');
       if (keepExisting) {
@@ -631,13 +635,13 @@ class ConnectionManager {
     }
     _shouldReconnect = shouldReconnect;
     closeDataPlane(silent: true);
+    _controlTransportKind = null;
     _resetConnectionState(silent: silent);
     if (shouldReconnect) {
       _scheduleReconnect();
     }
   }
 
-  /// Open the in-tunnel data WS without replacing the control connection.
   Future<void> openDataPlane({
     required Uri uri,
     String? deviceKey,
@@ -649,7 +653,11 @@ class ConnectionManager {
     }
     closeDataPlane(silent: true);
     _dataPlaneDeviceKey = deviceKey;
-    _controlTransportKind ??= _activeTransportKind;
+    _controlTransportKind =
+        _activeTransportKind == TransportKind.wireguardDirect
+            ? (_controlTransportKind ?? TransportKind.unknown)
+            : _activeTransportKind;
+    _bindControlDeviceKey();
     debugPrint(
       '[Connection] open data plane uri=$uri deviceKey=${deviceKey ?? "-"}',
     );
@@ -966,7 +974,10 @@ class ConnectionManager {
           uri: uri,
           waitForPairing: _lastWaitForPairing,
           autoReconnect: _autoReconnect,
-          transportKind: _activeTransportKind,
+          transportKind:
+              _dataChannel != null
+                  ? (_controlTransportKind ?? TransportKind.unknown)
+                  : _activeTransportKind,
           transportId: _activeTransportId,
           pathId: _activePathId,
         ),
@@ -1149,6 +1160,17 @@ class ConnectionManager {
     closeDataPlane();
   }
 
+  void _bindControlDeviceKey() {
+    final channel = _jsonChannel;
+    final key = _dataPlaneDeviceKey;
+    if (channel == null || key == null || key.isEmpty) {
+      return;
+    }
+    channel.sink.add(
+      _encodeMessage({'type': 'data_plane', 'active': false, 'deviceKey': key}),
+    );
+  }
+
   void _sendDataPlaneActive({bool active = true}) {
     final channel = _dataChannel;
     if (channel == null) {
@@ -1247,7 +1269,6 @@ class ConnectionManager {
             '[Connection] heartbeat exceeded max misses, reconnecting silently',
           );
           _heartbeatMisses = 0;
-          // Reconnect control only; keep an established in-tunnel data plane.
           _shouldReconnect = true;
           _resetConnectionState(silent: true);
           _scheduleReconnect();

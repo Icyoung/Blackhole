@@ -1709,10 +1709,28 @@ void main() {
       expect(manager.activeUri?.host, controlUri.host);
       expect(manager.activeUri?.port, controlUri.port);
 
+      await _waitUntil(
+        () => control.messages.whereType<String>().any(
+          (msg) => msg.contains('"data_plane"'),
+        ),
+      );
+      final controlBind = jsonDecode(
+        control.messages.whereType<String>().firstWhere(
+          (msg) => msg.contains('"data_plane"'),
+        ),
+      );
+      expect(controlBind['type'], 'data_plane');
+      expect(controlBind['active'], isFalse);
+      expect(controlBind['deviceKey'], 'dev-a');
+
       manager.sendCommand({'type': 'list'});
       manager.sendRaw('session-1', 'x');
 
-      await _waitUntil(() => control.messages.isNotEmpty);
+      await _waitUntil(
+        () => control.messages.whereType<String>().any(
+          (msg) => msg.contains('"list"'),
+        ),
+      );
       await _waitUntil(() => data.messages.isNotEmpty);
 
       expect(
@@ -1806,6 +1824,64 @@ void main() {
         expect(tracker.pairingResults, isEmpty);
       },
     );
+
+    test('control reconnect keeps Direct while data plane is live', () async {
+      final controlUri = await control.start();
+      final dataUri = await data.start();
+
+      await manager.connect(
+        uri: controlUri,
+        waitForPairing: false,
+        autoReconnect: false,
+        transportKind: TransportKind.lanDirect,
+      );
+      await control.waitForClient();
+      await manager.openDataPlane(uri: dataUri, deviceKey: 'dev-a');
+      await data.waitForClient();
+      manager.updateTransportKind(TransportKind.wireguardDirect);
+
+      await manager.connect(
+        uri: controlUri,
+        waitForPairing: false,
+        autoReconnect: false,
+        transportKind: TransportKind.lanDirect,
+      );
+
+      expect(manager.hasDataPlane, isTrue);
+      expect(manager.connected, isTrue);
+      expect(manager.activeTransportKind, TransportKind.wireguardDirect);
+    });
+
+    test('disconnect clears stored control kind', () async {
+      final controlUri = await control.start();
+      final dataUri = await data.start();
+
+      await manager.connect(
+        uri: controlUri,
+        waitForPairing: false,
+        autoReconnect: false,
+        transportKind: TransportKind.lanDirect,
+      );
+      await control.waitForClient();
+      await manager.openDataPlane(uri: dataUri, deviceKey: 'dev-a');
+      await data.waitForClient();
+      manager.updateTransportKind(TransportKind.wireguardDirect);
+      manager.closeDataPlane(silent: true);
+      expect(manager.activeTransportKind, TransportKind.lanDirect);
+
+      manager.disconnect(silent: true);
+      await manager.connect(
+        uri: controlUri,
+        waitForPairing: false,
+        autoReconnect: false,
+        transportKind: TransportKind.wormholeRelay,
+      );
+      await manager.openDataPlane(uri: dataUri, deviceKey: 'dev-a');
+      manager.updateTransportKind(TransportKind.wireguardDirect);
+      manager.closeDataPlane(silent: true);
+
+      expect(manager.activeTransportKind, TransportKind.wormholeRelay);
+    });
   });
 }
 

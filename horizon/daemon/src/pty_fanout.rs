@@ -1,7 +1,5 @@
 use std::collections::HashSet;
 
-/// Per-socket PTY destination. `device_key` ties a LAN/control socket to an
-/// in-tunnel data-plane socket so dual-plane does not emit a second copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PtySinkMeta {
     pub id: u64,
@@ -24,20 +22,17 @@ impl PtySinkMeta {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PtyFanoutPlan {
     pub lan_sink_ids: Vec<u64>,
-    /// Whether binary should go to Wormhole at all. Caller still applies
-    /// `wormhole_subscriber_count > 0` as the "is anyone on Wormhole?" skip.
     pub send_wormhole: bool,
 }
 
-/// Choose binary PTY destinations.
-///
-/// Dual-plane is per `device_key`: if that device has a data-plane sink, other
-/// sockets for the same key are skipped. Unkeyed LAN sockets still receive
-/// (true LAN Voyager). Wormhole binary is sent when any Wormhole subscriber
-/// lacks a data-plane sink — never gated on subscriber count here.
+/// `wormhole_tracked_subscribers` is the sum of known-key refcounts.
+/// Skip Wormhole binary only when every live subscriber is in that set and
+/// each of those keys already has a data-plane sink.
 pub fn plan_pty_binary_fanout(
     sinks: impl IntoIterator<Item = PtySinkMeta>,
     wormhole_device_keys: impl IntoIterator<Item = String>,
+    wormhole_tracked_subscribers: usize,
+    wormhole_subscriber_count: usize,
 ) -> PtyFanoutPlan {
     let sinks: Vec<PtySinkMeta> = sinks.into_iter().collect();
     let wormhole_keys: Vec<String> = wormhole_device_keys.into_iter().collect();
@@ -54,19 +49,14 @@ pub fn plan_pty_binary_fanout(
         .map(|sink| sink.id)
         .collect();
 
-    // Empty key list: anonymous Wormhole subscribers still need binary.
-    // Caller skips the upload when subscriber_count is 0.
-    let send_wormhole = if wormhole_keys.is_empty() {
-        true
-    } else {
-        wormhole_keys
-            .iter()
-            .any(|key| !data_plane_keys.contains(key))
-    };
-
     PtyFanoutPlan {
         lan_sink_ids,
-        send_wormhole,
+        send_wormhole: should_send_wormhole_binary(
+            &wormhole_keys,
+            &data_plane_keys,
+            wormhole_tracked_subscribers,
+            wormhole_subscriber_count,
+        ),
     }
 }
 
@@ -75,6 +65,26 @@ fn should_send_lan_binary(sink: &PtySinkMeta, data_plane_keys: &HashSet<String>)
         return true;
     }
     !matches!(&sink.device_key, Some(key) if data_plane_keys.contains(key))
+}
+
+fn should_send_wormhole_binary(
+    wormhole_keys: &[String],
+    data_plane_keys: &HashSet<String>,
+    wormhole_tracked_subscribers: usize,
+    wormhole_subscriber_count: usize,
+) -> bool {
+    if wormhole_subscriber_count == 0 {
+        return false;
+    }
+    if wormhole_subscriber_count > wormhole_tracked_subscribers {
+        return true;
+    }
+    if wormhole_keys.is_empty() {
+        return true;
+    }
+    wormhole_keys
+        .iter()
+        .any(|key| !data_plane_keys.contains(key))
 }
 
 #[cfg(test)]
@@ -89,59 +99,101 @@ mod tests {
         }
     }
 
+    fn plan(
+        sinks: impl IntoIterator<Item = PtySinkMeta>,
+        keys: impl IntoIterator<Item = String>,
+        tracked: usize,
+        subscribers: usize,
+    ) -> PtyFanoutPlan {
+        plan_pty_binary_fanout(sinks, keys, tracked, subscribers)
+    }
+
     #[test]
     fn one_device_two_sockets_one_stdout_stream() {
-        let plan = plan_pty_binary_fanout(
+        let result = plan(
             [sink(1, Some("dev-a"), false), sink(2, Some("dev-a"), true)],
             ["dev-a".to_string()],
+            1,
+            1,
         );
-        assert_eq!(plan.lan_sink_ids, vec![2]);
-        assert!(!plan.send_wormhole);
+        assert_eq!(result.lan_sink_ids, vec![2]);
+        assert!(!result.send_wormhole);
     }
 
     #[test]
     fn two_devices_two_streams() {
-        let plan = plan_pty_binary_fanout(
+        let result = plan(
             [sink(1, Some("dev-a"), true), sink(2, Some("dev-b"), false)],
             ["dev-b".to_string()],
+            1,
+            1,
         );
-        assert_eq!(plan.lan_sink_ids, vec![1, 2]);
-        assert!(plan.send_wormhole);
+        assert_eq!(result.lan_sink_ids, vec![1, 2]);
+        assert!(result.send_wormhole);
     }
 
     #[test]
     fn true_lan_plus_vpn_does_not_filter_by_vpn_peer() {
-        let plan = plan_pty_binary_fanout(
+        let result = plan(
             [sink(1, None, false), sink(2, Some("vpn"), true)],
             ["vpn".to_string()],
+            1,
+            1,
         );
-        assert_eq!(plan.lan_sink_ids, vec![1, 2]);
-        assert!(!plan.send_wormhole);
+        assert_eq!(result.lan_sink_ids, vec![1, 2]);
+        assert!(!result.send_wormhole);
     }
 
     #[test]
     fn wormhole_only_second_device_still_gets_pty() {
-        let plan = plan_pty_binary_fanout(
+        let result = plan(
             [sink(1, Some("vpn"), true)],
             ["vpn".to_string(), "relay".to_string()],
+            2,
+            2,
         );
-        assert_eq!(plan.lan_sink_ids, vec![1]);
-        assert!(plan.send_wormhole);
+        assert_eq!(result.lan_sink_ids, vec![1]);
+        assert!(result.send_wormhole);
     }
 
     #[test]
-    fn wormhole_subscriber_count_is_not_the_dual_plane_gate() {
-        // Dual-plane skip is "does this device_key have a data-plane sink?",
-        // not "is anyone subscribed via Wormhole?".
-        let all_on_data_plane =
-            plan_pty_binary_fanout([sink(1, Some("vpn"), true)], ["vpn".to_string()]);
-        assert!(!all_on_data_plane.send_wormhole);
+    fn untracked_wormhole_subscriber_keeps_binary() {
+        let result = plan([sink(1, Some("vpn"), true)], ["vpn".to_string()], 1, 2);
+        assert_eq!(result.lan_sink_ids, vec![1]);
+        assert!(result.send_wormhole);
+    }
 
-        let mixed = plan_pty_binary_fanout(
-            [sink(1, Some("vpn"), true)],
-            ["vpn".to_string(), "other".to_string()],
+    #[test]
+    fn control_bind_without_active_is_exclusive_for_same_key() {
+        let mut control = sink(1, None, false);
+        control.apply_data_plane(false, Some("dev-a".to_string()));
+        let result = plan(
+            [control, sink(2, Some("dev-a"), true)],
+            ["dev-a".to_string()],
+            1,
+            1,
         );
-        assert!(mixed.send_wormhole);
+        assert_eq!(result.lan_sink_ids, vec![2]);
+        assert!(!result.send_wormhole);
+    }
+
+    #[test]
+    fn unkeyed_lan_client_is_not_dropped_when_another_device_is_dual_plane() {
+        let mut control = sink(1, None, false);
+        control.apply_data_plane(false, Some("vpn".to_string()));
+        let result = plan(
+            [control, sink(2, Some("vpn"), true), sink(3, None, false)],
+            ["vpn".to_string()],
+            1,
+            1,
+        );
+        assert_eq!(result.lan_sink_ids, vec![2, 3]);
+    }
+
+    #[test]
+    fn no_wormhole_subscribers_skips_relay() {
+        let result = plan([sink(1, Some("vpn"), true)], Vec::<String>::new(), 0, 0);
+        assert!(!result.send_wormhole);
     }
 
     #[test]
@@ -154,12 +206,5 @@ mod tests {
         meta.apply_data_plane(false, None);
         assert!(!meta.data_plane);
         assert_eq!(meta.device_key.as_deref(), Some("dev-a"));
-    }
-
-    #[test]
-    fn anonymous_wormhole_keys_keep_binary_path() {
-        let plan = plan_pty_binary_fanout([sink(1, Some("vpn"), true)], Vec::<String>::new());
-        assert_eq!(plan.lan_sink_ids, vec![1]);
-        assert!(plan.send_wormhole);
     }
 }
