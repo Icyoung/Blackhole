@@ -17,7 +17,6 @@ pub enum HelperRequest {
         subnet: String,
         netmask: String,
         app_port: u16,
-        /// When false, skip pf rdr so the daemon can bind 10.13.37.1 explicitly.
         #[serde(default = "default_true")]
         ws_redirect: bool,
     },
@@ -78,6 +77,8 @@ pub enum HelperResponse {
     Started {
         version: u32,
         interface_name: String,
+        #[serde(default = "default_true")]
+        ws_redirect: bool,
     },
     Stopped {
         version: u32,
@@ -93,9 +94,14 @@ pub enum HelperResponse {
 
 impl HelperResponse {
     pub fn started(interface_name: String) -> Self {
+        Self::started_with_redirect(interface_name, false)
+    }
+
+    pub fn started_with_redirect(interface_name: String, ws_redirect: bool) -> Self {
         Self::Started {
             version: PROTOCOL_VERSION,
             interface_name,
+            ws_redirect,
         }
     }
 
@@ -131,10 +137,41 @@ impl HelperResponse {
 /// Chown the helper control socket to the console/sudo user, then `chmod 0600`.
 /// Helper runs as root; without this the daemon cannot connect.
 #[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HelperSocketRestrictPlan {
+    pub chown: Option<(u32, u32)>,
+    pub mode: u32,
+}
+
+#[cfg(unix)]
+pub fn helper_socket_restrict_plan(
+    euid: u32,
+    owner: Option<(u32, u32)>,
+) -> Result<HelperSocketRestrictPlan, String> {
+    match owner {
+        Some(ids) => Ok(HelperSocketRestrictPlan {
+            chown: Some(ids),
+            mode: 0o600,
+        }),
+        None if euid == 0 => {
+            Err("helper is root but could not determine a non-root owner".to_string())
+        }
+        None => Ok(HelperSocketRestrictPlan {
+            chown: None,
+            mode: 0o600,
+        }),
+    }
+}
+
+#[cfg(unix)]
 pub fn restrict_helper_socket(path: &std::path::Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
 
-    if let Some((uid, gid)) = helper_socket_owner_ids(path) {
+    let plan =
+        helper_socket_restrict_plan(unsafe { libc::geteuid() }, helper_socket_owner_ids(path))
+            .map_err(|e| format!("{e} for {}", path.display()))?;
+
+    if let Some((uid, gid)) = plan.chown {
         use std::os::unix::ffi::OsStrExt;
         let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
             format!(
@@ -150,14 +187,9 @@ pub fn restrict_helper_socket(path: &std::path::Path) -> Result<(), String> {
                 std::io::Error::last_os_error()
             ));
         }
-    } else if unsafe { libc::geteuid() } == 0 {
-        return Err(format!(
-            "helper is root but could not determine a non-root owner for {}",
-            path.display()
-        ));
     }
 
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(plan.mode)).map_err(|e| {
         format!(
             "failed to set helper socket permissions on {}: {e}",
             path.display()
@@ -247,6 +279,28 @@ mod tests {
             & 0o777;
         let _ = std::fs::remove_file(&path);
         assert_eq!(mode, 0o600);
+        assert_eq!(mode & 0o077, 0);
+    }
+
+    #[test]
+    fn helper_socket_restrict_plan_fails_closed_as_root_without_owner() {
+        let err = helper_socket_restrict_plan(0, None).expect_err("root must fail closed");
+        assert!(err.contains("non-root owner"), "{err}");
+    }
+
+    #[test]
+    fn helper_socket_restrict_plan_chowns_then_sets_0600() {
+        let plan = helper_socket_restrict_plan(0, Some((501, 20))).expect("root with owner");
+        assert_eq!(plan.chown, Some((501, 20)));
+        assert_eq!(plan.mode, 0o600);
+        assert_eq!(plan.mode & 0o077, 0);
+    }
+
+    #[test]
+    fn helper_socket_restrict_plan_unprivileged_can_chmod_without_chown() {
+        let plan = helper_socket_restrict_plan(501, None).expect("unprivileged");
+        assert_eq!(plan.chown, None);
+        assert_eq!(plan.mode, 0o600);
     }
 
     #[test]

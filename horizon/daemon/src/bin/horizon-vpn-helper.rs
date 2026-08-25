@@ -156,13 +156,19 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<ActiveVpnState>>) -> Resu
             if let Err(error) = nat::enable_ip_forwarding() {
                 warn!("helper failed to enable IP forwarding: {error}");
             }
-            let local_ws_redirect = if ws_redirect && app_port != 0 {
+            let mut rdr_installed = ws_redirect && app_port != 0;
+            let local_ws_redirect = if rdr_installed {
                 Some((server_ip.as_str(), app_port, Some(interface_name.as_str())))
             } else {
                 None
             };
             if let Err(error) = nat::setup_nat(&subnet, None, local_ws_redirect) {
-                warn!("helper failed to setup NAT: {error}");
+                if rdr_installed {
+                    error!("helper failed to setup NAT/rdr: {error}");
+                    rdr_installed = false;
+                } else {
+                    warn!("helper failed to setup NAT: {error}");
+                }
             }
 
             let dns_upstream = dns_forwarder::detect_system_dns();
@@ -181,7 +187,7 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<ActiveVpnState>>) -> Resu
             )?;
             if let Err(error) = send_response(
                 &stream,
-                &HelperResponse::started(interface_name.clone()),
+                &HelperResponse::started_with_redirect(interface_name.clone(), rdr_installed),
                 Some(daemon_fd),
             ) {
                 bridge_stop.store(true, Ordering::SeqCst);
@@ -210,7 +216,7 @@ fn handle_client(stream: UnixStream, state: &Arc<Mutex<ActiveVpnState>>) -> Resu
                 state.interface_name = Some(interface_name);
                 state.subnet = Some(subnet);
                 state.server_ip = Some(server_ip);
-                state.ws_redirect = ws_redirect && app_port != 0;
+                state.ws_redirect = rdr_installed;
                 state.bridge_stop = Some(bridge_stop);
                 state.bridge_thread = Some(bridge_thread);
                 state.dns_stop = Some(dns_stop);

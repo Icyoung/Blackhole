@@ -38,7 +38,7 @@ use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::{broadcast, mpsc, watch, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 use tracing::{debug, info, warn};
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -100,6 +100,7 @@ struct AppState {
     endpoint_register_retrying: AtomicBool,
     /// When true, bind 10.13.37.1:lanPort after pf rdr has been removed.
     vpn_explicit_ws: watch::Sender<bool>,
+    vpn_tcp_probe: Mutex<Option<oneshot::Sender<(SocketAddr, SocketAddr)>>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -394,9 +395,7 @@ async fn run_server(
 
     let paired_devices = load_paired_devices(&data_dir).unwrap_or_default();
     let (groups, session_names) = load_groups(&data_dir);
-    let explicit_vpn_ws = config.vpn
-        && vpn_tcp_delivery::uses_explicit_bind(vpn_tcp_delivery::vpn_tcp_delivery_mode());
-    let (vpn_explicit_ws, vpn_explicit_rx) = watch::channel(explicit_vpn_ws);
+    let (vpn_explicit_ws, vpn_explicit_rx) = watch::channel(false);
     let state = Arc::new(AppState {
         sessions: Arc::new(Mutex::new(HashMap::new())),
         inject_tasks: Mutex::new(HashMap::new()),
@@ -435,6 +434,7 @@ async fn run_server(
         last_endpoint_register_sig: Mutex::new(None),
         endpoint_register_retrying: AtomicBool::new(false),
         vpn_explicit_ws,
+        vpn_tcp_probe: Mutex::new(None),
     });
 
     let pid_path = daemon_pid_path(&state.data_dir);
@@ -498,7 +498,7 @@ async fn run_server(
     install_signal_handlers();
 
     let app = Router::new()
-        .route("/health", get(|| async { "ok" }))
+        .route("/health", get(health_handler))
         .route("/status", get(status_handler))
         .route("/shutdown", post(shutdown_handler))
         .route("/pairing/pending", get(pairing_pending))
@@ -1034,6 +1034,7 @@ async fn ws_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let vpn_peer = vpn_tcp_delivery::classify_vpn_peer(addr.remote, addr.local);
+    report_vpn_tcp_probe(&state, addr).await;
     info!(
         remote_addr = %addr.remote,
         local_addr = %addr.local,
@@ -1041,6 +1042,20 @@ async fn ws_handler(
         "websocket upgrade requested"
     );
     ws.on_upgrade(move |socket| handle_lan_socket(state, socket, addr, vpn_peer))
+}
+
+async fn health_handler(
+    ConnectInfo(addr): ConnectInfo<ClientConnectInfo>,
+    State(state): State<Arc<AppState>>,
+) -> &'static str {
+    report_vpn_tcp_probe(&state, addr).await;
+    "ok"
+}
+
+async fn report_vpn_tcp_probe(state: &AppState, addr: ClientConnectInfo) {
+    if let Some(tx) = state.vpn_tcp_probe.lock().await.take() {
+        let _ = tx.send((addr.remote, addr.local));
+    }
 }
 
 async fn handle_lan_socket(
@@ -5339,6 +5354,95 @@ fn enable_explicit_vpn_ws_bind(
     }
 }
 
+async fn wait_for_local_ws(bind: IpAddr, port: u16) {
+    let addr = if bind.is_unspecified() {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+    } else {
+        SocketAddr::new(bind, port)
+    };
+    for _ in 0..50 {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    warn!("timed out waiting for local websocket listener on {addr}");
+}
+
+async fn measure_and_maybe_failover(
+    state: &AppState,
+    helper_session: Option<&vpn_helper_client::HelperSession>,
+    tun_fd: i32,
+    transport: tun_device::TunTransport,
+    rdr_installed: bool,
+    env_explicit: bool,
+) {
+    if env_explicit || !rdr_installed {
+        enable_explicit_vpn_ws_bind(state, helper_session);
+        return;
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        wait_for_local_ws(state.bind, state.port).await;
+        let (tx, rx) = oneshot::channel();
+        *state.vpn_tcp_probe.lock().await = Some(tx);
+        let timeout = Duration::from_secs(2);
+        match vpn_tcp_delivery::tun_tcp_handshake(
+            tun_fd,
+            transport,
+            vpn_tcp_delivery::VPN_PROBE_CLIENT_V4,
+            vpn_tcp_delivery::VPN_SERVER_V4,
+            49152,
+            state.port,
+            timeout,
+        )
+        .await
+        {
+            Ok(session) => {
+                let host = vpn_tcp_delivery::VPN_SERVER_V4.to_string();
+                if let Err(e) = vpn_tcp_delivery::tun_tcp_send(
+                    tun_fd,
+                    transport,
+                    &session,
+                    &vpn_tcp_delivery::vpn_probe_http_get(&host),
+                    timeout,
+                )
+                .await
+                {
+                    warn!("in-tunnel TCP probe HTTP write failed: {e}");
+                }
+            }
+            Err(e) => {
+                warn!("in-tunnel TCP probe handshake failed: {e}");
+                *state.vpn_tcp_probe.lock().await = None;
+                enable_explicit_vpn_ws_bind(state, helper_session);
+                return;
+            }
+        }
+
+        let measured = tokio::time::timeout(timeout, rx)
+            .await
+            .ok()
+            .and_then(|result| result.ok());
+        let remote = measured.map(|(remote, _)| remote);
+        info!(
+            remote_addr = ?remote,
+            local_addr = ?measured.map(|(_, local)| local),
+            "measured in-tunnel TCP accept"
+        );
+        if vpn_tcp_delivery::rdr_probe_requires_failover(remote) {
+            enable_explicit_vpn_ws_bind(state, helper_session);
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (tun_fd, transport);
+        enable_explicit_vpn_ws_bind(state, helper_session);
+    }
+}
+
 fn spawn_explicit_vpn_ws_listener(
     app: Router,
     primary_bind: IpAddr,
@@ -5497,17 +5601,18 @@ async fn start_vpn_server(
     }
 
     let server_ip = VPN_SERVER_IP_STR;
-    let explicit_bind = *state.vpn_explicit_ws.borrow();
-    let ws_redirect = !explicit_bind;
     let env_mode = vpn_tcp_delivery::vpn_tcp_delivery_mode();
+    let env_explicit = vpn_tcp_delivery::uses_explicit_bind(env_mode);
+    let ws_redirect = !env_explicit;
     info!(
-        explicit_bind,
+        env_explicit,
         ws_redirect,
         env_rdr = vpn_tcp_delivery::uses_pf_rdr(env_mode),
         app_port = state.port,
         "VPN TCP delivery mode"
     );
     let mut helper_session = None;
+    let mut rdr_installed = false;
     let tun = if cfg!(target_os = "macos") && vpn_helper_client::is_available(&state.data_dir) {
         let prepared = vpn_helper_client::start_vpn(
             &state.data_dir,
@@ -5519,6 +5624,7 @@ async fn start_vpn_server(
         )
         .map_err(|e| format!("failed to start VPN via helper: {e}"))?;
         info!("created helper-backed TUN device: {}", prepared.tun.name);
+        rdr_installed = prepared.ws_redirect;
         helper_session = Some(prepared.session);
         prepared.tun
     } else {
@@ -5538,16 +5644,29 @@ async fn start_vpn_server(
         } else {
             None
         };
-        if let Err(e) = nat::setup_nat(subnet, None, local_ws_redirect) {
-            warn!("failed to setup NAT: {e}");
+        match nat::setup_nat(subnet, None, local_ws_redirect) {
+            Ok(()) => rdr_installed = ws_redirect,
+            Err(e) => {
+                if ws_redirect {
+                    warn!("failed to setup NAT/rdr: {e}");
+                } else {
+                    warn!("failed to setup NAT: {e}");
+                }
+            }
         }
 
         tun
     };
 
-    if explicit_bind {
-        enable_explicit_vpn_ws_bind(&state, helper_session.as_ref());
-    }
+    measure_and_maybe_failover(
+        &state,
+        helper_session.as_ref(),
+        tun.fd,
+        tun.transport,
+        rdr_installed,
+        env_explicit,
+    )
+    .await;
 
     if helper_session.is_none() {
         // Start DNS forwarder

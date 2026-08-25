@@ -35,7 +35,6 @@ pub fn setup_nat(
 }
 
 /// Drop the local WebSocket rdr while keeping masquerade NAT.
-/// Used before binding 10.13.37.1 so rdr and the explicit bind are never both active.
 pub fn disable_local_ws_redirect() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {

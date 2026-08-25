@@ -19,6 +19,7 @@ use crate::vpn_helper_protocol::{
 pub struct PreparedTun {
     pub tun: TunDevice,
     pub session: HelperSession,
+    pub ws_redirect: bool,
 }
 
 pub struct HelperSession {
@@ -157,7 +158,11 @@ fn start_vpn_once(
     )?;
 
     match response {
-        HelperResponse::Started { interface_name, .. } => {
+        HelperResponse::Started {
+            interface_name,
+            ws_redirect,
+            ..
+        } => {
             let fd =
                 fd.ok_or_else(|| "helper started VPN without returning a TUN fd".to_string())?;
             set_nonblocking(fd)?;
@@ -170,6 +175,7 @@ fn start_vpn_once(
                 session: HelperSession {
                     socket_path: socket_path.to_path_buf(),
                 },
+                ws_redirect,
             })
         }
         HelperResponse::Error { message, .. } => Err(message),
