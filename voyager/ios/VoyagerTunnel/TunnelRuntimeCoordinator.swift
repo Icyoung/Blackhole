@@ -188,8 +188,12 @@ final class TunnelRuntimeCoordinator {
         if snapshot.connectionMode == .direct {
             let nextIndex = activeDirectCandidateIndex + 1
             if nextIndex < max(availableDirectCandidateCount, 1) {
+                let restartBudget = snapshot.status == .connected
                 activeDirectCandidateIndex = nextIndex
                 tunnelStartedAt = now
+                if restartBudget {
+                    attemptStartedAt = now
+                }
                 snapshot = TunnelRuntimeSnapshot(
                     status: .connecting,
                     connectionMode: .direct,

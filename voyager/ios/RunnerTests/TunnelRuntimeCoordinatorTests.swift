@@ -198,6 +198,46 @@ final class TunnelRuntimeCoordinatorTests: XCTestCase {
         XCTAssertNil(runtime.snapshot.error)
     }
 
+    func testLongLivedSessionHealthLossStartsFreshBudget() {
+        let runtime = TunnelRuntimeCoordinator(
+            handshakeTimeout: 12,
+            directHealthGracePeriod: 8,
+            totalBudget: 30
+        )
+        let startedAt = Date(timeIntervalSince1970: 100)
+
+        runtime.start(now: startedAt)
+        _ = runtime.refresh(
+            handshakeAgeSeconds: 0,
+            inboundWireGuardBytes: 1024,
+            inboundUdpPackets: 1,
+            availableDirectCandidateCount: 3,
+            now: startedAt.addingTimeInterval(1)
+        )
+
+        let retry = runtime.refresh(
+            handshakeAgeSeconds: nil,
+            inboundWireGuardBytes: 0,
+            inboundUdpPackets: 0,
+            availableDirectCandidateCount: 3,
+            now: startedAt.addingTimeInterval(120)
+        )
+        XCTAssertEqual(retry, .retryDirect(1))
+        XCTAssertEqual(runtime.snapshot.status, .connecting)
+        XCTAssertNil(runtime.snapshot.error)
+
+        let nextTick = runtime.refresh(
+            handshakeAgeSeconds: nil,
+            inboundWireGuardBytes: 0,
+            inboundUdpPackets: 0,
+            availableDirectCandidateCount: 3,
+            now: startedAt.addingTimeInterval(120.25)
+        )
+        XCTAssertEqual(nextTick, .none)
+        XCTAssertEqual(runtime.snapshot.status, .connecting)
+        XCTAssertNil(runtime.snapshot.error)
+    }
+
     func testAllDirectCandidatesExhaustedEmitsError() {
         let runtime = TunnelRuntimeCoordinator(handshakeTimeout: 12)
         let startedAt = Date(timeIntervalSince1970: 100)

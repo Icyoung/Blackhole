@@ -55,10 +55,21 @@ class BlackholeVpnService : VpnService() {
             "timeSinceLastHandshakeSecs" to -1L,
         )
 
+        private val connectingPayload: Map<String, Any?> = mapOf(
+            "status" to "connecting",
+            "connectionMode" to "direct",
+            "directSessionReady" to false,
+            "udpPacketsIn" to 0L,
+            "tunPacketsIn" to 0L,
+            "wgRxBytes" to 0L,
+            "timeSinceLastHandshakeSecs" to -1L,
+        )
+
         fun prepareStart(): Pair<CountDownLatch, Int> {
             synchronized(startMutex) {
                 startGeneration += 1
                 startError = null
+                lastStatusPayload = connectingPayload
                 val latch = CountDownLatch(1)
                 startLatch = latch
                 return latch to startGeneration
