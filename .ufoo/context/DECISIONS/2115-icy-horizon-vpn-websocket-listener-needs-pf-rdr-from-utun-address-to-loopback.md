@@ -29,16 +29,21 @@ Live helper honors `app_port`. Handoff URI is `ws://10.13.37.1:<lanPort>/ws`
 (default 9527, not 9529). UI Direct only after `host_info.vpnPeer==true` on
 that socket. See `docs/macos-vpn-helper.md`.
 
-## Context
+The original context below is historical (WG-over-WS relay datapath and
+port 9529). Current handoff is Direct UDP + `10.13.37.1:9527`.
 
-Voyager now successfully completes relay negotiation, switches application traffic to
-`ws://10.13.37.1:9529/ws`, and starts sending TCP packets over the WireGuard relay tunnel.
-Horizon decrypts those packets and injects them into `utun`, and the helper confirms packets
-with `src=10.13.37.2 dst=10.13.37.1 proto=6` are forwarded from daemon to `utun`.
+## Context (historical)
 
-However, Horizon never logs `websocket upgrade requested ... vpn_peer=true`, which means the
-local websocket listener is not actually receiving the TCP connection addressed to
-`10.13.37.1:9529` after injection into the VPN interface.
+Voyager could complete **relay** negotiation, switch application traffic to
+`ws://10.13.37.1:9529/ws`, and send TCP packets over the WireGuard **relay**
+tunnel. Horizon decrypted those packets and injected them into `utun`, and
+the helper confirmed packets with `src=10.13.37.2 dst=10.13.37.1 proto=6`
+were forwarded from daemon to `utun`.
+
+However, Horizon never logged `websocket upgrade requested ... vpn_peer=true`,
+which meant the local websocket listener was not actually receiving the TCP
+connection addressed to `10.13.37.1:9529` after injection into the VPN
+interface.
 
 ## Decision
 

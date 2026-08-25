@@ -6,7 +6,8 @@
 
 Preferred WAN data path after pairing is **WireGuard UDP**. Fallback is the
 control WebSocket that is already up (Wormhole or LAN). There is no third
-data plane.
+**WAN transport** and no WG-over-WS hop. The three planes below are control
+WS, WG UDP, and in-tunnel PTY WS — not three WAN transports.
 
 Related: `docs/architecture.md`, `docs/remove-wg-relay.md`,
 `docs/ios-native-vpn.md`, `docs/macos-vpn-helper.md`, decision 2276.

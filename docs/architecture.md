@@ -21,7 +21,7 @@
 - `docs/wg-direct-roadmap.md`
 - `docs/remove-wg-relay.md`
 
-VPN 三平面（控制 WS / WG UDP / 隧道内 PTY WS）以这些文档与决策 2276 / design `0b0fc273` 为准。本文其余章节有历史/愿景描述，**不要**把 `/wg-relay`、DERP、或物理网卡上的 app WS 当成当前数据面。
+VPN 三平面（控制 WS / WG UDP / 隧道内 PTY WS）以这些文档与决策 2276 / design `0b0fc273` 为准。§1.4 Mode 3、§3 Wormhole 黄金法则、§5 通信协议、§7.3 PTY 落点是当前真相。§2.1–2.3 的 Flutter 平台通道图是历史描述。**不要**把 `/wg-relay`、DERP、`0x4248` 帧、或物理网卡上的 app WS 当成当前数据面。
 
 ---
 
@@ -61,28 +61,25 @@ VPN 三平面（控制 WS / WG UDP / 隧道内 PTY WS）以这些文档与决策
 │   │                 │              │                 │                  │
 │   │  ┌───────────┐  │              │  ┌───────────┐  │                  │
 │   │  │  Flutter  │  │              │  │  Flutter  │  │                  │
-│   │  │    UI     │  │              │  │    UI     │  │                  │
+│   │  │  UI shell │  │              │  │    UI     │  │                  │
 │   │  └─────┬─────┘  │              │  └─────┬─────┘  │                  │
 │   │        │        │              │        │        │                  │
 │   │  ┌─────┴─────┐  │              │  ┌─────┴─────┐  │                  │
-│   │  │ Platform  │  │              │  │  Terminal │  │                  │
-│   │  │  Plugin   │  │              │  │  Emulator │  │                  │
-│   │  └─────┬─────┘  │              │  └───────────┘  │                  │
-│   │        │        │              │                 │                  │
-│   │  ┌─────┴─────┐  │              │                 │                  │
-│   │  │ PTY/ConPTY│  │              │                 │                  │
-│   │  │  + Shell  │  │              │                 │                  │
-│   │  └───────────┘  │              │                 │                  │
+│   │  │ horizon-  │  │              │  │  Terminal │  │                  │
+│   │  │  daemon   │  │              │  │  Emulator │  │                  │
+│   │  │ PTY/ConPTY│  │              │  └───────────┘  │                  │
+│   │  │ pairing WG│  │              │  Native WG/TUN  │                  │
+│   │  └───────────┘  │              │  (optional)     │                  │
 │   └────────┬────────┘              └────────┬────────┘                  │
 │            │                                │                            │
-│            │ WebSocket (wss://)             │ WebSocket (wss://)        │
+│            │ WebSocket (control + fallback) │ WebSocket / WG UDP        │
 │            │                                │                            │
 │            ▼                                ▼                            │
 │   ┌─────────────────────────────────────────────────────────────────┐   │
 │   │                          Wormhole                                │   │
 │   │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │   │
-│   │  │    Auth     │  │   Session   │  │     Stream Router       │  │   │
-│   │  │   Gateway   │  │   Manager   │  │  (stdin/stdout/resize)  │  │   │
+│   │  │    Auth     │  │  Signaling  │  │   Opaque WS forward    │  │   │
+│   │  │   Gateway   │  │ + UDP 6666  │  │  (does not own PTY)    │  │   │
 │   │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │   │
 │   └─────────────────────────────────────────────────────────────────┘   │
 │                                                                          │
@@ -162,7 +159,7 @@ macOS 本机投递：pf `rdr` 打在 **utun** 上，把 `10.13.37.1:lanPort` DNA
 
 ## 2. Horizon（Terminal Agent）详细设计
 
-**当前运行时：** 主机侧真相是 `horizon-daemon`（Rust）：PTY/ConPTY、配对、分组、LAN/Wormhole WebSocket、WG server。Flutter 是设置与 UI shell，不再是 PTY 的权威实现。下面 2.1–2.3 保留历史平台通道描述，实施时以 daemon 为准。
+**当前运行时：** 主机侧真相是 `horizon-daemon`（Rust）：PTY/ConPTY、配对、分组、LAN/Wormhole WebSocket、WG server。Flutter 是设置与 UI shell，不再是 PTY 的权威实现。下面 2.1–2.3 的 Flutter PtyManager / `com.blackhole/pty` 图是**历史描述**，实施时以 daemon 为准（见 §7.3）。
 
 ### 2.1 整体架构
 
@@ -485,65 +482,50 @@ Wormhole 的黄金法则：
 
 ## 5. 通信协议设计
 
-### 5.1 协议选择
+同一条 WebSocket 上是 **JSON 文本控制面 + version-1 紧凑二进制 PTY 面**。实现：`horizon/daemon/src/main.rs`（`decode_binary` / `encode_binary`）与 `voyager/lib/src/services/connection_manager.dart`。**不存在** 8 字节 `0x4248`（“BH”）魔数帧；那是已废弃的愿景稿。
 
-选择 **二进制协议** 而非 JSON：
-- 终端数据本身是二进制（含控制字符）
-- JSON 编码增加 33% 体积（base64）
-- 低延迟要求
+### 5.1 分流
 
-### 5.2 帧格式
+| 承载 | 帧 | 用途 |
+|------|----|------|
+| JSON text | `{"v":1,"type":"..."}` | 配对、分组、会话列表、`host_info`、`endpoint_*`、`vpn_config`、JSON `ping` |
+| Binary | version-1 compact | PTY stdin / stdout / resize，以及二进制 ping/pong |
+
+控制面（含 VPN 信令）走 JSON。PTY 字节不 base64 进 JSON。
+
+### 5.2 二进制帧（version = 1）
 
 ```
-Binary Frame Format
-===================
-
-┌─────────────────────────────────────────────────────────────────────┐
-│                           Frame Header (8 bytes)                     │
-├──────────┬──────────┬──────────┬────────────────────────────────────┤
-│  Magic   │   Type   │  Flags   │           Payload Length           │
-│ (2 bytes)│ (1 byte) │ (1 byte) │             (4 bytes)              │
-│   0x42   │          │          │          (big-endian)              │
-│   0x48   │          │          │                                    │
-├──────────┴──────────┴──────────┴────────────────────────────────────┤
-│                        Payload (variable)                            │
-└─────────────────────────────────────────────────────────────────────┘
-
-Magic: 0x4248 ("BH" = BlackHole)
+offset  size  field
+0       1     version = 1
+1       1     type
+2       2     session_id length (uint16 big-endian)
+4       N     session_id UTF-8
+4+N     *     payload
 ```
 
-### 5.3 消息类型
+| type | 值 | 方向 | payload |
+|------|----|------|---------|
+| stdin | 1 | V→H | raw PTY bytes |
+| stdout | 2 | H→V | raw PTY bytes |
+| resize | 3 | V→H | 4 bytes: rows, cols (each uint16 BE) |
+| ping | 4 | 双向 | empty |
+| pong | 5 | 双向 | empty |
 
-| Type | 值 | 方向 | 说明 |
-|------|-----|------|------|
-| Hello | 0x01 | C→S | 认证握手 |
-| HelloAck | 0x02 | S→C | 认证响应 |
-| Stdin | 0x03 | V→H | 终端输入 |
-| Stdout | 0x04 | H→V | 终端输出 |
-| Resize | 0x05 | V→H | 终端尺寸变更 |
-| Ping | 0x06 | 双向 | 心跳请求 |
-| Pong | 0x07 | 双向 | 心跳响应 |
-| Control | 0x08 | V→W | 控制权请求 |
-| Error | 0x09 | S→C | 错误通知 |
-| SessionEvent | 0x0A | S→C | 会话事件 |
+未知 version 或 type 由对端视为 unsupported，不得当成 `0x4248` Hello 握手。
 
-### 5.4 心跳与重连
+### 5.3 JSON 控制（节选）
 
-| 参数 | 值 | 说明 |
-|------|-----|------|
-| Ping 间隔 | 30 秒 | 定时发送 |
-| Pong 超时 | 10 秒 | 超时视为断连 |
-| 最大重试 | 10 次 | 超过后停止 |
-| 基础延迟 | 1 秒 | 指数退避起点 |
-| 最大延迟 | 60 秒 | 退避上限 |
-| 抖动 | ±25% | 避免惊群效应 |
+WebSocket 文本消息。常见 `type`：`host_info`（含 `vpnPeer` / `remoteAddr`）、`session_list`、`group_*`、`endpoint_register` / `endpoint_info` / `direct_candidates_update`、`vpn_config`、`ping`。JSON `v` 为 1；与二进制帧的 version byte 不是同一字段。
 
-### 5.5 流控策略
+### 5.4 心跳
 
-| 参数 | 值 | 说明 |
-|------|-----|------|
-| 最大待发送 | 256 KB | 超过暂停读取 PTY |
-| 恢复阈值 | 128 KB | 低于此值恢复读取 |
+- Horizon→Wormhole：JSON `{"type":"ping"}`，间隔 **5s**；超过 **20s** 无入站则静默重连（`run_wormhole`）。
+- App WS 另有二进制 ping=4 / pong=5，用于数据面保活。
+
+### 5.5 PTY 扇出
+
+`horizon-daemon` 把 stdout 广播到当前 LAN / Wormhole 订阅者。不要用进程级 `wormhole_subscriber_count` 当双平面开关（那是后续 dual-plane 的约束，见决策 2276）。
 
 ---
 
@@ -689,17 +671,16 @@ lib/
 | `TerminalManager` | 终端实例管理、滚动控制 | 跟随 HomePage |
 | `GroupManager` | 分组 CRUD、持久化、会话生命周期 | 跟随 Controller |
 
-### 7.3 平台特定代码
+### 7.3 平台特定代码（PTY 在 daemon，不在 Flutter）
+
+PTY/ConPTY 由 `horizon-daemon` 拥有。下面这些路径 **不存在**，不要对着它们改：`horizon/macos/Runner/PtyManager.swift`、`horizon/linux/runner/pty_manager.cc`、`horizon/windows/runner/pty_manager.cpp`。
 
 | 平台 | 文件位置 | 实现 |
 |------|----------|------|
-| macOS | `horizon/macos/Runner/PtyManager.swift` | forkpty + GCD |
-| Linux | `horizon/linux/runner/pty_manager.cc` | forkpty + thread |
-| Windows | `horizon/windows/runner/pty_manager.cpp` | ConPTY |
+| macOS / Linux | `horizon/daemon/src/main.rs`（`spawn_pty_session`） | `forkpty` |
+| Windows | `horizon/daemon/src/main.rs`（ConPTY） | `CreatePseudoConsole` |
 
-**Platform Channel：**
-- MethodChannel: `com.blackhole/pty`
-- EventChannel: `com.blackhole/pty/output`
+Flutter 桌面壳通过 daemon 的 HTTP/WS 管理会话，不是 `com.blackhole/pty` MethodChannel。§2.1–2.3 里的 Platform Channel 图是历史描述。
 
 ---
 

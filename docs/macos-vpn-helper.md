@@ -58,15 +58,32 @@ Override with `HORIZON_VPN_HELPER_SOCKET`. After bind, the helper
 The helper is root; `0600` owned by root would lock the unprivileged
 daemon out.
 
-## Bundling and privilege
+## Bundling vs runtime
 
-- Xcode must copy `horizon-vpn-helper` into `Contents/Resources`. Missing
-  helper is a hard error (fail closed), not "continue without TUN".
-- The macOS app can launch the helper through an administrator prompt
-  (`ensureVpnHelper`) when `vpnEnabled` is true. That prompt is the consent
-  path; there is no second Flutter helper sheet.
-- **`SMAppService` is a follow-up**, not a blocker. No launchd install in
-  this cut. osascript remains the live start path.
+**Bundling.** Xcode must copy `horizon-vpn-helper` into
+`Contents/Resources`. Native `ensureVpnHelper` throws if that bundle path
+is missing. That throw is the only “fail closed” on the host path.
+
+**Runtime (not an end-to-end hard stop).**
+
+- Flutter `_ensureNativeVpnHelper` is fire-and-forget: it does not block
+  Horizon startup and swallows the native error.
+- If the helper socket is present, `horizon-daemon` uses the privileged
+  utun/NAT/rdr path.
+- If the socket is absent and `--vpn` is set, the daemon falls back to
+  `tun_device::create_tun`. VPN start failure is `warn!` and is non-fatal
+  to the daemon.
+
+Do not read “fail closed” as “Horizon or VPN will not start without the
+helper.” Voyager’s userspace helper fail-closed contract is the stacked
+PR5 product; see `docs/ios-native-vpn.md`.
+
+The macOS app can launch the helper through an administrator prompt
+(`ensureVpnHelper`) when `vpnEnabled` is true. That prompt is the consent
+path; there is no second Flutter helper sheet.
+
+**`SMAppService` is a follow-up**, not a blocker. No launchd install in
+this cut. osascript remains the live start path.
 
 `BH_ENABLE_NATIVE_VPN` (Voyager compile default true) is not this host
 toggle. Horizon's user toggle is `vpnEnabled`.

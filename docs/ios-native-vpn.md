@@ -19,7 +19,11 @@ Blackhole's native WireGuard client:
 - `voyager/ios/VoyagerTunnel/PacketTunnelProvider.swift` runs the packet tunnel
   and links against vendored `blackhole-wg`.
 - `voyager/macos/Runner/VpnPlugin.swift` + bundled `voyager-vpn-helper`
-  (userspace TUN). Fail closed if the helper/TUN is missing.
+  (userspace TUN). This docs PR describes the **linearized stack** where
+  PR5 (handshake-gated native) lands before it: missing helper/TUN is a
+  **hard error** (fail closed). Handshake-only without TUN cannot carry
+  `ws://10.13.37.1`. Do not treat a PR4-only plugin that logs
+  `continuing without TUN` as the product.
 - `voyager/lib/src/services/vpn_service.dart` — `isFeatureEnabled` reads
   `BH_ENABLE_NATIVE_VPN` (default true). Supported platforms: iOS, macOS,
   Android. Web / Linux / Windows Voyager have no VPN plugin.
