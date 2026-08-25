@@ -6610,7 +6610,7 @@ mod tests {
     }
 
     #[test]
-    fn netcheck_response_demux_records_public_observed() {
+    fn record_observed_direct_candidate_from_wormhole_netcheck() {
         let mut store = Vec::new();
         record_observed_direct_candidate(
             &mut store,

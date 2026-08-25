@@ -199,7 +199,10 @@ private func runScenarios() {
             )
         },
         Scenario(name: "symmetric-nat-candidates-exhausted-errors") {
-            let runtime = TunnelRuntimeCoordinator(handshakeTimeout: 12)
+            let runtime = TunnelRuntimeCoordinator(
+                handshakeTimeout: 12,
+                totalBudget: 40
+            )
             let startedAt = Date(timeIntervalSince1970: 100)
             runtime.start(now: startedAt)
 
@@ -222,7 +225,7 @@ private func runScenarios() {
                 inboundWireGuardBytes: 0,
                 inboundUdpPackets: 0,
                 availableDirectCandidateCount: 3,
-                now: startedAt.addingTimeInterval(30.0)
+                now: startedAt.addingTimeInterval(36.2)
             )
             print("  retry1 => \(retry1)")
             print("  retry2 => \(retry2)")

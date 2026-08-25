@@ -347,7 +347,6 @@ class VpnService extends ChangeNotifier {
     _directSessionState = null;
     _directSessionViable = null;
     _directSessionReady = null;
-    _timeSinceLastHandshakeSecs = null;
     _pendingDirectQueueDepth = null;
     _directWriteAttempts = null;
     _directWriteErrors = null;
@@ -400,7 +399,6 @@ class VpnService extends ChangeNotifier {
     _directSessionState = null;
     _directSessionViable = null;
     _directSessionReady = null;
-    _timeSinceLastHandshakeSecs = null;
     _pendingDirectQueueDepth = null;
     _directWriteAttempts = null;
     _directWriteErrors = null;
@@ -493,10 +491,8 @@ class VpnService extends ChangeNotifier {
     _directSessionState = payload['directSessionState'] as String?;
     _directSessionViable = payload['directSessionViable'] as bool?;
     _directSessionReady = payload['directSessionReady'] as bool?;
-    _timeSinceLastHandshakeSecs =
-        (payload['timeSinceLastHandshakeSecs'] as num?)?.toInt();
-    _pendingDirectQueueDepth =
-        (payload['pendingDirectQueueDepth'] as num?)?.toInt();
+    _pendingDirectQueueDepth = (payload['pendingDirectQueueDepth'] as num?)
+        ?.toInt();
     _directWriteAttempts = (payload['directWriteAttempts'] as num?)?.toInt();
     _directWriteErrors = (payload['directWriteErrors'] as num?)?.toInt();
     _directHandshakePacketsPrepared =
@@ -569,7 +565,6 @@ class VpnService extends ChangeNotifier {
       _directSessionState = null;
       _directSessionViable = null;
       _directSessionReady = null;
-      _timeSinceLastHandshakeSecs = null;
       _pendingDirectQueueDepth = null;
       _directWriteAttempts = null;
       _directWriteErrors = null;
