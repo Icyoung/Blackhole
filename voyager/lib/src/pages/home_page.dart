@@ -1221,7 +1221,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     _pendingReconnectActiveSessionId = null;
     _pendingReconnectActiveGroupId = null;
     if (_activeSessionId == sessionId) {
-      if (requestKeyboard && !_multiWindow && !_showHHKB) {
+      if (requestKeyboard && !_showHHKB) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           _viewKeyFor(sessionId).currentState?.requestKeyboard();
         });
@@ -1244,7 +1244,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     _restoreScrollOffset(sessionId);
     _updateWindowTitle();
     _sendSelectSession();
-    if (requestKeyboard && !_multiWindow && !_showHHKB) {
+    if (requestKeyboard && !_showHHKB) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _viewKeyFor(sessionId).currentState?.requestKeyboard();
       });

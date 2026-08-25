@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart';
 
 import 'design_tokens.dart';
@@ -72,8 +73,21 @@ class _SessionWindowCardState extends State<SessionWindowCard>
         widget.isActive ? AppColors.border : AppColors.borderSubtle;
     final headerColor =
         widget.isActive ? AppColors.surfaceBright : AppColors.surface;
-    return GestureDetector(
-      onTapDown: (_) => widget.onTap?.call(),
+    // Listener does not join the tap arena, so TerminalView still receives
+    // the click and can take keyboard focus. GestureDetector here used to
+    // steal the tap; Space then hit Flutter's ActivateIntent instead of the
+    // terminal (xterm's keytab has no unshifted Space mapping).
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (_) {
+        widget.onTap?.call();
+        if (widget.showHHKB) {
+          return;
+        }
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          widget.viewKey.currentState?.requestKeyboard();
+        });
+      },
       child: AnimatedContainer(
         duration: AppDurations.normal,
         decoration: BoxDecoration(
@@ -117,18 +131,16 @@ class _SessionWindowCardState extends State<SessionWindowCard>
                       ),
                       if (widget.onClose != null) ...[
                         const SizedBox(width: 6),
-                        IconButton(
-                          onPressed: widget.onClose,
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints.tightFor(
+                        GestureDetector(
+                          onTap: widget.onClose,
+                          child: const SizedBox(
                             width: 24,
                             height: 24,
-                          ),
-                          splashRadius: 12,
-                          icon: const Icon(
-                            Icons.close_rounded,
-                            size: 14,
-                            color: AppColors.textMuted,
+                            child: Icon(
+                              Icons.close_rounded,
+                              size: 14,
+                              color: AppColors.textMuted,
+                            ),
                           ),
                         ),
                       ],
@@ -148,7 +160,7 @@ class _SessionWindowCardState extends State<SessionWindowCard>
                       scrollController: widget.scrollController,
                       theme: kTerminalThemeLight,
                       autoResize: true,
-                      autofocus: false,
+                      autofocus: widget.isActive,
                       deleteDetection: widget.deleteDetection,
                       hardwareKeyboardOnly: widget.hardwareKeyboardOnly,
                       readOnly: widget.showHHKB,
@@ -156,6 +168,7 @@ class _SessionWindowCardState extends State<SessionWindowCard>
                           widget.showHHKB
                               ? TextInputType.none
                               : TextInputType.text,
+                      onKeyEvent: _handleTerminalKeyEvent,
                       backgroundOpacity: 1.0,
                       padding: const EdgeInsets.all(10),
                       textStyle:
@@ -179,5 +192,24 @@ class _SessionWindowCardState extends State<SessionWindowCard>
         ),
       ),
     );
+  }
+
+  KeyEventResult _handleTerminalKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    if (event.logicalKey != LogicalKeyboardKey.space) {
+      return KeyEventResult.ignored;
+    }
+    if (HardwareKeyboard.instance.isControlPressed ||
+        HardwareKeyboard.instance.isAltPressed ||
+        HardwareKeyboard.instance.isMetaPressed) {
+      return KeyEventResult.ignored;
+    }
+    final character = event.character;
+    widget.terminal.textInput(
+      character != null && character.isNotEmpty ? character : ' ',
+    );
+    return KeyEventResult.handled;
   }
 }

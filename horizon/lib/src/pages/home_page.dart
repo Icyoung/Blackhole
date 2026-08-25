@@ -809,7 +809,9 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
       final file = File(path);
       // Track size in memory to avoid a stat() on every write.
       final written = content.length;
-      final current = (_terminalLogSizes[path] ??= file.existsSync() ? file.lengthSync() : 0);
+      final current =
+          (_terminalLogSizes[path] ??=
+              file.existsSync() ? file.lengthSync() : 0);
       // Rotate at half the cap so live + backup never exceed the full cap.
       if (current >= _maxTerminalLogBytes ~/ 2) {
         final backup = File('$path.1');
@@ -817,7 +819,11 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
         file.renameSync('$path.1');
         _terminalLogSizes[path] = 0;
       }
-      file.writeAsStringSync(content, mode: FileMode.writeOnlyAppend, flush: true);
+      file.writeAsStringSync(
+        content,
+        mode: FileMode.writeOnlyAppend,
+        flush: true,
+      );
       _terminalLogSizes[path] = (_terminalLogSizes[path] ?? 0) + written;
     } catch (error) {
       debugPrint('[Horizon] Failed to append terminal $label log: $error');
@@ -1574,7 +1580,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
 
   void _setActiveSession(String sessionId, {bool requestKeyboard = false}) {
     if (_activeSessionId == sessionId) {
-      if (requestKeyboard && !_multiWindow) {
+      if (requestKeyboard && !_showHHKB) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           _viewKeyFor(sessionId).currentState?.requestKeyboard();
         });
@@ -1591,7 +1597,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _scheduleActiveResize();
     _restoreScrollOffset(sessionId);
     _updateWindowTitle();
-    if (requestKeyboard && !_multiWindow) {
+    if (requestKeyboard && !_showHHKB) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _viewKeyFor(sessionId).currentState?.requestKeyboard();
       });
@@ -3478,7 +3484,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
               hardwareKeyboardOnly: _useHardwareKeyboardOnly,
               isDragTarget: _dragging && _dragTargetSessionId == sessionId,
               terminalStyle: buildTerminalStyle(fontSize: 8),
-              onTap: () => _setActiveSession(sessionId, requestKeyboard: false),
+              onTap: () => _setActiveSession(sessionId, requestKeyboard: true),
               onClose: () => _sendCloseSession(sessionId),
             );
           },
@@ -3553,7 +3559,12 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     final controller = _activeController ?? _idleController;
     final scrollController = _activeScrollController ?? _idleScrollController;
     const inset = 12.0;
-    final padding = EdgeInsets.fromLTRB(inset, inset, inset, _bottomBarHeight + inset);
+    final padding = EdgeInsets.fromLTRB(
+      inset,
+      inset,
+      inset,
+      _bottomBarHeight + inset,
+    );
 
     if (_activeSessionId == null) {
       return _buildEmptySessionState(padding);
