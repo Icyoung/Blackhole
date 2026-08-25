@@ -109,6 +109,30 @@ fn voyager_advertised_wg_udp_port(voyager_wg_udp_port: Option<u16>) -> Option<u1
     voyager_wg_udp_port.filter(|port| *port != 0)
 }
 
+fn horizon_candidates_from_register(
+    advertised: Vec<DirectCandidate>,
+    _tcp_remote: SocketAddr,
+) -> Vec<DirectCandidate> {
+    advertised_horizon_wg_candidates(advertised)
+}
+
+fn voyager_candidates_from_signaling(
+    advertised: Vec<DirectCandidate>,
+    tcp_remote: SocketAddr,
+    voyager_wg_udp_port: Option<u16>,
+) -> Vec<DirectCandidate> {
+    merge_candidates(
+        &advertised,
+        observed_ip_candidate(
+            tcp_remote.ip(),
+            voyager_advertised_wg_udp_port(voyager_wg_udp_port),
+            "last_known",
+            90,
+            "wormhole_observed_ip",
+        ),
+    )
+}
+
 #[derive(Debug, Deserialize)]
 struct WsParams {
     role: String,
@@ -1087,8 +1111,7 @@ async fn handle_endpoint_register(
         session.wg_udp_port = Some(port);
     }
     session.horizon_observed_addr = Some(remote_addr);
-    // TCP WebSocket source ports are not WG mappings.
-    session.horizon_candidates = advertised_horizon_wg_candidates(advertised);
+    session.horizon_candidates = horizon_candidates_from_register(advertised, remote_addr);
     for candidate in &session.horizon_candidates {
         if candidate.scope != "public_observed" {
             continue;
@@ -1153,18 +1176,12 @@ async fn handle_endpoint_request(
         .and_then(|v| v.as_u64())
         .map(|v| v as u16);
     let voyager_device_key = value.get("deviceKey").and_then(|v| v.as_str());
-    let voyager_wg_udp_port = voyager_advertised_wg_udp_port(voyager_wg_udp_port);
-    let voyager_candidates = merge_candidates(
-        &parse_direct_candidates(value, "voyagerCandidates"),
-        observed_ip_candidate(
-            remote_addr.ip(),
-            voyager_wg_udp_port,
-            "last_known",
-            90,
-            "wormhole_observed_ip",
-        ),
+    let voyager_candidates = voyager_candidates_from_signaling(
+        parse_direct_candidates(value, "voyagerCandidates"),
+        remote_addr,
+        voyager_wg_udp_port,
     );
-    let observed_port = voyager_wg_udp_port.unwrap_or(0);
+    let observed_port = voyager_advertised_wg_udp_port(voyager_wg_udp_port).unwrap_or(0);
 
     let mut sessions = state.sessions.lock().await;
     let Some(session) = sessions.get_mut(session_id) else {
@@ -1216,7 +1233,7 @@ async fn handle_endpoint_request(
             "type": "direct_candidates_update",
             "deviceKey": voyager_device_key,
             "wgPublicKey": voyager_wg_public_key,
-            "wgUdpPort": voyager_wg_udp_port,
+            "wgUdpPort": voyager_advertised_wg_udp_port(voyager_wg_udp_port),
             "observedAddr": remote_addr.ip().to_string(),
             "observedPort": observed_port,
             "voyagerCandidates": voyager_candidates,
@@ -1228,7 +1245,7 @@ async fn handle_endpoint_request(
             "type": "peer_endpoint",
             "deviceKey": voyager_device_key,
             "wgPublicKey": voyager_wg_public_key,
-            "wgUdpPort": voyager_wg_udp_port,
+            "wgUdpPort": voyager_advertised_wg_udp_port(voyager_wg_udp_port),
             "observedAddr": remote_addr.ip().to_string(),
             "observedPort": observed_port,
             "voyagerCandidates": voyager_candidates,
@@ -1260,18 +1277,12 @@ async fn handle_voyager_direct_candidates_update(
         .and_then(|v| v.as_u64())
         .map(|v| v as u16);
     let voyager_device_key = value.get("deviceKey").and_then(|v| v.as_str());
-    let voyager_wg_udp_port = voyager_advertised_wg_udp_port(voyager_wg_udp_port);
-    let voyager_candidates = merge_candidates(
-        &parse_direct_candidates(value, "voyagerCandidates"),
-        observed_ip_candidate(
-            remote_addr.ip(),
-            voyager_wg_udp_port,
-            "last_known",
-            90,
-            "wormhole_observed_ip",
-        ),
+    let voyager_candidates = voyager_candidates_from_signaling(
+        parse_direct_candidates(value, "voyagerCandidates"),
+        remote_addr,
+        voyager_wg_udp_port,
     );
-    let observed_port = voyager_wg_udp_port.unwrap_or(0);
+    let observed_port = voyager_advertised_wg_udp_port(voyager_wg_udp_port).unwrap_or(0);
 
     let mut sessions = state.sessions.lock().await;
     let Some(session) = sessions.get_mut(session_id) else {
@@ -1286,7 +1297,7 @@ async fn handle_voyager_direct_candidates_update(
             "type": "direct_candidates_update",
             "deviceKey": voyager_device_key,
             "wgPublicKey": voyager_wg_public_key,
-            "wgUdpPort": voyager_wg_udp_port,
+            "wgUdpPort": voyager_advertised_wg_udp_port(voyager_wg_udp_port),
             "observedAddr": remote_addr.ip().to_string(),
             "observedPort": observed_port,
             "voyagerCandidates": voyager_candidates,
@@ -1557,25 +1568,23 @@ mod tests {
     #[test]
     fn tcp_remote_addr_port_is_not_a_wg_candidate() {
         let advertised = vec![candidate("192.168.1.10", 51820, "lan", 250)];
-        let merged = advertised_horizon_wg_candidates(advertised);
-        assert!(!has_scope(&merged, "public_observed"));
-        assert_eq!(horizon_udp_port_for_endpoint_info(&merged), None);
-        assert_eq!(voyager_advertised_wg_udp_port(None), None);
+        for tcp_port in [443u16, 6666] {
+            let tcp = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 10), tcp_port));
+            assert_eq!(
+                observed_candidate(tcp, "wormhole_observed").map(|candidate| candidate.port),
+                Some(tcp_port)
+            );
 
-        let voyager_candidates = merge_candidates(
-            &merged,
-            observed_ip_candidate(
-                IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
-                voyager_advertised_wg_udp_port(None),
-                "last_known",
-                90,
-                "wormhole_observed_ip",
-            ),
-        );
-        assert!(voyager_candidates
-            .iter()
-            .all(|candidate| candidate.port != 443));
-        assert!(!has_scope(&voyager_candidates, "public_observed"));
+            let horizon = horizon_candidates_from_register(advertised.clone(), tcp);
+            assert!(horizon.iter().all(|candidate| candidate.port != tcp_port));
+            assert!(!has_scope(&horizon, "public_observed"));
+            assert_eq!(horizon_udp_port_for_endpoint_info(&horizon), None);
+
+            let voyager = voyager_candidates_from_signaling(Vec::new(), tcp, None);
+            assert!(voyager.iter().all(|candidate| candidate.port != tcp_port));
+            assert!(voyager.is_empty());
+            assert_eq!(voyager_advertised_wg_udp_port(None), None);
+        }
     }
 
     #[test]

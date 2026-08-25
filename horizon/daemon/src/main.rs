@@ -38,12 +38,15 @@ use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, Notify};
 use tracing::{debug, info, warn};
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 const VPN_SERVER_IP_STR: &str = "10.13.37.1";
 const RELAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const WG_NETCHECK_VPN_CONFIG_WAIT: Duration = Duration::from_secs(3);
+const WG_NETCHECK_RESOLVE_RETRY: Duration = Duration::from_secs(5);
+const WG_NETCHECK_RESOLVE_ATTEMPTS: u8 = 12;
 const DEFAULT_HEADLESS_BIND: &str = "0.0.0.0";
 const DEFAULT_WORMHOLE_URL: &str = "wss://wormhole.blackhole-ai.com/ws";
 
@@ -101,6 +104,7 @@ struct AppState {
     /// When true, bind 10.13.37.1:lanPort after pf rdr has been removed.
     vpn_explicit_ws: watch::Sender<bool>,
     vpn_tcp_probe: Mutex<Option<oneshot::Sender<(SocketAddr, SocketAddr)>>>,
+    wg_netcheck_notify: Notify,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -142,6 +146,9 @@ enum WgPeerCommand {
         endpoint: Option<SocketAddr>,
         candidate_endpoints: Vec<SocketAddr>,
         reply_tx: tokio::sync::oneshot::Sender<Result<wg_server::VpnAssignment, String>>,
+    },
+    BeginNetcheck {
+        dest: SocketAddr,
     },
 }
 
@@ -435,6 +442,7 @@ async fn run_server(
         endpoint_register_retrying: AtomicBool::new(false),
         vpn_explicit_ws,
         vpn_tcp_probe: Mutex::new(None),
+        wg_netcheck_notify: Notify::new(),
     });
 
     let pid_path = daemon_pid_path(&state.data_dir);
@@ -3159,10 +3167,7 @@ fn hairpin_likely(observed_addr: Option<&str>, voyager_candidates: &[DirectCandi
 }
 
 fn record_upnp_udp_candidate(store: &mut Vec<DirectCandidate>, addr: &str, port: u16) {
-    let has_netcheck_public = store.iter().any(|candidate| {
-        candidate.scope == "public_observed" && candidate.source == "wormhole_netcheck"
-    });
-    if has_netcheck_public {
+    if has_wormhole_netcheck_observation(store) {
         if store
             .iter()
             .any(|candidate| candidate.addr == addr && candidate.port == port)
@@ -5754,6 +5759,7 @@ async fn start_vpn_server(
                 source = "wormhole_netcheck",
                 "recorded public_observed WG mapping"
             );
+            netcheck_state.wg_netcheck_notify.notify_waiters();
             send_horizon_endpoint_register(&netcheck_state).await;
         }
     });
@@ -5785,6 +5791,7 @@ async fn start_vpn_server(
     vpn_signaling::schedule_publish_horizon_endpoint(state.clone());
     vpn_signaling::spawn_horizon_endpoint_refresh_timer(state.clone());
     vpn_signaling::spawn_upnp_udp_candidate_task(state.clone(), port);
+    spawn_wg_netcheck_resolve_retries(state.clone());
 
     // Run the WG server event loop with peer command receiver
     if let Err(e) = server.run_with_peer_commands(peer_rx).await {
@@ -5860,7 +5867,80 @@ async fn resolve_wg_netcheck_dest(host: &str, port: u16) -> Option<SocketAddr> {
     if port == 0 || port == 443 {
         return None;
     }
-    tokio::net::lookup_host((host, port)).await.ok()?.next()
+    tokio::net::lookup_host((host, port))
+        .await
+        .ok()?
+        .find(|addr| addr.is_ipv4() && addr.port() != 443)
+}
+
+fn has_wormhole_netcheck_observation(endpoints: &[DirectCandidate]) -> bool {
+    endpoints.iter().any(|candidate| {
+        candidate.scope == "public_observed" && candidate.source == "wormhole_netcheck"
+    })
+}
+
+async fn request_wg_netcheck(state: &Arc<AppState>) {
+    {
+        let observed = state.wg_observed_endpoints.lock().await;
+        if has_wormhole_netcheck_observation(&observed) {
+            return;
+        }
+    }
+    let (host, port) = configured_wg_netcheck_endpoint(state);
+    let (Some(host), Some(port)) = (host, port) else {
+        return;
+    };
+    let Some(dest) = resolve_wg_netcheck_dest(&host, port).await else {
+        warn!(
+            host = %host,
+            port,
+            "failed to resolve WG netcheck destination"
+        );
+        return;
+    };
+    let tx = state.wg_peer_tx.lock().await.clone();
+    let Some(tx) = tx else {
+        return;
+    };
+    if tx.send(WgPeerCommand::BeginNetcheck { dest }).is_err() {
+        warn!(dest = %dest, "WG netcheck command dropped");
+    }
+}
+
+fn spawn_wg_netcheck_resolve_retries(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        for _ in 0..WG_NETCHECK_RESOLVE_ATTEMPTS {
+            tokio::time::sleep(WG_NETCHECK_RESOLVE_RETRY).await;
+            {
+                let observed = state.wg_observed_endpoints.lock().await;
+                if has_wormhole_netcheck_observation(&observed) {
+                    return;
+                }
+            }
+            request_wg_netcheck(&state).await;
+        }
+    });
+}
+
+async fn wait_for_wg_netcheck_or_timeout(state: &Arc<AppState>) {
+    {
+        let observed = state.wg_observed_endpoints.lock().await;
+        if has_wormhole_netcheck_observation(&observed) {
+            return;
+        }
+    }
+    let (host, port) = configured_wg_netcheck_endpoint(state);
+    if host.is_none() || port.is_none() {
+        return;
+    }
+    let notified = state.wg_netcheck_notify.notified();
+    {
+        let observed = state.wg_observed_endpoints.lock().await;
+        if has_wormhole_netcheck_observation(&observed) {
+            return;
+        }
+    }
+    let _ = tokio::time::timeout(WG_NETCHECK_VPN_CONFIG_WAIT, notified).await;
 }
 
 async fn send_horizon_endpoint_register(state: &Arc<AppState>) {
@@ -5996,6 +6076,7 @@ async fn connect_wormhole(
         .await;
 
     vpn_signaling::publish_horizon_endpoint_on_wormhole_connect(state).await;
+    request_wg_netcheck(state).await;
 
     loop {
         tokio::select! {
@@ -6246,7 +6327,6 @@ async fn handle_wormhole_incoming(
                     if let Some(addr) = observed_addr {
                         let mut wg_addr = state.wg_observed_addr.lock().await;
                         *wg_addr = Some(addr.to_string());
-                        // TCP observedPort from Wormhole is not a WG mapping.
                         info!(
                             "wg endpoint registered: observed {} (tcp port {})",
                             addr,
@@ -6255,6 +6335,7 @@ async fn handle_wormhole_incoming(
                     }
                 }
                 ty if vpn_signaling::is_vpn_control_type(ty) => {
+                    wait_for_wg_netcheck_or_timeout(state).await;
                     let (reply_tx, mut reply_rx) = mpsc::unbounded_channel();
                     vpn_signaling::handle_vpn_control(state, &value, reply_tx).await;
                     while let Some(reply) = reply_rx.recv().await {
@@ -6588,5 +6669,16 @@ mod tests {
         assert_eq!(store[1].scope, "last_known");
         assert_eq!(store[1].port, 51820);
         assert_eq!(store[1].source, "upnp");
+    }
+
+    #[tokio::test]
+    async fn resolve_wg_netcheck_dest_prefers_ipv4_and_rejects_443() {
+        let dest = resolve_wg_netcheck_dest("127.0.0.1", 6666)
+            .await
+            .expect("loopback IPv4 should resolve");
+        assert!(dest.is_ipv4());
+        assert_eq!(dest.port(), 6666);
+        assert!(resolve_wg_netcheck_dest("127.0.0.1", 443).await.is_none());
+        assert!(resolve_wg_netcheck_dest("127.0.0.1", 0).await.is_none());
     }
 }

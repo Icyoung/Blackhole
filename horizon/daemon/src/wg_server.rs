@@ -630,6 +630,11 @@ impl WgServer {
                             }
                             let _ = reply_tx.send(result);
                         }
+                        Some(super::WgPeerCommand::BeginNetcheck { dest }) => {
+                            if let Err(error) = self.begin_netcheck(dest).await {
+                                warn!(error = %error, dest = %dest, "failed to send WG netcheck");
+                            }
+                        }
                         None => {
                             // Channel closed — keep running (VPN stays up).
                             info!("peer command channel closed, continuing event loop");
