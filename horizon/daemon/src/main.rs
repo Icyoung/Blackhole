@@ -1,5 +1,6 @@
 mod dns_forwarder;
 mod nat;
+mod session_persist;
 mod tun_device;
 mod upnp;
 mod vpn_config;
@@ -16,7 +17,7 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -125,7 +126,10 @@ struct PtySession {
     child_pid: i32,
     history: std::sync::Mutex<Vec<u8>>,
     history_base_offset: std::sync::Mutex<usize>,
-    closed: std::sync::atomic::AtomicBool,
+    history_dirty: AtomicBool,
+    rows: AtomicU16,
+    cols: AtomicU16,
+    closed: AtomicBool,
 }
 
 #[cfg(windows)]
@@ -134,7 +138,10 @@ struct PtySession {
     conpty: winconpty::ConPty,
     history: std::sync::Mutex<Vec<u8>>,
     history_base_offset: std::sync::Mutex<usize>,
-    closed: std::sync::atomic::AtomicBool,
+    history_dirty: AtomicBool,
+    rows: AtomicU16,
+    cols: AtomicU16,
+    closed: AtomicBool,
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -142,6 +149,9 @@ struct PtySession {
     session_id: String,
     history: std::sync::Mutex<Vec<u8>>,
     history_base_offset: std::sync::Mutex<usize>,
+    history_dirty: AtomicBool,
+    rows: AtomicU16,
+    cols: AtomicU16,
 }
 
 const MAX_HISTORY_BYTES: usize = 1024 * 1024;
@@ -386,11 +396,15 @@ async fn run_server(
     }
 
     if !config.no_initial_session {
-        match create_session(&state).await {
-            Ok(session_id) => info!("started initial session: {session_id}"),
-            Err(err) => warn!("failed to start initial session: {err}"),
+        let restored = restore_sessions_from_disk(&state).await;
+        if restored == 0 {
+            match create_session(&state).await {
+                Ok(session_id) => info!("started initial session: {session_id}"),
+                Err(err) => warn!("failed to start initial session: {err}"),
+            }
         }
     }
+    start_session_persist_task(state.clone());
 
     if let Some(wormhole_url) = config.wormhole_url.clone() {
         let state_for_wormhole = state.clone();
@@ -521,6 +535,7 @@ async fn run_server(
         warn!("server ended with error: {err}");
     }
 
+    persist_live_sessions(&state).await;
     let _ = fs::remove_file(&pid_path);
     let _ = fs::remove_file(state.data_dir.join("daemon.sock"));
 }
@@ -1532,6 +1547,225 @@ fn save_groups(dir: &Path, groups: &[TerminalGroup], session_names: &HashMap<Str
     }
 }
 
+fn session_ids_from_groups(groups: &[TerminalGroup]) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for group in groups {
+        for id in &group.session_ids {
+            if seen.insert(id.clone()) {
+                ids.push(id.clone());
+            }
+        }
+    }
+    ids
+}
+
+#[cfg(unix)]
+fn session_child_pid(session: &PtySession) -> Option<i32> {
+    Some(session.child_pid)
+}
+
+#[cfg(not(unix))]
+fn session_child_pid(_session: &PtySession) -> Option<i32> {
+    None
+}
+
+fn cwd_for_pid(pid: i32) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        get_cwd_macos(pid)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        get_cwd_linux(pid)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+fn restore_banner(cwd: Option<&str>) -> Vec<u8> {
+    match cwd {
+        Some(path) if !path.is_empty() => {
+            format!("\r\n\x1b[90m[horizon] session restored - new shell in {path}\x1b[0m\r\n")
+                .into_bytes()
+        }
+        _ => b"\r\n\x1b[90m[horizon] session restored - new shell\x1b[0m\r\n".to_vec(),
+    }
+}
+
+async fn persist_live_sessions(state: &AppState) {
+    struct Snapshot {
+        id: String,
+        pid: Option<i32>,
+        rows: u16,
+        cols: u16,
+        history: Vec<u8>,
+        history_base_offset: usize,
+        history_dirty: bool,
+    }
+
+    let snapshots = {
+        let sessions = state.sessions.lock().await;
+        let mut out = Vec::with_capacity(sessions.len());
+        for (id, session) in sessions.iter() {
+            let dirty = session.history_dirty.swap(false, Ordering::SeqCst);
+            let history = session
+                .history
+                .lock()
+                .ok()
+                .map(|buf| buf.clone())
+                .unwrap_or_default();
+            let history_base_offset = session
+                .history_base_offset
+                .lock()
+                .ok()
+                .map(|offset| *offset)
+                .unwrap_or(0);
+            out.push(Snapshot {
+                id: id.clone(),
+                pid: session_child_pid(session),
+                rows: session.rows.load(Ordering::Relaxed),
+                cols: session.cols.load(Ordering::Relaxed),
+                history,
+                history_base_offset,
+                history_dirty: dirty,
+            });
+        }
+        out
+    };
+
+    let mut persisted = Vec::with_capacity(snapshots.len());
+    for snap in snapshots {
+        if snap.history_dirty {
+            if let Err(err) =
+                session_persist::write_history(&state.data_dir, &snap.id, &snap.history)
+            {
+                warn!(session_id = %snap.id, error = %err, "failed to persist session history");
+                if let Some(session) = state.sessions.lock().await.get(&snap.id) {
+                    session.history_dirty.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+        persisted.push(session_persist::PersistedSession {
+            id: snap.id,
+            cwd: snap.pid.and_then(cwd_for_pid),
+            rows: snap.rows,
+            cols: snap.cols,
+            history_base_offset: snap.history_base_offset,
+        });
+    }
+
+    let catalog = session_persist::SessionCatalog {
+        version: session_persist::CATALOG_VERSION,
+        sessions: persisted,
+    };
+    if let Err(err) = session_persist::save_catalog(&state.data_dir, &catalog) {
+        warn!(error = %err, "failed to persist session catalog");
+    }
+}
+
+fn start_session_persist_task(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            persist_live_sessions(&state).await;
+            if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                persist_live_sessions(&state).await;
+                break;
+            }
+        }
+    });
+}
+
+async fn restore_sessions_from_disk(state: &Arc<AppState>) -> usize {
+    let mut records = session_persist::load_catalog(&state.data_dir).sessions;
+    if records.is_empty() {
+        let groups = state.groups.lock().await;
+        records = session_ids_from_groups(&groups)
+            .into_iter()
+            .map(session_persist::PersistedSession::from_id)
+            .collect();
+    }
+    if records.is_empty() {
+        return 0;
+    }
+
+    let mut restored = 0usize;
+    for record in records {
+        match restore_one_session(state, record).await {
+            Ok(()) => restored += 1,
+            Err(err) => warn!(error = %err, "failed to restore persisted session"),
+        }
+    }
+    if restored > 0 {
+        persist_live_sessions(state).await;
+        info!(count = restored, "restored sessions from disk");
+    }
+    restored
+}
+
+async fn restore_one_session(
+    state: &Arc<AppState>,
+    record: session_persist::PersistedSession,
+) -> std::io::Result<()> {
+    {
+        let sessions = state.sessions.lock().await;
+        if sessions.contains_key(&record.id) {
+            return Ok(());
+        }
+    }
+
+    let rows = if record.rows == 0 {
+        session_persist::DEFAULT_ROWS
+    } else {
+        record.rows
+    };
+    let cols = if record.cols == 0 {
+        session_persist::DEFAULT_COLS
+    } else {
+        record.cols
+    };
+    let cwd = record
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let session = spawn_pty_session(&record.id, &state.shell, None, None, cwd)?;
+    session.rows.store(rows, Ordering::Relaxed);
+    session.cols.store(cols, Ordering::Relaxed);
+
+    if let Some(bytes) = session_persist::read_history(&state.data_dir, &record.id) {
+        if let Ok(mut history) = session.history.lock() {
+            *history = bytes;
+        }
+        if let Ok(mut base) = session.history_base_offset.lock() {
+            *base = record.history_base_offset;
+        }
+    }
+
+    let banner = restore_banner(cwd);
+    append_history(
+        &session.history,
+        &session.history_base_offset,
+        &session.history_dirty,
+        &banner,
+    );
+
+    let arc = Arc::new(session);
+    start_output_thread(state.clone(), arc.clone());
+    start_inject_socket(state, &record.id, arc.clone());
+    {
+        let mut sessions = state.sessions.lock().await;
+        sessions.insert(record.id.clone(), arc);
+    }
+    resize_session(state, &record.id, rows, cols).await;
+    Ok(())
+}
+
 fn ensure_default_group(groups: &mut Vec<TerminalGroup>) -> bool {
     if groups.iter().any(|g| g.is_default()) {
         return false;
@@ -2033,6 +2267,9 @@ async fn create_session_with_command(
     let session_names = state.session_names.lock().await;
     save_groups(&state.data_dir, &groups, &session_names);
     broadcast_group_sync(state, &groups, &session_names);
+    drop(groups);
+    drop(session_names);
+    persist_live_sessions(state).await;
 
     Ok(session_id)
 }
@@ -2603,6 +2840,8 @@ async fn close_session(state: &Arc<AppState>, session_id: &str) {
     }
     drop(groups);
     drop(session_names);
+    session_persist::remove_session_files(&state.data_dir, session_id);
+    persist_live_sessions(state).await;
 
     let msg = encode_json(json!({
         "type": "session_closed",
@@ -2651,6 +2890,8 @@ async fn resize_session(state: &Arc<AppState>, session_id: &str, rows: u16, cols
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    session.rows.store(rows, Ordering::Relaxed);
+    session.cols.store(cols, Ordering::Relaxed);
     unsafe {
         let _ = libc::ioctl(session.master_fd, libc::TIOCSWINSZ as libc::c_ulong, &winsz);
     }
@@ -2662,6 +2903,8 @@ async fn resize_session(state: &Arc<AppState>, session_id: &str, rows: u16, cols
     let Some(session) = sessions.get(session_id) else {
         return;
     };
+    session.rows.store(rows, Ordering::Relaxed);
+    session.cols.store(cols, Ordering::Relaxed);
     let _ = session.conpty.resize(rows, cols);
 }
 
@@ -3070,6 +3313,7 @@ fn build_stdout_message(session_id: &str, payload: &[u8]) -> Vec<u8> {
 fn append_history(
     history: &std::sync::Mutex<Vec<u8>>,
     history_base_offset: &std::sync::Mutex<usize>,
+    history_dirty: &AtomicBool,
     data: &[u8],
 ) {
     let Ok(mut buf) = history.lock() else {
@@ -3077,6 +3321,7 @@ fn append_history(
     };
     buf.extend_from_slice(data);
     if buf.len() <= MAX_HISTORY_BYTES {
+        history_dirty.store(true, Ordering::SeqCst);
         return;
     }
     let keep_from = buf.len().saturating_sub(MAX_HISTORY_BYTES / 2);
@@ -3091,6 +3336,7 @@ fn append_history(
     if let Ok(mut base_offset) = history_base_offset.lock() {
         *base_offset = base_offset.saturating_add(cut);
     }
+    history_dirty.store(true, Ordering::SeqCst);
 }
 
 #[cfg(unix)]
@@ -3109,7 +3355,12 @@ fn start_output_thread(state: Arc<AppState>, session: Arc<PtySession>) {
                 break;
             }
             let chunk = &buf[..n as usize];
-            append_history(&session.history, &session.history_base_offset, chunk);
+            append_history(
+                &session.history,
+                &session.history_base_offset,
+                &session.history_dirty,
+                chunk,
+            );
             let msg = BroadcastMsg::Binary(build_stdout_message(&session.session_id, chunk));
             let _ = state.lan_broadcast.send(msg.clone());
             // Skip the relay upload when no Voyager is subscribed through
@@ -3135,7 +3386,12 @@ fn start_output_thread(state: Arc<AppState>, session: Arc<PtySession>) {
                 break;
             }
             let chunk = &buf[..n];
-            append_history(&session.history, &session.history_base_offset, chunk);
+            append_history(
+                &session.history,
+                &session.history_base_offset,
+                &session.history_dirty,
+                chunk,
+            );
             let msg = BroadcastMsg::Binary(build_stdout_message(&session.session_id, chunk));
             let _ = state.lan_broadcast.send(msg.clone());
             // Skip the relay upload when no Voyager is subscribed (see unix path).
@@ -3606,7 +3862,10 @@ fn spawn_pty_session(
         child_pid: pid,
         history: std::sync::Mutex::new(Vec::<u8>::new()),
         history_base_offset: std::sync::Mutex::new(0),
-        closed: std::sync::atomic::AtomicBool::new(false),
+        history_dirty: AtomicBool::new(false),
+        rows: AtomicU16::new(session_persist::DEFAULT_ROWS),
+        cols: AtomicU16::new(session_persist::DEFAULT_COLS),
+        closed: AtomicBool::new(false),
     })
 }
 
@@ -3624,7 +3883,10 @@ fn spawn_pty_session(
         conpty,
         history: std::sync::Mutex::new(Vec::<u8>::new()),
         history_base_offset: std::sync::Mutex::new(0),
-        closed: std::sync::atomic::AtomicBool::new(false),
+        history_dirty: AtomicBool::new(false),
+        rows: AtomicU16::new(session_persist::DEFAULT_ROWS),
+        cols: AtomicU16::new(session_persist::DEFAULT_COLS),
+        closed: AtomicBool::new(false),
     })
 }
 
@@ -5468,18 +5730,23 @@ async fn handle_wormhole_incoming(
                         .get("voyagerCount")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0) as usize;
-                    state.wormhole_subscriber_count.store(count, Ordering::SeqCst);
+                    state
+                        .wormhole_subscriber_count
+                        .store(count, Ordering::SeqCst);
                 }
                 "voyager_connect" => {
-                    state.wormhole_subscriber_count.fetch_add(1, Ordering::SeqCst);
+                    state
+                        .wormhole_subscriber_count
+                        .fetch_add(1, Ordering::SeqCst);
                     handle_voyager_connect_wormhole(state, &value, write).await;
                 }
                 "voyager_disconnect" => {
-                    state.wormhole_subscriber_count.fetch_update(
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                        |n| Some(n.saturating_sub(1)),
-                    ).ok();
+                    state
+                        .wormhole_subscriber_count
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                            Some(n.saturating_sub(1))
+                        })
+                        .ok();
                 }
                 "list" => {
                     let ids = list_session_ids(state).await;
