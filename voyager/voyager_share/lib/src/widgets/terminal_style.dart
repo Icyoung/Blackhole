@@ -63,6 +63,32 @@ final TerminalTheme kTerminalThemeLight = TerminalTheme(
   searchHitForeground: Colors.white,
 );
 
+final TerminalTheme kTerminalThemeTv = TerminalTheme(
+  cursor: Colors.white,
+  selection: const Color(0xFF4D82FF).withValues(alpha: 0.35),
+  foreground: const Color(0xFFF8FAFC),
+  background: Colors.black,
+  black: const Color(0xFF111827),
+  red: const Color(0xFFF87171),
+  green: const Color(0xFF34D399),
+  yellow: const Color(0xFFFBBF24),
+  blue: const Color(0xFF60A5FA),
+  magenta: const Color(0xFFC084FC),
+  cyan: const Color(0xFF22D3EE),
+  white: const Color(0xFFE5E7EB),
+  brightBlack: const Color(0xFF6B7280),
+  brightRed: const Color(0xFFFCA5A5),
+  brightGreen: const Color(0xFF86EFAC),
+  brightYellow: const Color(0xFFFDE68A),
+  brightBlue: const Color(0xFF93C5FD),
+  brightMagenta: const Color(0xFFD8B4FE),
+  brightCyan: const Color(0xFF67E8F9),
+  brightWhite: Colors.white,
+  searchHitBackground: const Color(0xFF374151),
+  searchHitBackgroundCurrent: const Color(0xFF4D82FF),
+  searchHitForeground: Colors.white,
+);
+
 TerminalStyle buildTerminalStyle({required double fontSize}) {
   final fontFamily =
       kIsWeb ? GoogleFonts.jetBrainsMono().fontFamily! : 'JetBrainsMono';

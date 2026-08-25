@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import 'platform_capabilities.dart';
+
 void _vpnLog(String message) {
   final timestamp = DateTime.now().toUtc().toIso8601String();
   debugPrint('[$timestamp] [VPN] $message');
@@ -115,7 +117,7 @@ class VpnService extends ChangeNotifier {
   );
 
   static bool get isSupportedPlatform {
-    if (!isFeatureEnabled || kIsWeb) {
+    if (!isFeatureEnabled || kIsWeb || VoyagerPlatform.isTvOS) {
       return false;
     }
     return switch (defaultTargetPlatform) {

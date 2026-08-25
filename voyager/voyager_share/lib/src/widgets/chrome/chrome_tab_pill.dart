@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../common/fade_overflow_text.dart';
+import '../common/focusable_tap_region.dart';
 import '../design_tokens.dart';
 import 'chrome_tab_shell.dart';
 
@@ -39,16 +40,14 @@ class ChromeTabPill extends StatelessWidget {
           width: width,
           height: 28,
           padding: const EdgeInsets.symmetric(horizontal: 17),
-          decoration: active
-              ? BoxDecoration(
-                  border: Border(
-                    top: BorderSide(
-                      color: AppColors.border,
-                      width: 1,
+          decoration:
+              active
+                  ? BoxDecoration(
+                    border: Border(
+                      top: BorderSide(color: AppColors.border, width: 1),
                     ),
-                  ),
-                )
-              : null,
+                  )
+                  : null,
           child: Row(
             children: [
               Expanded(
@@ -64,17 +63,29 @@ class ChromeTabPill extends StatelessWidget {
                 ),
               ),
               if (active)
-                GestureDetector(
+                FocusableTapRegion(
                   onTap: onClose,
-                  child: Container(
-                    padding: const EdgeInsets.all(2),
-                    decoration: BoxDecoration(
-                      color: AppColors.border,
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(Icons.close,
-                        size: 10, color: AppColors.accentDark),
-                  ),
+                  semanticLabel: 'Close $label',
+                  builder:
+                      (context, focused, hovered, pressed) => AnimatedScale(
+                        duration: AppDurations.fast,
+                        scale: focused ? 1.2 : 1,
+                        child: Container(
+                          padding: const EdgeInsets.all(2),
+                          decoration: BoxDecoration(
+                            color:
+                                focused || hovered || pressed
+                                    ? AppColors.borderFocus
+                                    : AppColors.border,
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(
+                            Icons.close,
+                            size: 10,
+                            color: AppColors.accentDark,
+                          ),
+                        ),
+                      ),
                 ),
             ],
           ),

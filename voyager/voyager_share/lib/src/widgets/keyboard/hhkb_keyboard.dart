@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../common/focusable_tap_region.dart';
 import '../design_tokens.dart';
 import 'hhkb_key.dart';
 
@@ -18,6 +19,7 @@ class HHKBKeyboard extends StatefulWidget {
     this.chineseMode = false,
     this.onToggleChineseMode,
     this.onScrollToBottom,
+    this.dark = false,
   });
 
   final bool connected;
@@ -31,6 +33,7 @@ class HHKBKeyboard extends StatefulWidget {
   final VoidCallback onToggleAlt;
   final VoidCallback? onToggleChineseMode;
   final VoidCallback? onScrollToBottom;
+  final bool dark;
 
   @override
   State<HHKBKeyboard> createState() => _HHKBKeyboardState();
@@ -43,7 +46,6 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
   DateTime? _lastFnTap;
   bool _fnLocked = false;
 
-  static const _bgColor = AppColors.surfaceDim;
   static const _shiftDeleteFlex = 12;
 
   void _onShiftTap() {
@@ -98,7 +100,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: _bgColor,
+      color: widget.dark ? const Color(0xFF161B22) : AppColors.surfaceDim,
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -238,6 +240,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
           isModifier: true,
           onTap: enabled ? _onShiftTap : () {},
           fontSize: 14,
+          dark: widget.dark,
         ),
       ),
     );
@@ -256,6 +259,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
           isModifier: true,
           onTap: _onFnTap,
           fontSize: 11,
+          dark: widget.dark,
         ),
       ),
     );
@@ -269,6 +273,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
         padding: const EdgeInsets.symmetric(horizontal: 2.5),
         child: _SpaceKey(
           enabled: widget.connected,
+          dark: widget.dark,
           onSpace: () => _onKeyTap(' '),
           onArrow: (direction) {
             final codes = {
@@ -386,6 +391,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
           enabled: widget.connected && output.isNotEmpty,
           onTap: () => _onKeyTap(output, isSpecial: isSpecialKey),
           fontSize: label.length > 3 ? 9.0 : (label.length > 2 ? 10.0 : 13.0),
+          dark: widget.dark,
         ),
       ),
     );
@@ -406,6 +412,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
             }
           },
           fontSize: label.length > 3 ? 9.0 : (label.length > 2 ? 10.0 : 13.0),
+          dark: widget.dark,
         ),
       ),
     );
@@ -428,6 +435,7 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
           isModifier: true,
           onTap: onTap,
           fontSize: 10,
+          dark: widget.dark,
         ),
       ),
     );
@@ -438,11 +446,13 @@ class _HHKBKeyboardState extends State<HHKBKeyboard> {
 class _SpaceKey extends StatefulWidget {
   const _SpaceKey({
     required this.enabled,
+    required this.dark,
     required this.onSpace,
     required this.onArrow,
   });
 
   final bool enabled;
+  final bool dark;
   final VoidCallback onSpace;
   final void Function(String direction) onArrow;
 
@@ -464,100 +474,116 @@ class _SpaceKeyState extends State<_SpaceKey> {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onPanStart:
-          widget.enabled
-              ? (details) {
-                setState(() => _pressed = true);
-                _accumulatedX = 0;
-                _accumulatedY = 0;
-                _hasMoved = false;
-                _verticalTriggered = false;
-                HapticFeedback.lightImpact();
-              }
-              : null,
-      onPanUpdate:
-          widget.enabled
-              ? (details) {
-                _accumulatedX += details.delta.dx;
-                _accumulatedY += details.delta.dy;
+    final keyColor = widget.dark ? const Color(0xFF11161D) : _keyColor;
+    final keyPressedColor =
+        widget.dark ? const Color(0xFF222936) : _keyPressedColor;
+    final keyBorder = widget.dark ? const Color(0xFF2B3441) : _keyBorder;
 
-                // Determine primary direction and emit arrow keys
-                if (_accumulatedX.abs() > _accumulatedY.abs()) {
-                  // Horizontal movement
-                  while (_accumulatedX.abs() >= _stepThreshold) {
-                    if (_accumulatedX > 0) {
-                      widget.onArrow('right');
-                      _accumulatedX -= _stepThreshold;
-                    } else {
-                      widget.onArrow('left');
-                      _accumulatedX += _stepThreshold;
-                    }
-                    _hasMoved = true;
-                    HapticFeedback.selectionClick();
+    return FocusableTapRegion(
+      onTap: widget.enabled ? widget.onSpace : null,
+      semanticLabel: 'Space',
+      builder: (context, focused, hovered, pressed) {
+        final effectivePressed = _pressed || pressed;
+        final bgColor =
+            focused
+                ? (widget.dark ? const Color(0xFF1D4ED8) : AppColors.keyPressed)
+                : effectivePressed
+                ? keyPressedColor
+                : keyColor;
+        final borderColor =
+            focused
+                ? (widget.dark ? const Color(0xFF93C5FD) : AppColors.accent)
+                : keyBorder;
+
+        return GestureDetector(
+          onPanStart:
+              widget.enabled
+                  ? (details) {
+                    setState(() => _pressed = true);
+                    _accumulatedX = 0;
+                    _accumulatedY = 0;
+                    _hasMoved = false;
+                    _verticalTriggered = false;
+                    HapticFeedback.lightImpact();
                   }
-                } else {
-                  // Vertical movement (trigger only once per swipe)
-                  if (!_verticalTriggered &&
-                      _accumulatedY.abs() >= _stepThreshold) {
-                    if (_accumulatedY > 0) {
-                      widget.onArrow('down');
-                    } else {
-                      widget.onArrow('up');
+                  : null,
+          onPanUpdate:
+              widget.enabled
+                  ? (details) {
+                    _accumulatedX += details.delta.dx;
+                    _accumulatedY += details.delta.dy;
+
+                    if (_accumulatedX.abs() > _accumulatedY.abs()) {
+                      while (_accumulatedX.abs() >= _stepThreshold) {
+                        if (_accumulatedX > 0) {
+                          widget.onArrow('right');
+                          _accumulatedX -= _stepThreshold;
+                        } else {
+                          widget.onArrow('left');
+                          _accumulatedX += _stepThreshold;
+                        }
+                        _hasMoved = true;
+                        HapticFeedback.selectionClick();
+                      }
+                    } else if (!_verticalTriggered &&
+                        _accumulatedY.abs() >= _stepThreshold) {
+                      widget.onArrow(_accumulatedY > 0 ? 'down' : 'up');
+                      _hasMoved = true;
+                      _verticalTriggered = true;
+                      HapticFeedback.selectionClick();
                     }
-                    _hasMoved = true;
-                    _verticalTriggered = true;
-                    HapticFeedback.selectionClick();
                   }
-                }
-              }
-              : null,
-      onPanEnd:
-          widget.enabled
-              ? (details) {
-                setState(() => _pressed = false);
-                // If no movement occurred, treat as space tap
-                if (!_hasMoved) {
-                  widget.onSpace();
-                }
-                _accumulatedX = 0;
-                _accumulatedY = 0;
-              }
-              : null,
-      onPanCancel:
-          widget.enabled
-              ? () {
-                setState(() => _pressed = false);
-                _accumulatedX = 0;
-                _accumulatedY = 0;
-              }
-              : null,
-      child: AnimatedContainer(
-        duration: AppDurations.fast,
-        height: 42,
-        decoration: BoxDecoration(
-          color: _pressed ? _keyPressedColor : _keyColor,
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: _keyBorder, width: 0.5),
-          boxShadow:
-              _pressed
-                  ? [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.5),
-                      blurRadius: 1,
-                      offset: const Offset(0, 0),
-                    ),
-                  ]
-                  : [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.4),
-                      blurRadius: 2,
-                      offset: const Offset(0, 1.5),
-                    ),
-                  ],
-        ),
-        child: const SizedBox.expand(), // Empty space bar, no hint text
-      ),
+                  : null,
+          onPanEnd:
+              widget.enabled
+                  ? (details) {
+                    setState(() => _pressed = false);
+                    if (!_hasMoved) {
+                      widget.onSpace();
+                    }
+                    _accumulatedX = 0;
+                    _accumulatedY = 0;
+                  }
+                  : null,
+          onPanCancel:
+              widget.enabled
+                  ? () {
+                    setState(() => _pressed = false);
+                    _accumulatedX = 0;
+                    _accumulatedY = 0;
+                  }
+                  : null,
+          child: AnimatedContainer(
+            duration: AppDurations.fast,
+            height: 42,
+            decoration: BoxDecoration(
+              color: bgColor,
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(
+                color: borderColor,
+                width: focused ? 1.5 : 0.5,
+              ),
+              boxShadow:
+                  effectivePressed || focused
+                      ? [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.5),
+                          blurRadius: focused ? 6 : 1,
+                          offset: const Offset(0, 0),
+                        ),
+                      ]
+                      : [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.4),
+                          blurRadius: 2,
+                          offset: const Offset(0, 1.5),
+                        ),
+                      ],
+            ),
+            child: const SizedBox.expand(),
+          ),
+        );
+      },
     );
   }
 }

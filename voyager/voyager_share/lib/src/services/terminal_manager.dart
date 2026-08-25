@@ -26,14 +26,17 @@ class TerminalManager {
   final void Function(String sessionId, String title)? onTitleChange;
   final String logPrefix;
 
+  static const double _bottomGapTolerance = 1.0;
+
   final Map<String, Terminal> _terminals = {};
   final Map<String, TerminalController> _controllers = {};
   final Map<String, GlobalKey<TerminalViewState>> _terminalViewKeys = {};
   final Map<String, ScrollController> _scrollControllers = {};
   final Map<String, (double, double)> _scrollBottomGapCache = {};
-  final Map<String, List<int>> _utf8Buffers = {};  // Stores trailing incomplete UTF-8 bytes (max 3)
+  final Map<String, List<int>> _utf8Buffers = {};
   final Map<String, List<String>> _pendingWrites = {};
   final Set<String> _pendingFlushScheduled = {};
+  final Set<String> _bottomRestoreScheduled = {};
   final Map<String, String> _titles = {};
 
   final Terminal _idleTerminal = Terminal(maxLines: 2000);
@@ -132,17 +135,30 @@ class TerminalManager {
   }
 
   void resetTerminal(String sessionId) {
+    final cachedScroll = _scrollBottomGapCache[sessionId];
+    final wasNearBottom =
+        cachedScroll == null ? true : _isNearBottomGap(cachedScroll.$2);
     _controllers[sessionId]?.clearSelection();
+    _utf8Buffers.remove(sessionId);
+    _pendingWrites.remove(sessionId);
+    _pendingFlushScheduled.remove(sessionId);
+    _bottomRestoreScheduled.remove(sessionId);
     _terminals[sessionId] = _createTerminal(sessionId);
     _controllers.putIfAbsent(sessionId, () => TerminalController());
-    restoreScrollOffset(sessionId);
+    if (wasNearBottom) {
+      _scrollBottomGapCache.remove(sessionId);
+    } else {
+      restoreScrollOffset(sessionId);
+    }
   }
 
   void writeToTerminal(String sessionId, String text) {
     final terminal = terminalFor(sessionId);
+    final shouldStickToBottom = _isScrollNearBottom(sessionId);
 
     try {
       terminal.write(text);
+      _restoreBottomAfterWrite(sessionId, shouldStickToBottom);
     } on AssertionError {
       // Terminal not attached to view yet, buffer the write and retry later
       final pending = _pendingWrites.putIfAbsent(sessionId, () => <String>[]);
@@ -181,8 +197,10 @@ class TerminalManager {
 
     // Try to write all pending data
     final combined = pending.join();
+    final shouldStickToBottom = _isScrollNearBottom(sessionId);
     try {
       terminal.write(combined);
+      _restoreBottomAfterWrite(sessionId, shouldStickToBottom);
     } on AssertionError {
       // Still not attached, re-buffer and retry next frame
       _pendingWrites[sessionId] = [combined];
@@ -218,9 +236,11 @@ class TerminalManager {
     int completeEnd = toProcess.length;
 
     // Check last 1-3 bytes for incomplete multi-byte sequence
-    for (int i = toProcess.length - 1;
-         i >= 0 && i >= toProcess.length - 3;
-         i--) {
+    for (
+      int i = toProcess.length - 1;
+      i >= 0 && i >= toProcess.length - 3;
+      i--
+    ) {
       final byte = toProcess[i];
       if ((byte & 0x80) == 0) {
         // ASCII byte - everything is complete
@@ -241,9 +261,10 @@ class TerminalManager {
 
     // Decode complete portion
     if (completeEnd > 0) {
-      final completeBytes = completeEnd == toProcess.length
-          ? toProcess
-          : Uint8List.sublistView(toProcess, 0, completeEnd);
+      final completeBytes =
+          completeEnd == toProcess.length
+              ? toProcess
+              : Uint8List.sublistView(toProcess, 0, completeEnd);
       final text = utf8.decode(completeBytes, allowMalformed: true);
       writeToTerminal(sessionId, text);
     }
@@ -269,7 +290,10 @@ class TerminalManager {
     final maxScroll = controller.position.maxScrollExtent;
     final offset = controller.offset;
     final gap = (maxScroll - offset).clamp(0.0, maxScroll);
-    _scrollBottomGapCache[sessionId] = (offset, gap);
+    _scrollBottomGapCache[sessionId] = (
+      offset,
+      _isNearBottomGap(gap) ? 0.0 : gap,
+    );
   }
 
   void restoreScrollOffset(String sessionId) {
@@ -285,7 +309,8 @@ class TerminalManager {
       }
       final maxScroll = controller.position.maxScrollExtent;
       final currentOffset = controller.offset;
-      var target = (maxScroll - gap).clamp(0.0, maxScroll);
+      final restoreGap = _isNearBottomGap(gap) ? 0.0 : gap;
+      var target = (maxScroll - restoreGap).clamp(0.0, maxScroll);
       if (target < 10.0 && cachedOffset > 10.0) {
         target = cachedOffset.clamp(0.0, maxScroll);
       }
@@ -293,6 +318,45 @@ class TerminalManager {
         return;
       }
       controller.jumpTo(target);
+    });
+  }
+
+  static bool _isNearBottomGap(double gap) {
+    return gap <= _bottomGapTolerance;
+  }
+
+  bool _isScrollNearBottom(String sessionId) {
+    final controller = _scrollControllers[sessionId];
+    if (controller == null || !controller.hasClients) {
+      return true;
+    }
+    final maxScroll = controller.position.maxScrollExtent;
+    final gap = (maxScroll - controller.offset).clamp(0.0, maxScroll);
+    return _isNearBottomGap(gap);
+  }
+
+  void _restoreBottomAfterWrite(String sessionId, bool shouldStickToBottom) {
+    if (!shouldStickToBottom) {
+      return;
+    }
+    final controller = _scrollControllers[sessionId];
+    if (controller == null) {
+      return;
+    }
+    if (_bottomRestoreScheduled.contains(sessionId)) {
+      return;
+    }
+    _bottomRestoreScheduled.add(sessionId);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _bottomRestoreScheduled.remove(sessionId);
+      if (_disposed || !controller.hasClients) {
+        return;
+      }
+      final maxScroll = controller.position.maxScrollExtent;
+      if ((maxScroll - controller.offset).abs() < 0.5) {
+        return;
+      }
+      controller.jumpTo(maxScroll);
     });
   }
 
@@ -305,6 +369,7 @@ class TerminalManager {
     _utf8Buffers.remove(sessionId);
     _pendingWrites.remove(sessionId);
     _pendingFlushScheduled.remove(sessionId);
+    _bottomRestoreScheduled.remove(sessionId);
     _titles.remove(sessionId);
   }
 

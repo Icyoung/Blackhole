@@ -22,6 +22,10 @@ void main() {
       expect(shouldRefreshDeviceNameInBackground('iPhone (iPhone)'), isTrue);
     });
 
+    test('refreshes generic tvOS device names in background', () {
+      expect(shouldRefreshDeviceNameInBackground('Apple TV'), isTrue);
+    });
+
     test('keeps specific device names without background refresh', () {
       expect(shouldRefreshDeviceNameInBackground('Icy iPhone 15 Pro'), isFalse);
     });

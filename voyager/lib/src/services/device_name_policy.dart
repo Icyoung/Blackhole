@@ -25,6 +25,7 @@ bool isGenericDeviceName(String? name) {
     'iPad',
     'iPod touch',
     'Android',
+    'Apple TV',
     'Mac',
     'Windows',
     'Linux',

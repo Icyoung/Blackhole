@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../design_tokens.dart';
+import 'focusable_tap_region.dart';
 
 class ActionButton extends StatelessWidget {
   const ActionButton({
@@ -27,49 +28,68 @@ class ActionButton extends StatelessWidget {
 
     if (modifier) {
       bgColor = active ? AppColors.border : AppColors.borderSubtle;
-      borderColor =
-          active ? AppColors.borderFocus : AppColors.divider;
+      borderColor = active ? AppColors.borderFocus : AppColors.divider;
     } else {
       bgColor = enabled ? AppColors.borderSubtle : AppColors.surfaceDim;
-      borderColor =
-          enabled ? AppColors.divider : AppColors.border;
+      borderColor = enabled ? AppColors.divider : AppColors.border;
     }
 
-    final textColor = modifier
-        ? (active ? AppColors.textPrimary : AppColors.textTertiary)
-        : (enabled ? AppColors.textPrimary : AppColors.textMuted);
+    final textColor =
+        modifier
+            ? (active ? AppColors.textPrimary : AppColors.textTertiary)
+            : (enabled ? AppColors.textPrimary : AppColors.textMuted);
 
-    return GestureDetector(
+    return FocusableTapRegion(
       onTap: onTap,
-      child: AnimatedContainer(
-        duration: AppDurations.normal,
-        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: 10),
-        decoration: BoxDecoration(
-          color: bgColor,
-          borderRadius: BorderRadius.circular(AppRadius.sm),
-          border: Border.all(color: borderColor),
-          boxShadow: (enabled || modifier)
-              ? [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.06),
-                    blurRadius: 4,
-                    offset: const Offset(0, 2),
-                  )
-                ]
-              : null,
-        ),
-        child: icon != null
-            ? Icon(icon, size: 16, color: textColor)
-            : Text(
-                label ?? '',
-                style: TextStyle(
-                  color: textColor,
-                  fontSize: 11,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 0.5,
-                ),
+      semanticLabel: label,
+      builder: (context, focused, hovered, pressed) {
+        final effectiveBorderColor =
+            focused ? AppColors.borderFocus : borderColor;
+        final effectiveBgColor =
+            pressed || hovered ? AppColors.surfaceBright : bgColor;
+
+        return AnimatedScale(
+          duration: AppDurations.fast,
+          scale: focused ? 1.08 : 1,
+          child: AnimatedContainer(
+            duration: AppDurations.normal,
+            padding: const EdgeInsets.symmetric(
+              horizontal: AppSpacing.md,
+              vertical: 10,
+            ),
+            decoration: BoxDecoration(
+              color: effectiveBgColor,
+              borderRadius: BorderRadius.circular(AppRadius.sm),
+              border: Border.all(
+                color: effectiveBorderColor,
+                width: focused ? 2 : 1,
               ),
-      ),
+              boxShadow:
+                  (enabled || modifier || focused)
+                      ? [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.08),
+                          blurRadius: focused ? 10 : 4,
+                          offset: const Offset(0, 2),
+                        ),
+                      ]
+                      : null,
+            ),
+            child:
+                icon != null
+                    ? Icon(icon, size: 16, color: textColor)
+                    : Text(
+                      label ?? '',
+                      style: TextStyle(
+                        color: textColor,
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+          ),
+        );
+      },
     );
   }
 }

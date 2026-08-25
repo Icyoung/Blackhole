@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:voyager_share/voyager_share.dart';
 
 import '../services/vpn_service.dart';
@@ -25,6 +26,7 @@ class SettingsDrawer extends StatefulWidget {
     this.vpnEnabled = false,
     this.vpnService,
     this.onVpnEnabledChanged,
+    this.tvNavigation = false,
   });
 
   final bool useWormhole;
@@ -46,6 +48,7 @@ class SettingsDrawer extends StatefulWidget {
   final bool vpnEnabled;
   final VpnService? vpnService;
   final ValueChanged<bool>? onVpnEnabledChanged;
+  final bool tvNavigation;
 
   @override
   State<SettingsDrawer> createState() => _SettingsDrawerState();
@@ -53,289 +56,340 @@ class SettingsDrawer extends StatefulWidget {
 
 class _SettingsDrawerState extends State<SettingsDrawer> {
   bool _showAdvanced = false;
+  final FocusNode _lanFocusNode = FocusNode(debugLabel: 'settings_lan');
+  final FocusNode _remoteFocusNode = FocusNode(debugLabel: 'settings_remote');
+  final FocusNode _addressFocusNode = FocusNode(debugLabel: 'settings_address');
+  final FocusNode _autoReconnectFocusNode = FocusNode(
+    debugLabel: 'settings_auto_reconnect',
+  );
+
+  @override
+  void dispose() {
+    _lanFocusNode.dispose();
+    _remoteFocusNode.dispose();
+    _addressFocusNode.dispose();
+    _autoReconnectFocusNode.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    const fieldFill = AppColors.surfaceVariant;
-    const fieldBorder = AppColors.border;
-    final titleStyle = Theme.of(context).textTheme.titleMedium?.copyWith(
-      color: AppColors.textPrimary,
-      fontSize: 18,
-    );
+    final isTv = widget.tvNavigation;
+    final drawerBg = isTv ? const Color(0xFF0C0F14) : AppColors.background;
+    final fieldFill = isTv ? const Color(0xFF11161D) : AppColors.surfaceVariant;
+    final fieldBorder = isTv ? const Color(0xFF2B3441) : AppColors.border;
+    final textPrimary = isTv ? const Color(0xFFF8FAFC) : AppColors.textPrimary;
+    final textMuted = isTv ? const Color(0xFF718096) : AppColors.textHint;
+    final accent = isTv ? const Color(0xFF4D82FF) : AppColors.accent;
+    final titleStyle = Theme.of(
+      context,
+    ).textTheme.titleMedium?.copyWith(color: textPrimary, fontSize: 18);
 
     return Drawer(
-      backgroundColor: AppColors.background,
+      backgroundColor: drawerBg,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.only(
           topLeft: Radius.circular(20),
           bottomLeft: Radius.circular(20),
         ),
       ),
-      child: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.settings_outlined, color: AppColors.accent),
-                const SizedBox(width: 12),
-                Text(
-                  'VOYAGER SETTINGS',
-                  style: titleStyle?.copyWith(fontSize: 14, letterSpacing: 1),
-                ),
-              ],
-            ),
-            const SizedBox(height: 24),
-            _buildDrawerSection('Connection Mode'),
-            const SizedBox(height: 12),
-            _buildModeSelector(),
-            const SizedBox(height: 20),
-            if (widget.useWormhole) ...[
-              _buildDrawerSection('Session ID'),
+      child: TvFocusScope(
+        enabled: widget.tvNavigation,
+        onBack: () => Navigator.of(context).maybePop(),
+        child: SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.settings_outlined, color: accent),
+                  const SizedBox(width: 12),
+                  Text(
+                    'VOYAGER SETTINGS',
+                    style: titleStyle?.copyWith(fontSize: 14, letterSpacing: 1),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+              _buildDrawerSection('Connection Mode'),
               const SizedBox(height: 12),
-              TextField(
-                controller: widget.sessionController,
-                textCapitalization: TextCapitalization.characters,
-                textAlign: TextAlign.center,
-                decoration: InputDecoration(
-                  hintText: 'ABC123',
-                  hintStyle: TextStyle(
-                    color: AppColors.textHint,
+              _buildModeSelector(),
+              const SizedBox(height: 20),
+              if (widget.useWormhole) ...[
+                _buildDrawerSection('Session ID'),
+                const SizedBox(height: 12),
+                TvFocusTextField(
+                  controller: widget.sessionController,
+                  tvNavigation: widget.tvNavigation,
+                  focusNode: _addressFocusNode,
+                  onMoveUp: _focusCurrentMode,
+                  onMoveDown: () => _autoReconnectFocusNode.requestFocus(),
+                  textCapitalization: TextCapitalization.characters,
+                  textAlign: TextAlign.center,
+                  decoration: InputDecoration(
+                    hintText: 'ABC123',
+                    hintStyle: TextStyle(
+                      color: textMuted,
+                      fontSize: 14,
+                      letterSpacing: 4,
+                      fontWeight: FontWeight.bold,
+                    ),
+                    filled: true,
+                    fillColor: fieldFill,
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 14,
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: accent, width: 1.5),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(
+                        color: accent.withValues(alpha: 0.4),
+                        width: 1.5,
+                      ),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: accent, width: 2),
+                    ),
+                  ),
+                  style: TextStyle(
+                    color: textPrimary,
                     fontSize: 14,
                     letterSpacing: 4,
                     fontWeight: FontWeight.bold,
                   ),
-                  filled: true,
-                  fillColor: AppColors.surfaceVariant,
-                  isDense: true,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 20,
-                    vertical: 14,
-                  ),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(
-                      color: AppColors.accent,
-                      width: 1.5,
+                ),
+                const SizedBox(height: 20),
+                _buildAdvancedToggle(),
+                AnimatedCrossFade(
+                  firstChild: const SizedBox.shrink(),
+                  secondChild: Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: Column(
+                      children: [
+                        TvFocusTextField(
+                          controller: widget.wormholeController,
+                          tvNavigation: widget.tvNavigation,
+                          decoration: _buildInputDecoration(
+                            'Server URL',
+                            fieldFill,
+                            fieldBorder,
+                          ),
+                          style: TextStyle(color: textPrimary, fontSize: 14),
+                        ),
+                        const SizedBox(height: 12),
+                        TvFocusTextField(
+                          controller: widget.tokenController,
+                          tvNavigation: widget.tvNavigation,
+                          obscureText: true,
+                          decoration: _buildInputDecoration(
+                            'Token',
+                            fieldFill,
+                            fieldBorder,
+                          ),
+                          style: TextStyle(color: textPrimary, fontSize: 14),
+                        ),
+                      ],
                     ),
                   ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(
-                      color: AppColors.accent.withValues(alpha: 0.4),
-                      width: 1.5,
-                    ),
+                  crossFadeState:
+                      _showAdvanced
+                          ? CrossFadeState.showSecond
+                          : CrossFadeState.showFirst,
+                  duration: const Duration(milliseconds: 200),
+                ),
+              ] else ...[
+                _buildDrawerSection('Address'),
+                const SizedBox(height: 12),
+                TvFocusTextField(
+                  controller: widget.urlController,
+                  tvNavigation: widget.tvNavigation,
+                  focusNode: _addressFocusNode,
+                  onMoveUp: _focusCurrentMode,
+                  onMoveDown: () => _autoReconnectFocusNode.requestFocus(),
+                  decoration: _buildInputDecoration(
+                    'Address',
+                    fieldFill,
+                    fieldBorder,
                   ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(
-                      color: AppColors.accent,
-                      width: 2,
-                    ),
-                  ),
+                  style: TextStyle(color: textPrimary, fontSize: 14),
                 ),
-                style: const TextStyle(
-                  color: AppColors.textPrimary,
-                  fontSize: 14,
-                  letterSpacing: 4,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 20),
-              _buildAdvancedToggle(),
-              AnimatedCrossFade(
-                firstChild: const SizedBox.shrink(),
-                secondChild: Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: Column(
-                    children: [
-                      TextField(
-                        controller: widget.wormholeController,
-                        decoration: _buildInputDecoration(
-                          'Server URL',
-                          fieldFill,
-                          fieldBorder,
-                        ),
-                        style: const TextStyle(
-                          color: AppColors.textPrimary,
-                          fontSize: 14,
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: widget.tokenController,
-                        obscureText: true,
-                        decoration: _buildInputDecoration(
-                          'Token',
-                          fieldFill,
-                          fieldBorder,
-                        ),
-                        style: const TextStyle(
-                          color: AppColors.textPrimary,
-                          fontSize: 14,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                crossFadeState:
-                    _showAdvanced
-                        ? CrossFadeState.showSecond
-                        : CrossFadeState.showFirst,
-                duration: const Duration(milliseconds: 200),
-              ),
-            ] else ...[
-              _buildDrawerSection('Address'),
-              const SizedBox(height: 12),
-              TextField(
-                controller: widget.urlController,
-                decoration: _buildInputDecoration(
-                  'Address',
-                  fieldFill,
-                  fieldBorder,
-                ),
-                style: const TextStyle(
-                  color: AppColors.textPrimary,
-                  fontSize: 14,
-                ),
-              ),
-            ],
-            if (widget.vpnService != null) ...[
+              ],
+              if (widget.vpnService != null) ...[
+                const SizedBox(height: 24),
+                _buildVpnSection(),
+              ],
               const SizedBox(height: 24),
-              _buildVpnSection(),
+              _buildDrawerSection('Modes & Behavior'),
+              const SizedBox(height: 8),
+              _buildDrawerSwitch(
+                'Auto Reconnect',
+                widget.autoReconnect,
+                widget.onAutoReconnectChanged,
+                focusNode: _autoReconnectFocusNode,
+              ),
+              _buildDrawerSwitch(
+                'Multi-Window Mode',
+                widget.multiWindow,
+                widget.onMultiWindowChanged,
+              ),
+              const SizedBox(height: 24),
+              _buildDrawerSection('Input'),
+              const SizedBox(height: 8),
+              _buildDrawerSwitch(
+                'Keyboard Tools',
+                widget.showKeyboardTools,
+                widget.onShowKeyboardToolsChanged,
+              ),
+              _buildDrawerSwitch(
+                'Quick Input',
+                widget.showCommandInput,
+                widget.onShowCommandInputChanged,
+              ),
+              _buildDrawerSwitch(
+                'HHKB Keyboard',
+                widget.showHHKB,
+                widget.onShowHHKBChanged,
+              ),
+              const SizedBox(height: 40),
+              Text(
+                'Blackhole Voyager v1.0.0',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: textMuted, fontSize: 11),
+              ),
             ],
-            const SizedBox(height: 24),
-            _buildDrawerSection('Modes & Behavior'),
-            const SizedBox(height: 8),
-            _buildDrawerSwitch(
-              'Auto Reconnect',
-              widget.autoReconnect,
-              widget.onAutoReconnectChanged,
-            ),
-            _buildDrawerSwitch(
-              'Multi-Window Mode',
-              widget.multiWindow,
-              widget.onMultiWindowChanged,
-            ),
-            const SizedBox(height: 24),
-            _buildDrawerSection('Input'),
-            const SizedBox(height: 8),
-            _buildDrawerSwitch(
-              'Keyboard Tools',
-              widget.showKeyboardTools,
-              widget.onShowKeyboardToolsChanged,
-            ),
-            _buildDrawerSwitch(
-              'Quick Input',
-              widget.showCommandInput,
-              widget.onShowCommandInputChanged,
-            ),
-            _buildDrawerSwitch(
-              'HHKB Keyboard',
-              widget.showHHKB,
-              widget.onShowHHKBChanged,
-            ),
-            const SizedBox(height: 40),
-            Text(
-              'Blackhole Voyager v1.0.0',
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: AppColors.textHint, fontSize: 11),
-            ),
-          ],
+          ),
         ),
       ),
     );
   }
 
   Widget _buildModeSelector() {
-    const activeColor = AppColors.accent;
-    const inactiveColor = AppColors.surfaceVariant;
-    const activeBorder = AppColors.accent;
-    const inactiveBorder = AppColors.border;
-
     return Row(
       children: [
         Expanded(
-          child: GestureDetector(
-            onTap: () {
-              if (widget.useWormhole) {
-                widget.onUseWormholeChanged(false);
-              }
+          child: CallbackShortcuts(
+            bindings: <ShortcutActivator, VoidCallback>{
+              const SingleActivator(LogicalKeyboardKey.arrowRight):
+                  () => _remoteFocusNode.requestFocus(),
+              const SingleActivator(LogicalKeyboardKey.arrowDown):
+                  () => _addressFocusNode.requestFocus(),
             },
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              decoration: BoxDecoration(
-                color:
-                    !widget.useWormhole
-                        ? activeColor.withValues(alpha: 0.15)
-                        : inactiveColor,
-                borderRadius: const BorderRadius.horizontal(
-                  left: Radius.circular(10),
-                ),
-                border: Border.all(
-                  color: !widget.useWormhole ? activeBorder : inactiveBorder,
-                  width: !widget.useWormhole ? 1.5 : 1,
-                ),
+            child: _buildModeOption(
+              label: 'LAN',
+              selected: !widget.useWormhole,
+              focusNode: _lanFocusNode,
+              borderRadius: const BorderRadius.horizontal(
+                left: Radius.circular(10),
               ),
-              child: Text(
-                'LAN',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color:
-                      !widget.useWormhole
-                          ? AppColors.textPrimary
-                          : AppColors.textMuted,
-                  fontSize: 13,
-                  fontWeight:
-                      !widget.useWormhole ? FontWeight.bold : FontWeight.normal,
-                  letterSpacing: 0.5,
-                ),
-              ),
+              onTap: () {
+                if (widget.useWormhole) widget.onUseWormholeChanged(false);
+              },
             ),
           ),
         ),
         Expanded(
-          child: GestureDetector(
-            onTap: () {
-              if (!widget.useWormhole) {
-                widget.onUseWormholeChanged(true);
-              }
+          child: CallbackShortcuts(
+            bindings: <ShortcutActivator, VoidCallback>{
+              const SingleActivator(LogicalKeyboardKey.arrowLeft):
+                  () => _lanFocusNode.requestFocus(),
+              const SingleActivator(LogicalKeyboardKey.arrowDown):
+                  () => _addressFocusNode.requestFocus(),
             },
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              decoration: BoxDecoration(
-                color:
-                    widget.useWormhole
-                        ? activeColor.withValues(alpha: 0.15)
-                        : inactiveColor,
-                borderRadius: const BorderRadius.horizontal(
-                  right: Radius.circular(10),
-                ),
-                border: Border.all(
-                  color: widget.useWormhole ? activeBorder : inactiveBorder,
-                  width: widget.useWormhole ? 1.5 : 1,
-                ),
+            child: _buildModeOption(
+              label: 'Remote',
+              selected: widget.useWormhole,
+              focusNode: _remoteFocusNode,
+              borderRadius: const BorderRadius.horizontal(
+                right: Radius.circular(10),
               ),
-              child: Text(
-                'Remote',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color:
-                      widget.useWormhole
-                          ? AppColors.textPrimary
-                          : AppColors.textMuted,
-                  fontSize: 13,
-                  fontWeight:
-                      widget.useWormhole ? FontWeight.bold : FontWeight.normal,
-                  letterSpacing: 0.5,
-                ),
-              ),
+              onTap: () {
+                if (!widget.useWormhole) widget.onUseWormholeChanged(true);
+              },
             ),
           ),
         ),
       ],
+    );
+  }
+
+  void _focusCurrentMode() {
+    if (widget.useWormhole) {
+      _remoteFocusNode.requestFocus();
+    } else {
+      _lanFocusNode.requestFocus();
+    }
+  }
+
+  Widget _buildModeOption({
+    required String label,
+    required bool selected,
+    required FocusNode focusNode,
+    required BorderRadius borderRadius,
+    required VoidCallback onTap,
+  }) {
+    final activeColor =
+        widget.tvNavigation ? const Color(0xFF4D82FF) : AppColors.accent;
+    final inactiveColor =
+        widget.tvNavigation
+            ? const Color(0xFF11161D)
+            : AppColors.surfaceVariant;
+    final activeBorder = activeColor;
+    final inactiveBorder =
+        widget.tvNavigation ? const Color(0xFF2B3441) : AppColors.border;
+    final hoverColor =
+        widget.tvNavigation ? const Color(0xFF222936) : AppColors.surfaceBright;
+    final primary =
+        widget.tvNavigation ? const Color(0xFFF8FAFC) : AppColors.textPrimary;
+    final muted =
+        widget.tvNavigation ? const Color(0xFF718096) : AppColors.textMuted;
+
+    return FocusableTapRegion(
+      onTap: onTap,
+      semanticLabel: label,
+      autofocus: selected,
+      focusNode: focusNode,
+      builder: (context, focused, hovered, pressed) {
+        final highlighted = focused || hovered || pressed;
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          decoration: BoxDecoration(
+            color:
+                selected
+                    ? activeColor.withValues(alpha: 0.15)
+                    : highlighted
+                    ? hoverColor
+                    : inactiveColor,
+            borderRadius: borderRadius,
+            border: Border.all(
+              color:
+                  focused
+                      ? activeColor
+                      : selected
+                      ? activeBorder
+                      : inactiveBorder,
+              width: focused || selected ? 1.5 : 1,
+            ),
+          ),
+          child: Text(
+            label,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: selected || focused ? primary : muted,
+              fontSize: 13,
+              fontWeight:
+                  selected || focused ? FontWeight.bold : FontWeight.normal,
+              letterSpacing: 0.5,
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -374,8 +428,8 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
   Widget _buildDrawerSection(String title) {
     return Text(
       title.toUpperCase(),
-      style: const TextStyle(
-        color: AppColors.accent,
+      style: TextStyle(
+        color: widget.tvNavigation ? const Color(0xFF718096) : AppColors.accent,
         fontSize: 11,
         fontWeight: FontWeight.bold,
         letterSpacing: 0.5,
@@ -386,8 +440,9 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
   Widget _buildDrawerSwitch(
     String label,
     bool value,
-    ValueChanged<bool> onChanged,
-  ) {
+    ValueChanged<bool> onChanged, {
+    FocusNode? focusNode,
+  }) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
@@ -395,13 +450,16 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
           Expanded(
             child: Text(
               label,
-              style: const TextStyle(
-                color: AppColors.textPrimary,
+              style: TextStyle(
+                color:
+                    widget.tvNavigation
+                        ? const Color(0xFFF8FAFC)
+                        : AppColors.textPrimary,
                 fontSize: 14,
               ),
             ),
           ),
-          Switch(value: value, onChanged: onChanged),
+          Switch(value: value, onChanged: onChanged, focusNode: focusNode),
         ],
       ),
     );
@@ -558,11 +616,18 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
     return InputDecoration(
       labelText: label,
       hintText: hint,
-      hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
+      hintStyle: TextStyle(
+        color:
+            widget.tvNavigation ? const Color(0xFF718096) : AppColors.textHint,
+        fontSize: 13,
+      ),
       filled: true,
       fillColor: fill,
       isDense: true,
-      labelStyle: const TextStyle(color: AppColors.accent, fontSize: 13),
+      labelStyle: TextStyle(
+        color: widget.tvNavigation ? const Color(0xFF718096) : AppColors.accent,
+        fontSize: 13,
+      ),
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       border: OutlineInputBorder(
         borderRadius: BorderRadius.circular(10),
@@ -574,7 +639,11 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
       ),
       focusedBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(10),
-        borderSide: const BorderSide(color: AppColors.accent, width: 1.5),
+        borderSide: BorderSide(
+          color:
+              widget.tvNavigation ? const Color(0xFF4D82FF) : AppColors.accent,
+          width: 1.5,
+        ),
       ),
     );
   }

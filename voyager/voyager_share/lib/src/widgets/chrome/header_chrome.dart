@@ -1,8 +1,7 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
+import '../common/focusable_tap_region.dart';
 import '../design_tokens.dart';
 import 'chrome_tab_pill.dart';
 
@@ -265,50 +264,6 @@ class _ViewModeIconButton extends StatefulWidget {
 }
 
 class _ViewModeIconButtonState extends State<_ViewModeIconButton> {
-  static const _longPressDuration = Duration(seconds: 2);
-
-  Timer? _longPressTimer;
-  bool _longPressTriggered = false;
-
-  void _startPress() {
-    _longPressTriggered = false;
-    _longPressTimer?.cancel();
-    final onLongPress = widget.onLongPress;
-    if (onLongPress == null) {
-      return;
-    }
-    _longPressTimer = Timer(_longPressDuration, () {
-      if (!mounted) {
-        return;
-      }
-      _longPressTriggered = true;
-      Feedback.forLongPress(context);
-      onLongPress();
-    });
-  }
-
-  void _endPress() {
-    final shouldTap = !_longPressTriggered;
-    _longPressTimer?.cancel();
-    _longPressTimer = null;
-    _longPressTriggered = false;
-    if (shouldTap) {
-      widget.onTap();
-    }
-  }
-
-  void _cancelPress() {
-    _longPressTimer?.cancel();
-    _longPressTimer = null;
-    _longPressTriggered = false;
-  }
-
-  @override
-  void dispose() {
-    _longPressTimer?.cancel();
-    super.dispose();
-  }
-
   @override
   Widget build(BuildContext context) {
     const multiIconSize = 15.0;
@@ -333,16 +288,28 @@ class _ViewModeIconButtonState extends State<_ViewModeIconButton> {
     return Tooltip(
       message: widget.multiWindow ? 'Multi session' : 'Single session',
       triggerMode: TooltipTriggerMode.manual,
-      child: Semantics(
-        button: true,
-        label: widget.multiWindow ? 'Multi session' : 'Single session',
-        child: Listener(
-          behavior: HitTestBehavior.opaque,
-          onPointerDown: (_) => _startPress(),
-          onPointerUp: (_) => _endPress(),
-          onPointerCancel: (_) => _cancelPress(),
-          child: SizedBox(width: 32, height: 32, child: Center(child: icon)),
-        ),
+      child: FocusableTapRegion(
+        onTap: widget.onTap,
+        onLongPress: widget.onLongPress,
+        semanticLabel: widget.multiWindow ? 'Multi session' : 'Single session',
+        builder:
+            (context, focused, hovered, pressed) => AnimatedContainer(
+              duration: AppDurations.fast,
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                color:
+                    focused || hovered || pressed
+                        ? AppColors.surfaceVariant
+                        : Colors.transparent,
+                borderRadius: BorderRadius.circular(AppRadius.sm),
+                border:
+                    focused
+                        ? Border.all(color: AppColors.borderFocus, width: 2)
+                        : null,
+              ),
+              child: Center(child: icon),
+            ),
       ),
     );
   }
@@ -359,44 +326,47 @@ class _CircleIconButton extends StatefulWidget {
 }
 
 class _CircleIconButtonState extends State<_CircleIconButton> {
-  bool _hovered = false;
-  bool _pressed = false;
-
   @override
   Widget build(BuildContext context) {
-    final Color bg;
-    if (_pressed) {
-      bg = AppColors.surfaceBright;
-    } else if (_hovered) {
-      bg = AppColors.surfaceVariant;
-    } else {
-      bg = Colors.transparent;
-    }
+    return FocusableTapRegion(
+      onTap: widget.onTap,
+      semanticLabel: 'Add session',
+      builder: (context, focused, hovered, pressed) {
+        final effectiveBg =
+            focused
+                ? AppColors.surfaceVariant
+                : pressed
+                ? AppColors.surfaceBright
+                : hovered
+                ? AppColors.surfaceVariant
+                : Colors.transparent;
 
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit:
-          (_) => setState(() {
-            _hovered = false;
-            _pressed = false;
-          }),
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTapDown: (_) => setState(() => _pressed = true),
-        onTapUp: (_) => setState(() => _pressed = false),
-        onTapCancel: () => setState(() => _pressed = false),
-        onTap: widget.onTap,
-        child: AnimatedContainer(
+        return AnimatedScale(
           duration: AppDurations.fast,
-          width: 24,
-          height: 24,
-          margin: const EdgeInsets.symmetric(horizontal: 4),
-          decoration: BoxDecoration(color: bg, shape: BoxShape.circle),
-          child: Center(
-            child: Icon(widget.icon, color: AppColors.textSecondary, size: 16),
+          scale: focused ? 1.12 : 1,
+          child: AnimatedContainer(
+            duration: AppDurations.fast,
+            width: 24,
+            height: 24,
+            margin: const EdgeInsets.symmetric(horizontal: 4),
+            decoration: BoxDecoration(
+              color: effectiveBg,
+              shape: BoxShape.circle,
+              border:
+                  focused
+                      ? Border.all(color: AppColors.borderFocus, width: 2)
+                      : null,
+            ),
+            child: Center(
+              child: Icon(
+                widget.icon,
+                color: AppColors.textSecondary,
+                size: 16,
+              ),
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }

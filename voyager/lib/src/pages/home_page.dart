@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:desktop_drop/desktop_drop.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
@@ -14,6 +13,7 @@ import 'package:voyager_share/voyager_share.dart'
         AppColors,
         buildTerminalStyle,
         kTerminalThemeLight,
+        kTerminalThemeTv,
         PinyinEngine,
         CandidateBar,
         CommandInputBar,
@@ -22,6 +22,9 @@ import 'package:voyager_share/voyager_share.dart'
         MultiWindowGrid,
         MultiWindowLayoutController,
         SessionWindowCard,
+        TvSessionItem,
+        TvFocusScope,
+        TvVoyagerShell,
         VpnStatusRing,
         VpnRingState;
 import 'package:xterm/xterm.dart';
@@ -33,12 +36,14 @@ import '../services/device_name_policy.dart';
 import '../services/group_store.dart';
 import '../services/launch_trace_service.dart';
 import '../services/launch_connection_policy.dart';
+import '../services/platform_capabilities.dart';
 import '../services/vpn_transport_handoff.dart';
 import '../services/vpn_service.dart';
 import '../services/terminal_manager.dart';
 import '../services/transport_models.dart';
 import '../services/transport_rollout.dart';
 import '../widgets/chrome/header_chrome.dart';
+import '../widgets/desktop_drop_wrapper.dart';
 import '../widgets/group_drawer.dart';
 import '../widgets/keyboard/hhkb_keyboard.dart';
 import '../widgets/quick_actions_bar.dart';
@@ -586,6 +591,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   }
 
   Future<String> _getDefaultDeviceName() async {
+    if (VoyagerPlatform.isTvOS) {
+      return 'Apple TV';
+    }
     final deviceInfo = DeviceInfoPlugin();
     try {
       if (kIsWeb) {
@@ -1215,7 +1223,62 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       _terminalManager.idleScrollController;
 
   bool get _useHardwareKeyboardOnly =>
-      !kIsWeb && (Platform.isMacOS || Platform.isLinux || Platform.isWindows);
+      VoyagerPlatform.usesHardwareKeyboardOnlyTerminalInput;
+
+  String get _connectionTitle =>
+      _remoteDeviceName != null && _remoteDeviceName!.isNotEmpty
+          ? 'Voyager · $_remoteDeviceName'
+          : 'Voyager';
+
+  String get _connectionSubtitle {
+    if (!_connected) {
+      return 'Disconnected';
+    }
+    final kind = _connectionManager.activeTransportKind;
+    var subtitle = switch (kind) {
+      TransportKind.lanDirect => 'Connected via LAN',
+      TransportKind.wormholeRelay => 'Connected via Wormhole',
+      TransportKind.wireguardDirect => 'Connected via WireGuard Direct',
+      TransportKind.unknown =>
+        _useWormhole ? 'Connected to Wormhole' : 'Connected to LAN',
+    };
+    final fallback = _connectionManager.activeFallbackReason;
+    if (fallback != null && fallback.isNotEmpty) {
+      subtitle = '$subtitle · fallback:$fallback';
+    }
+    return subtitle;
+  }
+
+  List<TvSessionItem> get _tvSessions {
+    return [
+      for (var i = 0; i < _visibleSessions.length; i++)
+        TvSessionItem(
+          id: _visibleSessions[i],
+          label:
+              _terminalManager.getTitle(_visibleSessions[i]) ??
+              _groupStore.getSessionName(_visibleSessions[i], i),
+          active: _visibleSessions[i] == _activeSessionId,
+        ),
+    ];
+  }
+
+  Future<void> _toggleConnection() async {
+    if (_connected) {
+      _disconnectMainConnection();
+      return;
+    }
+    try {
+      await _connect();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      _showError(e.toString());
+      setState(() {
+        _connected = false;
+      });
+    }
+  }
 
   void _setActiveSession(String sessionId, {bool requestKeyboard = false}) {
     _pendingReconnectActiveSessionId = null;
@@ -1262,7 +1325,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   }
 
   void _updateWindowTitle() {
-    if (!Platform.isMacOS && !Platform.isLinux && !Platform.isWindows) {
+    if (!VoyagerPlatform.supportsWindowTitle) {
       return;
     }
     final sessionId = _activeSessionId;
@@ -1483,7 +1546,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     return _activeSessionId;
   }
 
-  void _handleFileDrop(DropDoneDetails details) {
+  void _handleFileDrop(VoyagerDropDoneDetails details) {
     // Save the target session before resetting (calculated during drag)
     final savedTargetId = _dragTargetSessionId;
 
@@ -1610,8 +1673,222 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     controller.jumpTo(controller.position.maxScrollExtent);
   }
 
+  Widget _wrapDesktopDropTarget({required Widget child}) {
+    if (!VoyagerPlatform.supportsDesktopDrop) {
+      return child;
+    }
+    return VoyagerDesktopDropTarget(
+      enabled: VoyagerPlatform.supportsDesktopDrop,
+      onDragDone: _handleFileDrop,
+      onDragEntered: (globalPosition) {
+        setState(() {
+          _dragging = true;
+          if (_multiWindow) {
+            _dragTargetSessionId = _findTerminalAtPosition(globalPosition);
+          }
+        });
+      },
+      onDragExited:
+          () => setState(() {
+            _dragging = false;
+            _dragTargetSessionId = null;
+          }),
+      onDragUpdated: (globalPosition) {
+        if (_multiWindow) {
+          final targetId = _findTerminalAtPosition(globalPosition);
+          if (targetId != _dragTargetSessionId) {
+            setState(() {
+              _dragTargetSessionId = targetId;
+            });
+          }
+        }
+      },
+      child: child,
+    );
+  }
+
+  Widget _buildTvHome() {
+    final terminal = _activeTerminal ?? _idleTerminal;
+    final controller = _activeController ?? _idleController;
+    final scrollController = _activeScrollController ?? _idleScrollController;
+    final sessions =
+        _visibleSessions.isNotEmpty
+            ? _visibleSessions
+            : (_activeSessionId != null ? [_activeSessionId!] : <String>[]);
+    final terminalContent =
+        _multiWindow && sessions.isNotEmpty
+            ? LayoutBuilder(
+              builder: (context, constraints) {
+                final columns = _voyagerMultiWindowColumnsForWidth(
+                  constraints.maxWidth,
+                );
+                final layout = _multiWindowLayoutController.effectiveLayout(
+                  sessions,
+                  defaultColumns: columns,
+                );
+
+                return MultiWindowGrid(
+                  padding: const EdgeInsets.all(16),
+                  gap: 0,
+                  splitterVisualGap: 16,
+                  desktopHitSize: 12,
+                  touchMinHitSize: 44,
+                  mobileBreakpoint: 600,
+                  scrollPhysics: const BouncingScrollPhysics(),
+                  layout: layout,
+                  onResizeSplit: _multiWindowLayoutController.resizeSplit,
+                  onResizeEnd: () => unawaited(_commitMultiWindowLayout()),
+                  onMoveCell:
+                      (from, to, side) =>
+                          unawaited(_moveMultiWindowCell(from, to, side)),
+                  cellBuilder: (context, sessionId, index) {
+                    final label =
+                        _terminalManager.getTitle(sessionId) ??
+                        _groupStore.getSessionName(sessionId, index);
+                    return SessionWindowCard(
+                      key: _terminalCardKeyFor(sessionId),
+                      sessionId: sessionId,
+                      terminal: _terminalFor(sessionId),
+                      controller: _controllerFor(sessionId),
+                      scrollController: _scrollControllerFor(sessionId),
+                      viewKey: _viewKeyFor(sessionId),
+                      label: label,
+                      isActive: sessionId == _activeSessionId,
+                      showHHKB: false,
+                      deleteDetection: false,
+                      hardwareKeyboardOnly: true,
+                      terminalTheme: kTerminalThemeTv,
+                      terminalStyle: buildTerminalStyle(fontSize: 10),
+                      onTap: () => _setActiveSession(sessionId),
+                      onClose: () => _sendCloseSession(sessionId),
+                    );
+                  },
+                );
+              },
+            )
+            : TerminalView(
+              terminal,
+              key: _activeViewKey ?? _idleTerminalViewKey,
+              controller: controller,
+              scrollController: scrollController,
+              theme: kTerminalThemeTv,
+              autoResize: false,
+              autofocus: false,
+              deleteDetection: false,
+              hardwareKeyboardOnly: true,
+              readOnly: false,
+              keyboardType: TextInputType.none,
+              backgroundOpacity: 1.0,
+              padding: const EdgeInsets.all(16),
+              textStyle: buildTerminalStyle(fontSize: 14),
+            );
+
+    return Scaffold(
+      key: _scaffoldKey,
+      backgroundColor: const Color(0xFF0C0F14),
+      drawer: _buildGroupDrawer(context),
+      endDrawer: _buildSettingsDrawer(context),
+      body: TvVoyagerShell(
+        title: _connectionTitle,
+        subtitle: _connectionSubtitle,
+        connected: _connected,
+        pairingPending: _pairingPending,
+        sessions: _tvSessions,
+        terminal: terminalContent,
+        commandInput:
+            _showCommandInput
+                ? CommandInputBar(
+                  key: _commandInputKey,
+                  tvNavigation: true,
+                  dark: true,
+                  onSend: (text) {
+                    _sendRaw(text);
+                    _sendRaw('\r');
+                  },
+                )
+                : null,
+        keyboard:
+            _showHHKB
+                ? HHKBKeyboard(
+                  connected: _connected,
+                  fn: _hhkbFn,
+                  ctrl: _ctrl,
+                  alt: _alt,
+                  chineseMode: _chineseMode,
+                  dark: true,
+                  onToggleChineseMode: () {
+                    if (_chineseMode && _pinyinEngine.hasInput) {
+                      final raw = _pinyinEngine.commitRaw();
+                      _sendRaw(raw);
+                    }
+                    setState(() => _chineseMode = !_chineseMode);
+                    _saveSettings();
+                  },
+                  onScrollToBottom: _scrollToBottom,
+                  onKey: (key, {bool isSpecial = false}) {
+                    if (_hhkbToCommandInput) {
+                      final inputBar = _commandInputKey.currentState;
+                      if (inputBar != null) {
+                        if (key == '\r') {
+                          inputBar.submit();
+                        } else if (key == '\x7f' || key == '\b') {
+                          inputBar.deleteBack();
+                        } else if (!isSpecial && !_ctrl && !_alt) {
+                          inputBar.insertText(key);
+                        }
+                        return;
+                      }
+                    }
+                    if (_ctrl && !isSpecial) {
+                      _sendCtrl(key);
+                    } else if (_alt && !isSpecial) {
+                      _sendRaw('\x1b$key');
+                    } else {
+                      _sendRaw(key);
+                    }
+                    if (_ctrl || _alt) {
+                      setState(() {
+                        _ctrl = false;
+                        _alt = false;
+                      });
+                    }
+                  },
+                  onFnChanged: (fn) => setState(() => _hhkbFn = fn),
+                  onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
+                  onToggleAlt: () => setState(() => _alt = !_alt),
+                )
+                : null,
+        showKeyboardTools: _showKeyboardTools,
+        ctrl: _ctrl,
+        alt: _alt,
+        meta: _meta,
+        onToggleConnection: () => unawaited(_toggleConnection()),
+        onOpenGroups: () {
+          _scaffoldKey.currentState?.openDrawer();
+          _groupStore.setDeferredSync(true);
+        },
+        onOpenSettings: () => _scaffoldKey.currentState?.openEndDrawer(),
+        onAddSession: _sendCreateSession,
+        onSelectSession: (id) => _setActiveSession(id),
+        onCloseSession: _sendCloseSession,
+        onToggleCtrl: () => setState(() => _ctrl = !_ctrl),
+        onToggleAlt: () => setState(() => _alt = !_alt),
+        onToggleMeta: () => setState(() => _meta = !_meta),
+        onKey: _sendKey,
+        onPaste: _pasteClipboard,
+        onCopy: _copySelection,
+        onSend: _sendRaw,
+        onScrollToBottom: _scrollToBottom,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (VoyagerPlatform.isTelevision) {
+      return _buildTvHome();
+    }
+
     const barColor = AppColors.surface;
     const activeColor = AppColors.surfaceBright;
     const terminalBackground = AppColors.surfaceVariant;
@@ -1622,6 +1899,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
     final controller = _activeController ?? _idleController;
     final scrollController = _activeScrollController ?? _idleScrollController;
     final deleteDetection = !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+    final terminalAutofocus = !VoyagerPlatform.isTvOS;
     // connectionContent: 32 + 16(padding) = 48, tab栏: 28 + 6(padding) = 34
     const terminalTopInset = 48 + 34;
 
@@ -1653,35 +1931,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
             top:
                 MediaQuery.of(context).padding.top +
                 terminalTopInset.toDouble(),
-            child: DropTarget(
-              onDragDone: _handleFileDrop,
-              onDragEntered: (details) {
-                setState(() {
-                  _dragging = true;
-                  if (_multiWindow) {
-                    _dragTargetSessionId = _findTerminalAtPosition(
-                      details.globalPosition,
-                    );
-                  }
-                });
-              },
-              onDragExited:
-                  (_) => setState(() {
-                    _dragging = false;
-                    _dragTargetSessionId = null;
-                  }),
-              onDragUpdated: (details) {
-                if (_multiWindow) {
-                  final targetId = _findTerminalAtPosition(
-                    details.globalPosition,
-                  );
-                  if (targetId != _dragTargetSessionId) {
-                    setState(() {
-                      _dragTargetSessionId = targetId;
-                    });
-                  }
-                }
-              },
+            child: _wrapDesktopDropTarget(
               child: Stack(
                 children: [
                   _multiWindow
@@ -1716,7 +1966,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                                 scrollController: _idleScrollController,
                                 theme: kTerminalThemeLight,
                                 autoResize: true,
-                                autofocus: true,
+                                autofocus: terminalAutofocus,
                                 deleteDetection: deleteDetection,
                                 hardwareKeyboardOnly: _useHardwareKeyboardOnly,
                                 readOnly: _showHHKB,
@@ -1794,7 +2044,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
                         scrollController: scrollController,
                         theme: kTerminalThemeLight,
                         autoResize: false,
-                        autofocus: true,
+                        autofocus: terminalAutofocus,
                         deleteDetection: deleteDetection,
                         hardwareKeyboardOnly: _useHardwareKeyboardOnly,
                         readOnly: _showHHKB,
@@ -2000,6 +2250,13 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       ),
     );
 
+    if (VoyagerPlatform.isTvOS) {
+      return FocusTraversalGroup(
+        policy: ReadingOrderTraversalPolicy(),
+        child: scaffold,
+      );
+    }
+
     return scaffold;
   }
 
@@ -2146,7 +2403,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   }
 
   Widget _buildGroupDrawer(BuildContext context) {
-    return GroupDrawer(
+    final drawer = GroupDrawer(
       embedded: false,
       manager: _groupStore,
       activeSessionId: _activeSessionId,
@@ -2158,6 +2415,13 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
         return _terminalManager.getTitle(sessionId) ??
             _groupStore.getSessionName(sessionId, index);
       },
+    );
+    if (!VoyagerPlatform.isTelevision) {
+      return drawer;
+    }
+    return TvFocusScope(
+      onBack: () => Navigator.of(context).maybePop(),
+      child: drawer,
     );
   }
 
@@ -2287,6 +2551,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       vpnEnabled: _vpnEnabled,
       vpnService: _vpnAvailable ? _vpnService : null,
       onVpnEnabledChanged: _vpnAvailable ? _setVpnEnabled : null,
+      tvNavigation: VoyagerPlatform.isTelevision,
     );
   }
 
@@ -2898,12 +3163,6 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   }
 
   String _getDeviceType() {
-    if (kIsWeb) {
-      return 'web';
-    }
-    if (Platform.isIOS || Platform.isAndroid) {
-      return 'mobile';
-    }
-    return 'desktop';
+    return VoyagerPlatform.deviceType;
   }
 }

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'design_tokens.dart';
 
@@ -7,6 +8,8 @@ class CommandInputBar extends StatefulWidget {
     super.key,
     required this.onSend,
     this.readOnly = false,
+    this.tvNavigation = false,
+    this.dark = false,
   });
 
   /// Called with the input text. The caller should inject it into the terminal
@@ -15,6 +18,8 @@ class CommandInputBar extends StatefulWidget {
 
   /// When true, the TextField won't show the system keyboard (used when HHKB is active).
   final bool readOnly;
+  final bool tvNavigation;
+  final bool dark;
 
   @override
   State<CommandInputBar> createState() => CommandInputBarState();
@@ -22,7 +27,57 @@ class CommandInputBar extends StatefulWidget {
 
 class CommandInputBarState extends State<CommandInputBar> {
   final _controller = TextEditingController();
-  final _focusNode = FocusNode();
+  late final FocusNode _focusNode;
+
+  @override
+  void initState() {
+    super.initState();
+    _focusNode = FocusNode(onKeyEvent: _handleKey);
+  }
+
+  KeyEventResult _handleKey(FocusNode node, KeyEvent event) {
+    if (!widget.tvNavigation || event is! KeyDownEvent) {
+      return KeyEventResult.ignored;
+    }
+
+    final direction = switch (event.logicalKey) {
+      LogicalKeyboardKey.arrowUp => TraversalDirection.up,
+      LogicalKeyboardKey.arrowDown => TraversalDirection.down,
+      _ => null,
+    };
+
+    if (direction != null) {
+      _focusNode.unfocus();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) {
+          return;
+        }
+        final scope = FocusScope.of(context);
+        if (!scope.focusInDirection(direction)) {
+          switch (direction) {
+            case TraversalDirection.up:
+              scope.previousFocus();
+              break;
+            case TraversalDirection.down:
+              scope.nextFocus();
+              break;
+            case TraversalDirection.left:
+            case TraversalDirection.right:
+              break;
+          }
+        }
+      });
+      return KeyEventResult.handled;
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.escape ||
+        event.logicalKey == LogicalKeyboardKey.goBack) {
+      _focusNode.unfocus();
+      return KeyEventResult.handled;
+    }
+
+    return KeyEventResult.ignored;
+  }
 
   /// Insert text at the current cursor position.
   void insertText(String text) {
@@ -86,11 +141,19 @@ class CommandInputBarState extends State<CommandInputBar> {
 
   @override
   Widget build(BuildContext context) {
+    final bg = widget.dark ? const Color(0xFF161B22) : AppColors.surfaceDim;
+    final border = widget.dark ? const Color(0xFF2B3441) : AppColors.border;
+    final fill =
+        widget.dark ? const Color(0xFF0C0F14) : AppColors.surfaceVariant;
+    final text = widget.dark ? const Color(0xFFF8FAFC) : AppColors.textPrimary;
+    final hint = widget.dark ? const Color(0xFF718096) : AppColors.textMuted;
+    final focus = widget.dark ? const Color(0xFF4D82FF) : AppColors.accent;
+
     return Container(
       width: double.infinity,
-      decoration: const BoxDecoration(
-        color: AppColors.surfaceDim,
-        border: Border(top: BorderSide(color: AppColors.border)),
+      decoration: BoxDecoration(
+        color: bg,
+        border: Border(top: BorderSide(color: border)),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       child: Row(
@@ -105,42 +168,27 @@ class CommandInputBarState extends State<CommandInputBar> {
                 keyboardType:
                     widget.readOnly ? TextInputType.none : TextInputType.text,
                 showCursor: true,
-                style: const TextStyle(
-                  fontSize: 13,
-                  color: AppColors.textPrimary,
-                ),
+                style: TextStyle(fontSize: 13, color: text),
                 decoration: InputDecoration(
                   hintText: 'Type to send...',
-                  hintStyle: const TextStyle(
-                    fontSize: 13,
-                    color: AppColors.textMuted,
-                  ),
+                  hintStyle: TextStyle(fontSize: 13, color: hint),
                   contentPadding: const EdgeInsets.symmetric(
                     horizontal: 10,
                     vertical: 8,
                   ),
                   filled: true,
-                  fillColor: AppColors.surfaceVariant,
+                  fillColor: fill,
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(
-                      color: AppColors.border,
-                      width: 0.5,
-                    ),
+                    borderSide: BorderSide(color: border, width: 0.5),
                   ),
                   enabledBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(
-                      color: AppColors.border,
-                      width: 0.5,
-                    ),
+                    borderSide: BorderSide(color: border, width: 0.5),
                   ),
                   focusedBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(
-                      color: AppColors.accent,
-                      width: 1,
-                    ),
+                    borderSide: BorderSide(color: focus, width: 1),
                   ),
                 ),
                 textInputAction: TextInputAction.send,
@@ -160,11 +208,7 @@ class CommandInputBarState extends State<CommandInputBar> {
                   borderRadius: BorderRadius.circular(8),
                 ),
               ),
-              icon: const Icon(
-                Icons.send_rounded,
-                size: 16,
-                color: AppColors.accent,
-              ),
+              icon: Icon(Icons.send_rounded, size: 16, color: focus),
             ),
           ),
         ],

@@ -49,6 +49,8 @@ dependencies:
   device_info_plus: ^11.2.0
   cryptography: ^2.7.0
   window_manager: ^0.4.3
+  path_provider_tvos: ^0.0.2
+  shared_preferences_tvos: ^0.0.2
 
 dev_dependencies:
   flutter_test:

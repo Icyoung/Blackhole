@@ -368,6 +368,14 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "2.1.2"
+  path_provider_tvos:
+    dependency: "direct main"
+    description:
+      name: path_provider_tvos
+      sha256: "5c530b18f0cc9ebc63249b29fb48455eb9bd9ee9f1608dd2086847f75ff02ea0"
+      url: "https://pub.flutter-io.cn"
+    source: hosted
+    version: "0.0.2"
   path_provider_windows:
     dependency: transitive
     description:
@@ -496,6 +504,14 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "2.4.1"
+  shared_preferences_tvos:
+    dependency: "direct main"
+    description:
+      name: shared_preferences_tvos
+      sha256: a7890624e9321fbc4a2567107eeda84fd40235be2521342257f3ed4ff5c769a7
+      url: "https://pub.flutter-io.cn"
+    source: hosted
+    version: "0.0.2"
   shared_preferences_web:
     dependency: transitive
     description:

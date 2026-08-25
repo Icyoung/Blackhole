@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+
+import 'common/tv_focus_scope.dart';
+import 'common/tv_focus_text_field.dart';
 import 'design_tokens.dart';
 
 class SettingsDrawer extends StatelessWidget {
@@ -22,6 +25,7 @@ class SettingsDrawer extends StatelessWidget {
     required this.onShowKeyboardToolsChanged,
     required this.onShowCommandInputChanged,
     required this.onShowHHKBChanged,
+    this.tvNavigation = false,
   });
 
   final bool useWormhole;
@@ -42,6 +46,7 @@ class SettingsDrawer extends StatelessWidget {
   final ValueChanged<bool> onShowKeyboardToolsChanged;
   final ValueChanged<bool> onShowCommandInputChanged;
   final ValueChanged<bool> onShowHHKBChanged;
+  final bool tvNavigation;
 
   @override
   Widget build(BuildContext context) {
@@ -60,110 +65,31 @@ class SettingsDrawer extends StatelessWidget {
           bottomLeft: Radius.circular(AppRadius.lg + 4),
         ),
       ),
-      child: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.settings_outlined, color: AppColors.accent),
-                const SizedBox(width: 12),
-                Text(
-                  'VOYAGER SETTINGS',
-                  style: titleStyle?.copyWith(fontSize: 14, letterSpacing: 1),
-                ),
-              ],
-            ),
-            const SizedBox(height: 24),
-            _buildDrawerSection('Connection Address'),
-            const SizedBox(height: 12),
-            TextField(
-              controller: useWormhole ? wormholeController : urlController,
-              decoration: _buildInputDecoration(
-                'Address',
-                fieldFill,
-                fieldBorder,
+      child: TvFocusScope(
+        enabled: tvNavigation,
+        onBack: () => Navigator.of(context).maybePop(),
+        child: SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.settings_outlined, color: AppColors.accent),
+                  const SizedBox(width: 12),
+                  Text(
+                    'VOYAGER SETTINGS',
+                    style: titleStyle?.copyWith(fontSize: 14, letterSpacing: 1),
+                  ),
+                ],
               ),
-              style: const TextStyle(
-                color: AppColors.textPrimary,
-                fontSize: 14,
-              ),
-            ),
-            const SizedBox(height: 24),
-            _buildDrawerSection('Modes & Behavior'),
-            const SizedBox(height: 8),
-            _buildDrawerSwitch(
-              'LAN Mode',
-              !useWormhole,
-              (v) => onUseWormholeChanged(!v),
-            ),
-            _buildDrawerSwitch(
-              'Auto Reconnect',
-              autoReconnect,
-              onAutoReconnectChanged,
-            ),
-            _buildDrawerSwitch(
-              'Multi-Window Mode',
-              multiWindow,
-              onMultiWindowChanged,
-            ),
-            if (multiWindow &&
-                (onResetMultiWindowLayout != null ||
-                    onEqualizeMultiWindowLayout != null)) ...[
-              const SizedBox(height: 8),
-              if (onResetMultiWindowLayout != null)
-                _buildDrawerAction(
-                  'Reset Layout',
-                  Icons.restart_alt_rounded,
-                  onResetMultiWindowLayout!,
-                ),
-              if (onEqualizeMultiWindowLayout != null)
-                _buildDrawerAction(
-                  'Equalize Pane Sizes',
-                  Icons.grid_view_rounded,
-                  onEqualizeMultiWindowLayout!,
-                ),
-            ],
-            const SizedBox(height: 24),
-            _buildDrawerSection('Input'),
-            const SizedBox(height: 8),
-            _buildDrawerSwitch(
-              'Keyboard Tools',
-              showKeyboardTools,
-              onShowKeyboardToolsChanged,
-            ),
-            const SizedBox(height: 6),
-            _buildDrawerSwitch(
-              'Quick Input',
-              showCommandInput,
-              onShowCommandInputChanged,
-            ),
-            const SizedBox(height: 6),
-            _buildDrawerSwitch('HHKB Keyboard', showHHKB, onShowHHKBChanged),
-            if (useWormhole) ...[
               const SizedBox(height: 24),
-              _buildDrawerSection('Wormhole Remote Options'),
+              _buildDrawerSection('Connection Address'),
               const SizedBox(height: 12),
-              TextField(
-                controller: sessionController,
-                textCapitalization: TextCapitalization.characters,
+              TvFocusTextField(
+                controller: useWormhole ? wormholeController : urlController,
+                tvNavigation: tvNavigation,
                 decoration: _buildInputDecoration(
-                  'Session ID',
-                  fieldFill,
-                  fieldBorder,
-                  hint: '6-digit code',
-                ),
-                style: const TextStyle(
-                  color: AppColors.textPrimary,
-                  letterSpacing: 4,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: tokenController,
-                decoration: _buildInputDecoration(
-                  'Token (Optional)',
+                  'Address',
                   fieldFill,
                   fieldBorder,
                 ),
@@ -172,14 +98,100 @@ class SettingsDrawer extends StatelessWidget {
                   fontSize: 14,
                 ),
               ),
+              const SizedBox(height: 24),
+              _buildDrawerSection('Modes & Behavior'),
+              const SizedBox(height: 8),
+              _buildDrawerSwitch(
+                'LAN Mode',
+                !useWormhole,
+                (v) => onUseWormholeChanged(!v),
+              ),
+              _buildDrawerSwitch(
+                'Auto Reconnect',
+                autoReconnect,
+                onAutoReconnectChanged,
+              ),
+              _buildDrawerSwitch(
+                'Multi-Window Mode',
+                multiWindow,
+                onMultiWindowChanged,
+              ),
+              if (multiWindow &&
+                  (onResetMultiWindowLayout != null ||
+                      onEqualizeMultiWindowLayout != null)) ...[
+                const SizedBox(height: 8),
+                if (onResetMultiWindowLayout != null)
+                  _buildDrawerAction(
+                    'Reset Layout',
+                    Icons.restart_alt_rounded,
+                    onResetMultiWindowLayout!,
+                  ),
+                if (onEqualizeMultiWindowLayout != null)
+                  _buildDrawerAction(
+                    'Equalize Pane Sizes',
+                    Icons.grid_view_rounded,
+                    onEqualizeMultiWindowLayout!,
+                  ),
+              ],
+              const SizedBox(height: 24),
+              _buildDrawerSection('Input'),
+              const SizedBox(height: 8),
+              _buildDrawerSwitch(
+                'Keyboard Tools',
+                showKeyboardTools,
+                onShowKeyboardToolsChanged,
+              ),
+              const SizedBox(height: 6),
+              _buildDrawerSwitch(
+                'Quick Input',
+                showCommandInput,
+                onShowCommandInputChanged,
+              ),
+              const SizedBox(height: 6),
+              _buildDrawerSwitch('HHKB Keyboard', showHHKB, onShowHHKBChanged),
+              if (useWormhole) ...[
+                const SizedBox(height: 24),
+                _buildDrawerSection('Wormhole Remote Options'),
+                const SizedBox(height: 12),
+                TvFocusTextField(
+                  controller: sessionController,
+                  tvNavigation: tvNavigation,
+                  textCapitalization: TextCapitalization.characters,
+                  decoration: _buildInputDecoration(
+                    'Session ID',
+                    fieldFill,
+                    fieldBorder,
+                    hint: '6-digit code',
+                  ),
+                  style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    letterSpacing: 4,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                TvFocusTextField(
+                  controller: tokenController,
+                  tvNavigation: tvNavigation,
+                  decoration: _buildInputDecoration(
+                    'Token (Optional)',
+                    fieldFill,
+                    fieldBorder,
+                  ),
+                  style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 14,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 40),
+              Text(
+                'Blackhole Voyager v1.0.0',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: AppColors.textHint, fontSize: 11),
+              ),
             ],
-            const SizedBox(height: 40),
-            Text(
-              'Blackhole Voyager v1.0.0',
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: AppColors.textHint, fontSize: 11),
-            ),
-          ],
+          ),
         ),
       ),
     );

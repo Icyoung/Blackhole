@@ -1,5 +1,4 @@
-/// Shared code between Voyager and Horizon
-library voyager_share;
+// Shared code between Voyager and Horizon.
 
 // Models
 export 'src/models/multi_window_layout.dart';
@@ -23,7 +22,10 @@ export 'src/widgets/chrome/tab_clipper.dart';
 // Widgets - Common
 export 'src/widgets/common/action_button.dart';
 export 'src/widgets/common/fade_overflow_text.dart';
+export 'src/widgets/common/focusable_tap_region.dart';
 export 'src/widgets/common/status_dot.dart';
+export 'src/widgets/common/tv_focus_scope.dart';
+export 'src/widgets/common/tv_focus_text_field.dart';
 export 'src/widgets/common/vpn_status_ring.dart';
 
 // Widgets - Keyboard
@@ -43,3 +45,4 @@ export 'src/widgets/settings_drawer.dart';
 export 'src/widgets/terminal_style.dart';
 export 'src/widgets/session_window_card.dart';
 export 'src/widgets/multi_window_grid.dart';
+export 'src/widgets/tv/tv_voyager_shell.dart';

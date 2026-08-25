@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../common/focusable_tap_region.dart';
 import '../design_tokens.dart';
 
 class HHKBKey extends StatefulWidget {
@@ -12,6 +13,7 @@ class HHKBKey extends StatefulWidget {
     this.active = false,
     this.isModifier = false,
     this.fontSize = 13,
+    this.dark = false,
   });
 
   final String label;
@@ -20,6 +22,7 @@ class HHKBKey extends StatefulWidget {
   final bool isModifier;
   final VoidCallback onTap;
   final double fontSize;
+  final bool dark;
 
   @override
   State<HHKBKey> createState() => _HHKBKeyState();
@@ -52,41 +55,42 @@ class _HHKBKeyState extends State<HHKBKey> {
     final size = renderBox.size;
 
     _bubbleEntry = OverlayEntry(
-      builder: (context) => Positioned(
-        left: position.dx + size.width / 2 - 28,
-        top: position.dy - 52,
-        child: IgnorePointer(
-          child: Container(
-            width: 56,
-            height: 52,
-            decoration: BoxDecoration(
-              color: AppColors.keyBackground,
-              borderRadius: BorderRadius.circular(AppRadius.sm),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.4),
-                  blurRadius: 8,
-                  offset: const Offset(0, 4),
+      builder:
+          (context) => Positioned(
+            left: position.dx + size.width / 2 - 28,
+            top: position.dy - 52,
+            child: IgnorePointer(
+              child: Container(
+                width: 56,
+                height: 52,
+                decoration: BoxDecoration(
+                  color: AppColors.keyBackground,
+                  borderRadius: BorderRadius.circular(AppRadius.sm),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.4),
+                      blurRadius: 8,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  widget.label,
-                  style: const TextStyle(
-                    color: AppColors.textPrimary,
-                    fontSize: 24,
-                    fontWeight: FontWeight.w500,
-                    decoration: TextDecoration.none,
-                  ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      widget.label,
+                      style: const TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 24,
+                        fontWeight: FontWeight.w500,
+                        decoration: TextDecoration.none,
+                      ),
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
-        ),
-      ),
     );
 
     Overlay.of(context).insert(_bubbleEntry!);
@@ -102,76 +106,116 @@ class _HHKBKeyState extends State<HHKBKey> {
     Color bgColor;
     Color borderColor;
 
+    final keyColor = widget.dark ? const Color(0xFF11161D) : _keyColor;
+    final keyPressedColor =
+        widget.dark ? const Color(0xFF222936) : _keyPressedColor;
+    final keyBorder = widget.dark ? const Color(0xFF2B3441) : _keyBorder;
+    final modActiveColor =
+        widget.dark ? const Color(0xFF4D82FF) : _modActiveColor;
+    final modPressedColor =
+        widget.dark ? const Color(0xFF315BB7) : _modPressedColor;
+
     if (widget.isModifier) {
       if (_pressed) {
-        bgColor = widget.active ? _modPressedColor : _keyPressedColor;
+        bgColor = widget.active ? modPressedColor : keyPressedColor;
       } else {
-        bgColor = widget.active ? _modActiveColor : _keyColor;
+        bgColor = widget.active ? modActiveColor : keyColor;
       }
       borderColor =
-          widget.active ? _modActiveColor.withValues(alpha: 0.8) : _keyBorder;
+          widget.active ? modActiveColor.withValues(alpha: 0.8) : keyBorder;
     } else {
-      bgColor = _pressed ? _keyPressedColor : _keyColor;
-      borderColor = _keyBorder;
+      bgColor = _pressed ? keyPressedColor : keyColor;
+      borderColor = keyBorder;
     }
 
-    return GestureDetector(
-      onTapDown: widget.enabled
-          ? (_) {
-              setState(() => _pressed = true);
-              HapticFeedback.lightImpact();
-              _showBubble();
-            }
-          : null,
-      onTapUp: widget.enabled
-          ? (_) {
-              setState(() => _pressed = false);
-              _hideBubble();
-            }
-          : null,
-      onTapCancel: widget.enabled
-          ? () {
-              setState(() => _pressed = false);
-              _hideBubble();
-            }
-          : null,
+    return FocusableTapRegion(
       onTap: widget.enabled ? widget.onTap : null,
-      child: AnimatedContainer(
-        key: _keyKey,
-        duration: AppDurations.fast,
-        height: 42,
-        decoration: BoxDecoration(
-          color: bgColor,
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: borderColor, width: 0.5),
-          boxShadow: _pressed
-              ? [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.5),
-                    blurRadius: 1,
-                    offset: const Offset(0, 0),
-                  ),
-                ]
-              : [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.4),
-                    blurRadius: 2,
-                    offset: const Offset(0, 1.5),
-                  ),
-                ],
-        ),
-        child: Center(
-          child: Text(
-            widget.label,
-            style: TextStyle(
-              color: widget.enabled ? AppColors.textPrimary : AppColors.textMuted,
-              fontSize: widget.fontSize,
-              fontWeight:
-                  widget.isModifier ? FontWeight.bold : FontWeight.w500,
+      semanticLabel: widget.label,
+      builder: (context, focused, hovered, pressed) {
+        final effectivePressed = _pressed || pressed;
+        final effectiveBg =
+            focused
+                ? (widget.dark ? const Color(0xFF1D4ED8) : AppColors.keyPressed)
+                : effectivePressed
+                ? keyPressedColor
+                : bgColor;
+        final effectiveBorder =
+            focused
+                ? (widget.dark ? const Color(0xFF93C5FD) : AppColors.accent)
+                : borderColor;
+
+        return GestureDetector(
+          onTapDown:
+              widget.enabled
+                  ? (_) {
+                    setState(() => _pressed = true);
+                    HapticFeedback.lightImpact();
+                    _showBubble();
+                  }
+                  : null,
+          onTapUp:
+              widget.enabled
+                  ? (_) {
+                    setState(() => _pressed = false);
+                    _hideBubble();
+                  }
+                  : null,
+          onTapCancel:
+              widget.enabled
+                  ? () {
+                    setState(() => _pressed = false);
+                    _hideBubble();
+                  }
+                  : null,
+          child: AnimatedContainer(
+            key: _keyKey,
+            duration: AppDurations.fast,
+            height: 42,
+            decoration: BoxDecoration(
+              color: effectiveBg,
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(
+                color: effectiveBorder,
+                width: focused ? 1.5 : 0.5,
+              ),
+              boxShadow:
+                  effectivePressed || focused
+                      ? [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.5),
+                          blurRadius: focused ? 6 : 1,
+                          offset: const Offset(0, 0),
+                        ),
+                      ]
+                      : [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.4),
+                          blurRadius: 2,
+                          offset: const Offset(0, 1.5),
+                        ),
+                      ],
+            ),
+            child: Center(
+              child: Text(
+                widget.label,
+                style: TextStyle(
+                  color:
+                      widget.enabled
+                          ? (widget.dark
+                              ? const Color(0xFFF8FAFC)
+                              : AppColors.textPrimary)
+                          : (widget.dark
+                              ? const Color(0xFF718096)
+                              : AppColors.textMuted),
+                  fontSize: widget.fontSize,
+                  fontWeight:
+                      widget.isModifier ? FontWeight.bold : FontWeight.w500,
+                ),
+              ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }
