@@ -95,6 +95,9 @@ class AppDelegate: FlutterAppDelegate {
               result(status)
             }
           } catch {
+            if self.isVpnHelperDenied(error) {
+              self.persistVpnEnabled(false)
+            }
             DispatchQueue.main.async {
               result(
                 FlutterError(
@@ -776,6 +779,12 @@ class AppDelegate: FlutterAppDelegate {
         _ = try self.ensureVpnHelper()
       } catch {
         NSLog("Failed to sync VPN helper: %@", error.localizedDescription)
+        if self.isVpnHelperDenied(error) {
+          self.persistVpnEnabled(false)
+          DispatchQueue.main.async {
+            self.systemChannel?.invokeMethod("settingsChanged", arguments: nil)
+          }
+        }
       }
     }
   }
@@ -1165,6 +1174,45 @@ class AppDelegate: FlutterAppDelegate {
       return [:]
     }
     return settings
+  }
+
+  private func isVpnHelperDenied(_ error: Error) -> Bool {
+    let text = error.localizedDescription.lowercased()
+    return text.contains("user canceled")
+      || text.contains("user cancelled")
+      || text.contains("authorization was cancelled")
+      || text.contains("error -128")
+      || text.contains("(-128)")
+  }
+
+  private func persistVpnEnabled(_ enabled: Bool) {
+    let settingsURL = vpnHelperDataDirectoryURL().appendingPathComponent("settings.json")
+    var document: [String: Any] = [:]
+    if let data = try? Data(contentsOf: settingsURL),
+       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+      document = json
+    }
+    var settings = document["settings"] as? [String: Any] ?? [:]
+    settings["vpnEnabled"] = enabled
+    document["settings"] = settings
+    if document["version"] == nil {
+      document["version"] = 2
+    }
+    if document["devices"] == nil {
+      document["devices"] = []
+    }
+    guard JSONSerialization.isValidJSONObject(document),
+          let out = try? JSONSerialization.data(
+            withJSONObject: document,
+            options: [.prettyPrinted]
+          ) else {
+      return
+    }
+    try? FileManager.default.createDirectory(
+      at: settingsURL.deletingLastPathComponent(),
+      withIntermediateDirectories: true
+    )
+    try? out.write(to: settingsURL)
   }
 
   private func runAdministratorShell(_ shellCommand: String) throws {

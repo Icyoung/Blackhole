@@ -40,17 +40,22 @@ void main() {
             decoded is Map<String, dynamic>
                 ? Map<String, dynamic>.from(decoded)
                 : <String, dynamic>{};
-        final saved = settingsDocumentAfterInitSave(document);
+        final settings = Map<String, dynamic>.from(
+          document['settings'] as Map<String, dynamic>? ?? const {},
+        );
+        final vpnEnabled = resolveVpnEnabledPref(settings);
+        settings['vpnEnabled'] = vpnEnabled;
+        document['settings'] = settings;
         await file.writeAsString(
-          const JsonEncoder.withIndent('  ').convert(saved),
+          const JsonEncoder.withIndent('  ').convert(document),
         );
 
         final roundTrip =
             jsonDecode(await file.readAsString()) as Map<String, dynamic>;
-        final settings = roundTrip['settings'] as Map<String, dynamic>;
-        expect(settings.containsKey('vpnEnabled'), isTrue);
-        expect(settings['vpnEnabled'], isNot(false));
-        expect(settings['vpnEnabled'], isTrue);
+        final savedSettings = roundTrip['settings'] as Map<String, dynamic>;
+        expect(savedSettings.containsKey('vpnEnabled'), isTrue);
+        expect(savedSettings['vpnEnabled'], isNot(false));
+        expect(savedSettings['vpnEnabled'], isTrue);
       },
     );
 
@@ -60,20 +65,20 @@ void main() {
         <String, dynamic>{'settings': <String, dynamic>{}},
         <String, dynamic>{'version': 2, 'settings': <String, dynamic>{}},
       ]) {
-        final saved = settingsDocumentAfterInitSave(document);
-        expect(
-          (saved['settings'] as Map)['vpnEnabled'],
-          isTrue,
-          reason: '$document',
+        final settings = Map<String, dynamic>.from(
+          document['settings'] as Map<String, dynamic>? ?? const {},
         );
+        settings['vpnEnabled'] = resolveVpnEnabledPref(settings);
+        expect(settings['vpnEnabled'], isTrue, reason: '$document');
       }
     });
 
     test('existing false survives settings init/save', () {
-      final saved = settingsDocumentAfterInitSave({
-        'settings': {'vpnEnabled': false, 'hostName': 'kept'},
-      });
-      final settings = saved['settings'] as Map<String, dynamic>;
+      final settings = <String, dynamic>{
+        'vpnEnabled': false,
+        'hostName': 'kept',
+      };
+      settings['vpnEnabled'] = resolveVpnEnabledPref(settings);
       expect(settings['vpnEnabled'], isFalse);
       expect(settings['hostName'], 'kept');
     });
@@ -125,6 +130,15 @@ void main() {
           PlatformException(
             code: 'VPN_HELPER',
             message: 'The authorization was cancelled by the user.',
+          ),
+        ),
+        isTrue,
+      );
+      expect(
+        isVpnHelperDenied(
+          PlatformException(
+            code: 'VPN_HELPER',
+            message: '36:70: execution error: User canceled. (-128)',
           ),
         ),
         isTrue,

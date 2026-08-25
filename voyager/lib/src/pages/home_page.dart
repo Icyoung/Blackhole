@@ -157,7 +157,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   final VpnTransportHandoffCoordinator _vpnHandoff =
       VpnTransportHandoffCoordinator();
   EndpointInfo? _vpnEndpointInfo;
-  bool _vpnEnabled = false;
+  bool _vpnEnabled = VpnService.isSupportedPlatform;
   bool _vpnUpgradeAttempted = false;
   bool _vpnNativeStartInFlight = false;
   String? _vpnPrivateKey;

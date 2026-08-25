@@ -1412,21 +1412,54 @@ void main() {
   });
 
   group('VpnService.isHelperDenied', () {
-    test('matches osascript cancel and ignores other helper errors', () {
+    test('matches Voyager macOS osascript cancel stderr', () {
       expect(
         VpnService.isHelperDenied(
-          PlatformException(code: 'TUN', message: 'User canceled.'),
+          PlatformException(
+            code: 'HELPER',
+            message: '36:70: execution error: User canceled. (-128)',
+          ),
         ),
         isTrue,
       );
       expect(
         VpnService.isHelperDenied(
+          PlatformException(code: 'HELPER', message: 'User canceled.'),
+        ),
+        isTrue,
+      );
+    });
+
+    test('does not match helper start timeout or missing binary', () {
+      expect(
+        VpnService.isHelperDenied(
           PlatformException(
-            code: 'TUN',
+            code: 'HELPER',
+            message: 'VPN helper failed to start',
+          ),
+        ),
+        isFalse,
+      );
+      expect(
+        VpnService.isHelperDenied(
+          PlatformException(
+            code: 'HELPER',
             message: 'VPN helper binary not found in app bundle',
           ),
         ),
         isFalse,
+      );
+    });
+
+    test('matches Android VPN permission deny', () {
+      expect(
+        VpnService.isHelperDenied(
+          PlatformException(
+            code: 'VPN_DENIED',
+            message: 'User denied VPN permission',
+          ),
+        ),
+        isTrue,
       );
     });
   });

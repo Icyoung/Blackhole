@@ -197,8 +197,24 @@ class VpnPlugin: NSObject, FlutterPlugin {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         proc.arguments = ["-e", script]
+        let stderrPipe = Pipe()
+        proc.standardError = stderrPipe
         try proc.run()
         proc.waitUntilExit()
+        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderr = String(data: stderrData, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if proc.terminationStatus != 0 {
+            throw NSError(
+                domain: "VpnPlugin",
+                code: Int(proc.terminationStatus),
+                userInfo: [
+                    NSLocalizedDescriptionKey: stderr.isEmpty
+                        ? "Administrator command failed."
+                        : stderr
+                ]
+            )
+        }
         for _ in 0..<20 {
             if FileManager.default.fileExists(atPath: helperSocketPath) { return }
             Thread.sleep(forTimeInterval: 0.2)

@@ -201,16 +201,33 @@ class VpnService extends ChangeNotifier {
     };
   }
 
-  /// Missing user pref is on for supported platforms. Explicit false is kept.
   static bool resolveUserEnabled(bool? stored) => stored ?? isSupportedPlatform;
 
   static bool isHelperDenied(Object error) {
-    final text = error.toString().toLowerCase();
-    return text.contains('user canceled') ||
-        text.contains('user cancelled') ||
-        text.contains('authorization was cancelled') ||
-        text.contains('error -128') ||
-        text.contains('(-128)');
+    if (error is PlatformException) {
+      final code = error.code.toLowerCase();
+      if (code == 'vpn_denied') {
+        return true;
+      }
+      if (_isDeniedConsentText(error.message) ||
+          _isDeniedConsentText(error.details?.toString())) {
+        return true;
+      }
+    }
+    return _isDeniedConsentText(error.toString());
+  }
+
+  static bool _isDeniedConsentText(String? text) {
+    if (text == null || text.isEmpty) {
+      return false;
+    }
+    final lower = text.toLowerCase();
+    return lower.contains('user canceled') ||
+        lower.contains('user cancelled') ||
+        lower.contains('authorization was cancelled') ||
+        lower.contains('user denied vpn permission') ||
+        lower.contains('error -128') ||
+        lower.contains('(-128)');
   }
 
   /// iOS PacketTunnelProvider rotates dest internally.
@@ -478,16 +495,16 @@ class VpnService extends ChangeNotifier {
     _directSessionReady = payload['directSessionReady'] as bool?;
     _timeSinceLastHandshakeSecs =
         (payload['timeSinceLastHandshakeSecs'] as num?)?.toInt();
-    _pendingDirectQueueDepth = (payload['pendingDirectQueueDepth'] as num?)
-        ?.toInt();
+    _pendingDirectQueueDepth =
+        (payload['pendingDirectQueueDepth'] as num?)?.toInt();
     _directWriteAttempts = (payload['directWriteAttempts'] as num?)?.toInt();
     _directWriteErrors = (payload['directWriteErrors'] as num?)?.toInt();
     _directHandshakePacketsPrepared =
         (payload['directHandshakePacketsPrepared'] as num?)?.toInt();
     _directHandshakePacketsSuppressed =
         (payload['directHandshakePacketsSuppressed'] as num?)?.toInt();
-    _directProbeWriteAttempts = (payload['directProbeWriteAttempts'] as num?)
-        ?.toInt();
+    _directProbeWriteAttempts =
+        (payload['directProbeWriteAttempts'] as num?)?.toInt();
     _lastDirectWriteLabel = payload['lastDirectWriteLabel'] as String?;
     _lastDirectWriteError = payload['lastDirectWriteError'] as String?;
     _error = payload['error'] as String?;

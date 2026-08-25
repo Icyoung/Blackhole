@@ -4,7 +4,7 @@ import 'package:voyager_share/voyager_share.dart';
 import '../services/vpn_service.dart';
 
 class SettingsDrawer extends StatefulWidget {
-  const SettingsDrawer({
+  SettingsDrawer({
     super.key,
     required this.useWormhole,
     required this.autoReconnect,
@@ -22,10 +22,10 @@ class SettingsDrawer extends StatefulWidget {
     required this.onShowKeyboardToolsChanged,
     required this.onShowCommandInputChanged,
     required this.onShowHHKBChanged,
-    this.vpnEnabled = false,
+    bool? vpnEnabled,
     this.vpnService,
     this.onVpnEnabledChanged,
-  });
+  }) : vpnEnabled = vpnEnabled ?? VpnService.isSupportedPlatform;
 
   final bool useWormhole;
   final bool autoReconnect;

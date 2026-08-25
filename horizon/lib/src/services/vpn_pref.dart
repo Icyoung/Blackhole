@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 
-/// Missing [vpnEnabled] is on. An explicit false is kept.
 bool resolveVpnEnabledPref(Map<String, dynamic>? settings) {
   final value = settings?['vpnEnabled'];
   if (value is bool) {
@@ -13,17 +12,6 @@ bool resolveVpnEnabledPref(Map<String, dynamic>? settings) {
 File horizonSettingsFile({String? home}) {
   final resolved = home ?? Platform.environment['HOME'] ?? '';
   return File('$resolved/.blackhole/horizon/settings.json');
-}
-
-/// Settings-page load then save of vpnEnabled, leaving other keys intact.
-Map<String, dynamic> settingsDocumentAfterInitSave(
-  Map<String, dynamic> document,
-) {
-  final settings = Map<String, dynamic>.from(
-    document['settings'] as Map<String, dynamic>? ?? const {},
-  );
-  settings['vpnEnabled'] = resolveVpnEnabledPref(settings);
-  return {...document, 'settings': settings};
 }
 
 bool isVpnHelperDenied(Object error) {

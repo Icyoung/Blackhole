@@ -364,7 +364,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     _settingsDebounce = Timer(const Duration(milliseconds: 300), () {
       debugPrint('[Horizon] Native settings changed, reloading...');
       // Re-apply config from native settings and restart daemon if needed.
-      _reloadAppMode();
+      _reloadAppMode(syncVpnHelper: false);
     });
   }
 
@@ -404,11 +404,15 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     return trimmed.isEmpty ? null : trimmed;
   }
 
-  Future<void> _ensureLocalDaemonFromNativeSettings() async {
+  Future<void> _ensureLocalDaemonFromNativeSettings({
+    bool syncVpnHelper = true,
+  }) async {
     final nativeSettings = await _readNativeSettings();
     final vpnEnabled = resolveVpnEnabledPref(nativeSettings);
-    // Don't block startup on the admin password dialog.
-    unawaited(_ensureNativeVpnHelper(vpnEnabled: vpnEnabled));
+    if (syncVpnHelper) {
+      // Don't block startup on the admin password dialog.
+      unawaited(_ensureNativeVpnHelper(vpnEnabled: vpnEnabled));
+    }
     final lanEnabled = _readBool(nativeSettings['lanEnabled'], fallback: true);
     final lanPort = _readInt(nativeSettings['lanPort']) ?? 9527;
     final hostName = _readString(nativeSettings['hostName']) ?? _deviceName;
@@ -478,7 +482,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _reloadAppMode() async {
+  Future<void> _reloadAppMode({bool syncVpnHelper = true}) async {
     final nativeSettings = await _readNativeSettings();
     final appMode = nativeSettings['appMode'] as String? ?? 'server';
     debugPrint('[Mode] Native settings changed: appMode=$appMode');
@@ -541,7 +545,9 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
           final wsUri = Uri.tryParse(lanUrl);
           if (wsUri != null && DaemonManager.isLocalWs(wsUri)) {
             debugPrint('[Mode] Client LAN local: starting daemon');
-            await _ensureLocalDaemonFromNativeSettings();
+            await _ensureLocalDaemonFromNativeSettings(
+              syncVpnHelper: syncVpnHelper,
+            );
           } else {
             await _connect();
           }
@@ -559,7 +565,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
         _useWormhole = false;
       }
 
-      await _ensureLocalDaemonFromNativeSettings();
+      await _ensureLocalDaemonFromNativeSettings(syncVpnHelper: syncVpnHelper);
     }
 
     if (mounted) {
