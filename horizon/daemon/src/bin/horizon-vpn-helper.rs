@@ -11,11 +11,12 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use tracing::{error, info, warn};
 use vpn_helper_protocol::{
@@ -39,13 +40,30 @@ fn main() {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
     let args = parse_args(std::env::args().skip(1).collect());
-    if let Err(error) = run(args.socket_path, args.pid_path) {
+    let (socket_path, pid_path) = match (args.socket_path, args.pid_path) {
+        (Some(socket_path), Some(pid_path)) => (socket_path, pid_path),
+        (socket_path, pid_path) => {
+            let dir = wait_for_default_data_dir();
+            (
+                socket_path.unwrap_or_else(|| dir.join(DEFAULT_SOCKET_NAME)),
+                pid_path.unwrap_or_else(|| dir.join("vpn-helper.pid")),
+            )
+        }
+    };
+    if let Err(error) = run(socket_path, pid_path) {
         error!("{error}");
         std::process::exit(1);
     }
 }
 
 fn run(socket_path: PathBuf, pid_path: PathBuf) -> Result<(), String> {
+    if helper_socket_is_live(&socket_path) {
+        info!(
+            "VPN helper socket already active at {}; exiting",
+            socket_path.display()
+        );
+        return Ok(());
+    }
     if let Some(parent) = socket_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create helper socket directory: {e}"))?;
@@ -727,8 +745,8 @@ fn close_fd(fd: RawFd) {
 }
 
 struct ParsedArgs {
-    socket_path: PathBuf,
-    pid_path: PathBuf,
+    socket_path: Option<PathBuf>,
+    pid_path: Option<PathBuf>,
 }
 
 fn parse_args(args: Vec<String>) -> ParsedArgs {
@@ -752,40 +770,68 @@ fn parse_args(args: Vec<String>) -> ParsedArgs {
     }
 
     ParsedArgs {
-        socket_path: socket_path.unwrap_or_else(default_socket_path),
-        pid_path: pid_path.unwrap_or_else(default_pid_path),
+        socket_path,
+        pid_path,
     }
 }
 
-fn default_pid_path() -> PathBuf {
-    default_data_dir().join("vpn-helper.pid")
+fn helper_socket_is_live(path: &Path) -> bool {
+    path.exists() && UnixStream::connect(path).is_ok()
 }
 
-fn default_socket_path() -> PathBuf {
-    default_data_dir().join(DEFAULT_SOCKET_NAME)
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DataDirResolution {
+    Ready(PathBuf),
+    WaitingForConsoleUser,
 }
 
-fn default_data_dir() -> PathBuf {
-    helper_home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".blackhole")
-        .join("horizon")
-}
-
-fn helper_home_dir() -> Option<PathBuf> {
-    if let Ok(home) = std::env::var("HOME") {
-        let trimmed = home.trim();
-        if !trimmed.is_empty() && !is_root_home(trimmed) {
-            return Some(PathBuf::from(trimmed));
-        }
-    }
-    #[cfg(target_os = "macos")]
+fn data_dir_resolution(
+    home: Option<&str>,
+    euid: u32,
+    console_home: Option<&Path>,
+) -> DataDirResolution {
+    if let Some(home) = home
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !is_root_home(value))
     {
-        if let Some(home) = macos_console_user_home() {
-            return Some(home);
+        return DataDirResolution::Ready(PathBuf::from(home).join(".blackhole").join("horizon"));
+    }
+    if let Some(home) = console_home {
+        return DataDirResolution::Ready(home.join(".blackhole").join("horizon"));
+    }
+    if euid == 0 {
+        return DataDirResolution::WaitingForConsoleUser;
+    }
+    DataDirResolution::Ready(PathBuf::from("/tmp").join(".blackhole").join("horizon"))
+}
+
+fn try_default_data_dir() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok();
+    let console_home = macos_console_user_home();
+    match data_dir_resolution(
+        home.as_deref(),
+        unsafe { libc::geteuid() },
+        console_home.as_deref(),
+    ) {
+        DataDirResolution::Ready(path) => Some(path),
+        DataDirResolution::WaitingForConsoleUser => None,
+    }
+}
+
+fn wait_for_default_data_dir() -> PathBuf {
+    if let Some(dir) = try_default_data_dir() {
+        return dir;
+    }
+    if unsafe { libc::geteuid() } != 0 {
+        return PathBuf::from("/tmp").join(".blackhole").join("horizon");
+    }
+    info!("waiting for a console user before binding the VPN helper socket");
+    loop {
+        thread::sleep(Duration::from_secs(1));
+        if let Some(dir) = try_default_data_dir() {
+            return dir;
         }
     }
-    None
 }
 
 fn is_root_home(home: &str) -> bool {
@@ -817,6 +863,11 @@ fn macos_console_user_home() -> Option<PathBuf> {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+fn macos_console_user_home() -> Option<PathBuf> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -829,8 +880,8 @@ mod tests {
             "--pid-file".into(),
             "/tmp/custom.pid".into(),
         ]);
-        assert_eq!(parsed.socket_path, PathBuf::from("/tmp/custom.sock"));
-        assert_eq!(parsed.pid_path, PathBuf::from("/tmp/custom.pid"));
+        assert_eq!(parsed.socket_path, Some(PathBuf::from("/tmp/custom.sock")));
+        assert_eq!(parsed.pid_path, Some(PathBuf::from("/tmp/custom.pid")));
     }
 
     #[test]
@@ -839,5 +890,65 @@ mod tests {
         assert!(is_root_home("/root"));
         assert!(!is_root_home("/Users/tester"));
         assert!(!is_root_home("/home/tester"));
+    }
+
+    #[test]
+    fn root_without_console_user_does_not_use_tmp_or_var_root() {
+        for home in [
+            Some("/var/root"),
+            Some("/root"),
+            Some("  /var/root  "),
+            None,
+        ] {
+            match data_dir_resolution(home, 0, None) {
+                DataDirResolution::WaitingForConsoleUser => {}
+                DataDirResolution::Ready(path) => {
+                    panic!("root with home {home:?} must not bind under {path:?}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn root_uses_console_home_when_env_home_is_var_root() {
+        let path = match data_dir_resolution(Some("/var/root"), 0, Some(Path::new("/Users/alice")))
+        {
+            DataDirResolution::Ready(path) => path,
+            DataDirResolution::WaitingForConsoleUser => {
+                panic!("console user home should be used")
+            }
+        };
+        assert_eq!(path, PathBuf::from("/Users/alice/.blackhole/horizon"));
+        assert!(!path.starts_with("/tmp"));
+        assert!(!path.starts_with("/var/root"));
+    }
+
+    #[test]
+    fn unprivileged_without_home_may_use_tmp() {
+        match data_dir_resolution(None, 501, None) {
+            DataDirResolution::Ready(path) => {
+                assert_eq!(path, PathBuf::from("/tmp/.blackhole/horizon"));
+            }
+            DataDirResolution::WaitingForConsoleUser => {
+                panic!("unprivileged helper should not wait for a console user")
+            }
+        }
+    }
+
+    #[test]
+    fn helper_socket_is_live_when_listener_owns_path() {
+        let path = std::env::temp_dir().join(format!(
+            "horizon-helper-live-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_file(&path);
+        let _listener = UnixListener::bind(&path).expect("bind");
+        assert!(helper_socket_is_live(&path));
+        let _ = fs::remove_file(&path);
+        assert!(!helper_socket_is_live(&path));
     }
 }

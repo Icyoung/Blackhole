@@ -869,23 +869,21 @@ class AppDelegate: FlutterAppDelegate {
       )
     }
 
-    if try startVpnHelperViaSMAppServiceIfAvailable() {
+    if startVpnHelperViaSMAppServiceIfAvailable() {
       return
     }
 
     try startVpnHelperViaAdministratorShell(helperURL: helperURL)
   }
 
-  private func startVpnHelperViaSMAppServiceIfAvailable() throws -> Bool {
+  private func startVpnHelperViaSMAppServiceIfAvailable() -> Bool {
     guard #available(macOS 13.0, *) else {
       return false
     }
     let service = SMAppService.daemon(plistName: vpnHelperLaunchdPlistName)
     switch service.status {
     case .enabled:
-      kickstartVpnHelperLaunchdJob()
-      try waitUntilVpnHelperRunning()
-      return true
+      return startEnabledVpnHelperJob()
     case .requiresApproval:
       openVpnHelperLoginItemsIfNeeded()
       return false
@@ -896,8 +894,7 @@ class AppDelegate: FlutterAppDelegate {
         NSLog("VPN helper SMAppService register failed: %@", error.localizedDescription)
       }
       if service.status == .enabled {
-        try waitUntilVpnHelperRunning()
-        return true
+        return startEnabledVpnHelperJob()
       }
       if service.status == .requiresApproval {
         openVpnHelperLoginItemsIfNeeded()
@@ -906,6 +903,22 @@ class AppDelegate: FlutterAppDelegate {
     @unknown default:
       return false
     }
+  }
+
+  private func startEnabledVpnHelperJob() -> Bool {
+    if isVpnHelperRunning() {
+      return true
+    }
+    let kickstarted = kickstartVpnHelperLaunchdJob()
+    if vpnHelperBecameRunning() {
+      return true
+    }
+    if !kickstarted {
+      NSLog(
+        "VPN helper launchctl kickstart failed with a non-zero exit; falling back to osascript"
+      )
+    }
+    return false
   }
 
   @available(macOS 13.0, *)
@@ -919,10 +932,10 @@ class AppDelegate: FlutterAppDelegate {
     }
   }
 
-  private func kickstartVpnHelperLaunchdJob() {
+  private func kickstartVpnHelperLaunchdJob() -> Bool {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-    process.arguments = ["kickstart", "-k", "system/\(vpnHelperLaunchdLabel)"]
+    process.arguments = ["kickstart", "system/\(vpnHelperLaunchdLabel)"]
     process.standardOutput = Pipe()
     process.standardError = Pipe()
     do {
@@ -930,7 +943,9 @@ class AppDelegate: FlutterAppDelegate {
       process.waitUntilExit()
     } catch {
       NSLog("VPN helper launchctl kickstart failed: %@", error.localizedDescription)
+      return false
     }
+    return process.terminationStatus == 0
   }
 
   private func startVpnHelperViaAdministratorShell(helperURL: URL) throws {
@@ -953,13 +968,20 @@ class AppDelegate: FlutterAppDelegate {
     try waitUntilVpnHelperRunning()
   }
 
-  private func waitUntilVpnHelperRunning() throws {
+  private func vpnHelperBecameRunning() -> Bool {
     let deadline = Date().addingTimeInterval(10)
     while Date() < deadline {
       if isVpnHelperRunning() {
-        return
+        return true
       }
       Thread.sleep(forTimeInterval: 0.1)
+    }
+    return false
+  }
+
+  private func waitUntilVpnHelperRunning() throws {
+    if vpnHelperBecameRunning() {
+      return
     }
 
     throw NSError(
@@ -1070,15 +1092,27 @@ class AppDelegate: FlutterAppDelegate {
     guard FileManager.default.fileExists(atPath: vpnHelperSocketURL().path) else {
       return false
     }
+
+    let result = kill(Int32(pid), 0)
+    let killErrno = errno
+    let alive = result == 0 || killErrno == EPERM
+    guard alive else {
+      return false
+    }
+
     guard let helperPath = bundledVpnHelperURL()?.path else {
       return false
     }
-    guard
-      let command = currentVpnHelperCommand(pid: pid),
-      command.contains(helperPath)
-    else {
-      return false
+    if let executablePath = processExecutablePath(pid: pid) {
+      guard vpnHelperExecutableMatches(executablePath, helperPath: helperPath) else {
+        return false
+      }
+    } else if let command = currentVpnHelperCommand(pid: pid) {
+      guard vpnHelperExecutableMatches(command, helperPath: helperPath) else {
+        return false
+      }
     }
+
     if
       let helperAttrs = try? FileManager.default.attributesOfItem(atPath: helperPath),
       let helperModified = helperAttrs[.modificationDate] as? Date,
@@ -1088,12 +1122,37 @@ class AppDelegate: FlutterAppDelegate {
       return false
     }
 
-    let result = kill(Int32(pid), 0)
-    if result == 0 {
+    return true
+  }
+
+  private func processExecutablePath(pid: Int) -> String? {
+    var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+    let length = proc_pidpath(Int32(pid), &buffer, UInt32(buffer.count))
+    guard length > 0 else {
+      return nil
+    }
+    return String(cString: buffer)
+  }
+
+  private func vpnHelperExecutableMatches(_ executable: String, helperPath: String) -> Bool {
+    let exe = executable.trimmingCharacters(in: .whitespacesAndNewlines)
+    if exe.isEmpty {
+      return false
+    }
+    if exe == helperPath || exe.contains(helperPath) {
       return true
     }
-    let error = errno
-    return error == EPERM
+    let resolvedHelper = URL(fileURLWithPath: helperPath).resolvingSymlinksInPath().path
+    if exe.contains(resolvedHelper) {
+      return true
+    }
+    let firstToken = exe.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? exe
+    if firstToken == "Contents/Resources/horizon-vpn-helper"
+      || firstToken.hasSuffix("/Contents/Resources/horizon-vpn-helper")
+    {
+      return true
+    }
+    return (firstToken as NSString).lastPathComponent == "horizon-vpn-helper"
   }
 
   private func readNativeSettings() -> [String: Any] {
