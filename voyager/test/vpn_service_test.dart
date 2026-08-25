@@ -519,6 +519,7 @@ void main() {
           'udpPacketsOut': 40,
           'wgTxBytes': 1024,
           'wgRxBytes': 2048,
+          'timeSinceLastHandshakeSecs': 4,
         };
 
         await service.refreshStatus();
@@ -529,6 +530,7 @@ void main() {
         expect(service.udpPacketsOut, 40);
         expect(service.wgTxBytes, 1024);
         expect(service.wgRxBytes, 2048);
+        expect(service.timeSinceLastHandshakeSecs, 4);
       });
 
       test('direct session fields extraction', () async {
@@ -629,10 +631,11 @@ void main() {
 
         // Provide a payload with a timestamp BEFORE the negotiation started
         // and a status that should be filtered (connecting or connected).
-        final staleTime = DateTime.now()
-            .toUtc()
-            .subtract(const Duration(seconds: 10))
-            .toIso8601String();
+        final staleTime =
+            DateTime.now()
+                .toUtc()
+                .subtract(const Duration(seconds: 10))
+                .toIso8601String();
 
         mockGetStatusResult = {
           'status': 'connected',
@@ -651,10 +654,11 @@ void main() {
       test('non-stale payload during negotiation is applied', () async {
         service.beginNegotiation();
 
-        final freshTime = DateTime.now()
-            .toUtc()
-            .add(const Duration(seconds: 5))
-            .toIso8601String();
+        final freshTime =
+            DateTime.now()
+                .toUtc()
+                .add(const Duration(seconds: 5))
+                .toIso8601String();
 
         mockGetStatusResult = {
           'status': 'connected',
@@ -672,10 +676,11 @@ void main() {
       test('disconnected payload during negotiation is not filtered', () async {
         service.beginNegotiation();
 
-        final staleTime = DateTime.now()
-            .toUtc()
-            .subtract(const Duration(seconds: 10))
-            .toIso8601String();
+        final staleTime =
+            DateTime.now()
+                .toUtc()
+                .subtract(const Duration(seconds: 10))
+                .toIso8601String();
 
         mockGetStatusResult = {
           'status': 'disconnected',
@@ -691,10 +696,11 @@ void main() {
       test('error payload during negotiation is not filtered', () async {
         service.beginNegotiation();
 
-        final staleTime = DateTime.now()
-            .toUtc()
-            .subtract(const Duration(seconds: 10))
-            .toIso8601String();
+        final staleTime =
+            DateTime.now()
+                .toUtc()
+                .subtract(const Duration(seconds: 10))
+                .toIso8601String();
 
         mockGetStatusResult = {
           'status': 'error',
@@ -728,10 +734,11 @@ void main() {
       test('connected payload clears negotiationStartedAt', () async {
         service.beginNegotiation();
 
-        final freshTime = DateTime.now()
-            .toUtc()
-            .add(const Duration(seconds: 5))
-            .toIso8601String();
+        final freshTime =
+            DateTime.now()
+                .toUtc()
+                .add(const Duration(seconds: 5))
+                .toIso8601String();
 
         mockGetStatusResult = {
           'status': 'connected',
@@ -746,10 +753,11 @@ void main() {
         // Now a second payload that would have been stale under the old
         // negotiation time should be applied because negotiationStartedAt
         // was cleared by the connected payload.
-        final oldTime = DateTime.now()
-            .toUtc()
-            .subtract(const Duration(seconds: 60))
-            .toIso8601String();
+        final oldTime =
+            DateTime.now()
+                .toUtc()
+                .subtract(const Duration(seconds: 60))
+                .toIso8601String();
 
         mockGetStatusResult = {
           'status': 'connected',
@@ -782,6 +790,7 @@ void main() {
         expect(service.udpPacketsOut, isNull);
         expect(service.wgTxBytes, isNull);
         expect(service.wgRxBytes, isNull);
+        expect(service.timeSinceLastHandshakeSecs, isNull);
         expect(service.activeDirectCandidateIndex, isNull);
         expect(service.pendingDirectQueueDepth, isNull);
         expect(service.directWriteAttempts, isNull);
@@ -879,6 +888,7 @@ void main() {
         final methods = methodCalls.map((c) => c.method).toList();
         expect(methods, contains('start'));
         expect(methods, contains('getStatus'));
+        expect(methods, isNot(contains('setActiveCandidate')));
         // getStatus should come after start.
         expect(
           methods.indexOf('start'),
@@ -1042,13 +1052,129 @@ void main() {
   // ---------------------------------------------------------------------------
   // VpnService on unsupported platform (non-iOS)
   // ---------------------------------------------------------------------------
+  group('planUserspaceDirectCandidates', () {
+    test('keeps fallback when configured candidates are lan only', () {
+      final planned = planUserspaceDirectCandidates(
+        configured: [
+          {
+            'addr': '192.168.1.219',
+            'port': 51820,
+            'scope': 'lan',
+            'priority': 250,
+            'source': 'local_interface:en1',
+          },
+          {
+            'addr': '100.65.238.106',
+            'port': 51820,
+            'scope': 'lan',
+            'priority': 250,
+            'source': 'local_interface:utun7',
+          },
+        ],
+        fallbackAddr: '14.153.180.50',
+        fallbackPort: 51820,
+      );
+
+      expect(planned.map((c) => '${c['addr']}:${c['port']}').toList(), [
+        '192.168.1.219:51820',
+        '100.65.238.106:51820',
+        '14.153.180.50:51820',
+      ]);
+      expect(planned.last['scope'], 'legacy');
+    });
+
+    test('does not duplicate configured endpoint when fallback matches', () {
+      final planned = planUserspaceDirectCandidates(
+        configured: [
+          {
+            'addr': '14.153.180.50',
+            'port': 51820,
+            'scope': 'public_observed',
+            'priority': 180,
+            'source': 'wormhole_observed',
+          },
+        ],
+        fallbackAddr: '14.153.180.50',
+        fallbackPort: 51820,
+      );
+
+      expect(planned, hasLength(1));
+      expect(planned.first['scope'], 'public_observed');
+    });
+  });
+
+  group('VpnService userspace candidate rotation', () {
+    TestWidgetsFlutterBinding.ensureInitialized();
+
+    late VpnService service;
+    final List<MethodCall> methodCalls = [];
+    const channel = MethodChannel('com.blackhole.voyager/vpn');
+
+    setUp(() {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      methodCalls.clear();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall call) async {
+            methodCalls.add(call);
+            if (call.method == 'getStatus') {
+              return {'status': 'connecting'};
+            }
+            return null;
+          });
+      service = VpnService();
+    });
+
+    tearDown(() {
+      service.dispose();
+      debugDefaultTargetPlatformOverride = null;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    test('start sets the first candidate on android', () async {
+      await service.start(
+        const VpnConfig(
+          privateKey: 'pk',
+          peerPublicKey: 'ppk',
+          serverAddr: '1.2.3.4',
+          serverPort: 51820,
+          clientIp: '10.13.37.2',
+          serverIp: '10.13.37.1',
+          directCandidates: [
+            {'addr': '192.168.1.5', 'port': 51821, 'priority': 250},
+            {'addr': '203.0.113.5', 'port': 51822, 'priority': 100},
+          ],
+        ),
+      );
+
+      final methods = methodCalls.map((c) => c.method).toList();
+      expect(methods.first, 'start');
+      expect(methods, contains('setActiveCandidate'));
+      final candidateCall = methodCalls.firstWhere(
+        (call) => call.method == 'setActiveCandidate',
+      );
+      final args = candidateCall.arguments as Map;
+      expect(args['addr'], '192.168.1.5');
+      expect(args['port'], 51821);
+    });
+
+    test('setActiveCandidate is a no-op on iOS', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      await service.setActiveCandidate(addr: '192.168.1.5', port: 51821);
+      expect(
+        methodCalls.where((call) => call.method == 'setActiveCandidate'),
+        isEmpty,
+      );
+    });
+  });
+
   group('VpnService on unsupported platform', () {
     TestWidgetsFlutterBinding.ensureInitialized();
 
     late VpnService service;
 
     setUp(() {
-      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
       service = VpnService();
     });
 

@@ -82,6 +82,7 @@ struct TunnelStatusInfo: Codable {
     let udpPacketsIn: UInt64?
     let wgTxBytes: UInt64?
     let wgRxBytes: UInt64?
+    let timeSinceLastHandshakeSecs: Int64?
     let plannedDirectCandidates: [DirectCandidateConfig]?
     let observedCandidates: [DirectCandidateConfig]?
     let activeDirectCandidateIndex: Int?

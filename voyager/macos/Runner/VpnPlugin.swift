@@ -12,7 +12,6 @@ class VpnPlugin: NSObject, FlutterPlugin {
     private var tunnelHandle: UnsafeMutableRawPointer?
     private var tunFd: Int32 = -1
     private var helperSocket: Int32 = -1
-    private var helperProcess: Process?
     private var isActive = false
     private var activeConfig: [String: Any]?
     private var tunPacketsOut: UInt64 = 0
@@ -23,6 +22,15 @@ class VpnPlugin: NSObject, FlutterPlugin {
     private var tunReadThread: Thread?
     private var udpReadThread: Thread?
     private let wgQueue = DispatchQueue(label: "com.blackhole.voyager.macOS.wg")
+    private let destLock = NSLock()
+    private var peerSockaddr = sockaddr_in()
+    private var hasPeer = false
+    private var lastError: String?
+    private var tunnelStartedAt: Date?
+    private var netcheckNonce: String?
+    private var observedCandidates: [[String: Any]] = []
+    private let handshakeTotalBudget: TimeInterval = 30
+    private let netcheckTimeout: TimeInterval = 1.2
 
     private var helperSocketPath: String {
         let home = NSHomeDirectory()
@@ -55,6 +63,10 @@ class VpnPlugin: NSObject, FlutterPlugin {
             result(currentStatusPayload())
         case "generateKeypair":
             generateKeypair(result: result)
+        case "setActiveCandidate":
+            setActiveCandidate(args: call.arguments, result: result)
+        case "fail":
+            failTunnel(args: call.arguments, result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -64,121 +76,138 @@ class VpnPlugin: NSObject, FlutterPlugin {
 
     private func startVpn(args: [String: Any], result: @escaping FlutterResult) {
         if isActive { stopTunnel() }
+        lastError = nil
 
         guard let privateKey = args["privateKey"] as? String,
               let peerPublicKey = args["peerPublicKey"] as? String,
               let serverAddr = args["serverAddr"] as? String,
               let serverPort = args["serverPort"] as? Int else {
-            DispatchQueue.main.async {
-                result(FlutterError(code: "CONFIG", message: "Missing WG config fields", details: nil))
-            }
+            failStart(code: "CONFIG", message: "Missing WG config fields", result: result)
             return
         }
         let clientIp = args["clientIp"] as? String ?? "10.13.37.2"
+        let localPort = (args["localPort"] as? Int) ?? 0
         activeConfig = args
         tunPacketsOut = 0; tunPacketsIn = 0; udpPacketsOut = 0; udpPacketsIn = 0
+        observedCandidates = []
+        netcheckNonce = nil
 
-        // 1. Create WG tunnel handle
         guard let configJson = try? JSONSerialization.data(withJSONObject: [
             "private_key": privateKey,
             "peer_public_key": peerPublicKey,
             "preshared_key": args["presharedKey"] as Any,
             "keepalive_secs": args["keepaliveSecs"] as Any,
         ]), let configStr = String(data: configJson, encoding: .utf8) else {
-            DispatchQueue.main.async {
-                result(FlutterError(code: "SERIALIZE", message: "Failed to serialize WG config", details: nil))
-            }
+            failStart(code: "SERIALIZE", message: "Failed to serialize WG config", result: result)
             return
         }
         tunnelHandle = configStr.withCString { bh_wg_tunnel_new($0) }
         guard tunnelHandle != nil else {
-            DispatchQueue.main.async {
-                result(FlutterError(code: "WG_INIT", message: "Failed to create WG tunnel", details: nil))
-            }
+            failStart(code: "WG_INIT", message: "Failed to create WG tunnel", result: result)
             return
         }
 
-        // 2. Create POSIX UDP socket
-        NSLog("[VpnPlugin] connecting UDP to \(serverAddr):\(serverPort)")
         let sock = socket(AF_INET, SOCK_DGRAM, 0)
         guard sock >= 0 else {
-            DispatchQueue.main.async {
-                result(FlutterError(code: "UDP", message: "socket() failed", details: nil))
-            }
+            failStart(code: "UDP", message: "socket() failed", result: result)
             return
         }
-        var saddr = sockaddr_in()
-        saddr.sin_family = sa_family_t(AF_INET)
-        saddr.sin_port = UInt16(serverPort).bigEndian
-        inet_pton(AF_INET, serverAddr, &saddr.sin_addr)
-        let ok = withUnsafePointer(to: &saddr) { ptr in
+        var reuse: Int32 = 1
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+        var nosig: Int32 = 1
+        setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &nosig, socklen_t(MemoryLayout<Int32>.size))
+        var local = sockaddr_in()
+        local.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        local.sin_family = sa_family_t(AF_INET)
+        local.sin_port = UInt16(localPort).bigEndian
+        local.sin_addr = in_addr(s_addr: INADDR_ANY)
+        let bindOk = withUnsafePointer(to: &local) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.connect(sock, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                Darwin.bind(sock, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        guard ok == 0 else {
+        guard bindOk == 0 else {
             close(sock)
-            DispatchQueue.main.async {
-                result(FlutterError(code: "UDP", message: "connect() failed: \(errno)", details: nil))
-            }
+            failStart(code: "UDP", message: "bind() failed: \(errno)", result: result)
             return
         }
         udpFd = sock
+        guard setPeer(addr: serverAddr, port: serverPort) else {
+            failStart(code: "UDP", message: "Failed to resolve \(serverAddr):\(serverPort)", result: result)
+            return
+        }
+        NSLog("[VpnPlugin] UDP bound localPort=\(localPort) dest=\(serverAddr):\(serverPort)")
+
         isActive = true
-        NSLog("[VpnPlugin] UDP connected fd=\(sock)")
-
-        // 3. Start UDP receive + WG timer + handshake
+        tunnelStartedAt = Date()
         startUDPReceive()
-        startTimerLoop()
-        sendHandshakeInitiation()
+        performNetcheck(args: args)
 
-        // 4. Launch helper and get TUN (async, non-blocking)
-        ensureHelperRunning()
+        do {
+            try ensureHelperRunning()
+        } catch {
+            failStart(code: "HELPER", message: error.localizedDescription, result: result)
+            return
+        }
         let hr = connectHelper(clientIp: clientIp)
         if let error = hr.error {
-            NSLog("[VpnPlugin] helper: \(error) — continuing without TUN")
-        } else if let fd = hr.tunFd {
-            tunFd = fd
-            NSLog("[VpnPlugin] got TUN fd=\(fd)")
-            startTUNReadLoop()
+            failStart(code: "HELPER", message: error, result: result)
+            return
         }
+        guard let fd = hr.tunFd, fd >= 0 else {
+            failStart(code: "TUN", message: "VPN helper did not return a TUN fd", result: result)
+            return
+        }
+        tunFd = fd
+        NSLog("[VpnPlugin] got TUN fd=\(fd)")
+        startTUNReadLoop()
+        startTimerLoop()
+        sendHandshakeInitiation()
 
         notifyStatusChange()
         DispatchQueue.main.async { result(nil) }
     }
 
+    private func failStart(code: String, message: String, result: @escaping FlutterResult) {
+        lastError = message
+        stopTunnel()
+        notifyStatusChange()
+        DispatchQueue.main.async {
+            result(FlutterError(code: code, message: message, details: nil))
+        }
+    }
+
     // MARK: - Helper management
 
-    private func ensureHelperRunning() {
-        // Check if socket already exists (helper already running)
+    private func ensureHelperRunning() throws {
         if FileManager.default.fileExists(atPath: helperSocketPath) { return }
 
         guard let helperPath = helperBundlePath else {
-            NSLog("[VpnPlugin] helper binary not found in app bundle")
-            return
+            throw NSError(
+                domain: "VpnPlugin",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "VPN helper binary not found in app bundle"]
+            )
         }
 
-        // Create directory
         let dir = (helperSocketPath as NSString).deletingLastPathComponent
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
 
-        // Launch with sudo via osascript (prompts user for password)
         let script = "do shell script \"\\\"\(helperPath)\\\" --socket \\\"\(helperSocketPath)\\\" --pid-file \\\"\(dir)/vpn-helper.pid\\\" &\" with administrator privileges"
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         proc.arguments = ["-e", script]
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-            // Wait for socket to appear
-            for _ in 0..<20 {
-                if FileManager.default.fileExists(atPath: helperSocketPath) { break }
-                Thread.sleep(forTimeInterval: 0.2)
-            }
-            NSLog("[VpnPlugin] helper launched")
-        } catch {
-            NSLog("[VpnPlugin] failed to launch helper: \(error)")
+        try proc.run()
+        proc.waitUntilExit()
+        for _ in 0..<20 {
+            if FileManager.default.fileExists(atPath: helperSocketPath) { return }
+            Thread.sleep(forTimeInterval: 0.2)
         }
+        throw NSError(
+            domain: "VpnPlugin",
+            code: 2,
+            userInfo: [NSLocalizedDescriptionKey: "VPN helper failed to start"]
+        )
     }
 
     // MARK: - Helper communication (Unix socket + SCM_RIGHTS)
@@ -208,11 +237,9 @@ class VpnPlugin: NSObject, FlutterPlugin {
             close(sock); return (nil, "connect to helper failed: errno=\(errno)")
         }
 
-        // Send StartVpn — pass clientIp as server_ip (helper uses it as TUN local addr)
         let request = "{\"type\":\"start_vpn\",\"version\":1,\"server_ip\":\"\(clientIp)\",\"subnet\":\"10.13.37.0/24\",\"netmask\":\"255.255.255.0\",\"app_port\":9527}\n"
         request.withCString { ptr in _ = Darwin.write(sock, ptr, strlen(ptr)) }
 
-        // Receive response with TUN fd
         let controlSize = MemoryLayout<cmsghdr>.size + MemoryLayout<Int32>.size + 16
         var responseBuf = [UInt8](repeating: 0, count: 4096)
         let controlBuf = UnsafeMutableRawPointer.allocate(byteCount: controlSize, alignment: MemoryLayout<cmsghdr>.alignment)
@@ -236,7 +263,6 @@ class VpnPlugin: NSObject, FlutterPlugin {
             return (nil, "helper error: \(responseStr)")
         }
 
-        // Extract fd from SCM_RIGHTS
         var receivedFd: Int32?
         if msg.msg_controllen > 0 {
             let cmsgPtr = controlBuf.assumingMemoryBound(to: cmsghdr.self)
@@ -244,14 +270,16 @@ class VpnPlugin: NSObject, FlutterPlugin {
                 receivedFd = (controlBuf + MemoryLayout<cmsghdr>.size).load(as: Int32.self)
             }
         }
-        return (receivedFd, nil)
+        guard let fd = receivedFd, fd >= 0 else {
+            return (nil, "helper did not return a TUN fd")
+        }
+        return (fd, nil)
     }
 
     // MARK: - TUN read loop
 
     private func startTUNReadLoop() {
         guard tunFd >= 0 else { return }
-        // Ensure blocking mode for read thread
         fcntl(tunFd, F_SETFL, fcntl(tunFd, F_GETFL) & ~O_NONBLOCK)
         let fd = tunFd
         tunReadThread = Thread { self.tunReadLoop(fd: fd) }
@@ -260,7 +288,6 @@ class VpnPlugin: NSObject, FlutterPlugin {
     }
 
     private func tunReadLoop(fd: Int32) {
-        // Raw TUN fd — reads have 4-byte AF header + IP packet.
         var buf = [UInt8](repeating: 0, count: 2048 + 4)
         while isActive && tunFd >= 0 {
             let n = Darwin.read(fd, &buf, buf.count)
@@ -269,7 +296,6 @@ class VpnPlugin: NSObject, FlutterPlugin {
                 if n < 0 && errno == EAGAIN { Thread.sleep(forTimeInterval: 0.001) }
                 continue
             }
-            // Skip 4-byte AF header
             let ipStart = 4
             let ipLen = n - 4
             tunPacketsOut &+= 1
@@ -295,10 +321,18 @@ class VpnPlugin: NSObject, FlutterPlugin {
         udpReadThread = Thread {
             var buf = [UInt8](repeating: 0, count: 2048)
             while self.isActive && self.udpFd >= 0 {
-                let n = Darwin.recv(fd, &buf, buf.count, 0)
+                var src = sockaddr_in()
+                var srcLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+                let n = withUnsafeMutablePointer(to: &src) { srcPtr -> Int in
+                    srcPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        Darwin.recvfrom(fd, &buf, buf.count, 0, $0, &srcLen)
+                    }
+                }
                 if n <= 0 { continue }
+                let datagram = Data(bytes: buf, count: n)
+                if self.handleNetcheckResponse(datagram) { continue }
                 self.udpPacketsIn &+= 1
-                self.handleIncomingUDP(Data(bytes: buf, count: n))
+                self.handleIncomingUDP(datagram)
             }
         }
         udpReadThread?.name = "VpnPlugin.udpRead"
@@ -354,18 +388,118 @@ class VpnPlugin: NSObject, FlutterPlugin {
         _ = writev(tunFd, &iovecs, 2)
     }
 
+    @discardableResult
+    private func setPeer(addr: String, port: Int) -> Bool {
+        guard let resolved = resolveIPv4(addr: addr, port: port) else { return false }
+        destLock.lock()
+        peerSockaddr = resolved
+        hasPeer = true
+        destLock.unlock()
+        return true
+    }
+
+    private func resolveIPv4(addr: String, port: Int) -> sockaddr_in? {
+        var saddr = sockaddr_in()
+        saddr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        saddr.sin_family = sa_family_t(AF_INET)
+        saddr.sin_port = UInt16(port).bigEndian
+        if inet_pton(AF_INET, addr, &saddr.sin_addr) == 1 {
+            return saddr
+        }
+        var hints = addrinfo()
+        hints.ai_family = AF_INET
+        hints.ai_socktype = SOCK_DGRAM
+        var res: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(addr, nil, &hints, &res) == 0, let info = res else {
+            return nil
+        }
+        defer { freeaddrinfo(res) }
+        guard let aiAddr = info.pointee.ai_addr else { return nil }
+        aiAddr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { ptr in
+            saddr.sin_addr = ptr.pointee.sin_addr
+        }
+        return saddr
+    }
+
     private func sendUDP(_ data: UnsafePointer<UInt8>, count: Int) {
         udpPacketsOut &+= 1
         guard udpFd >= 0 else { return }
-        _ = Darwin.send(udpFd, data, count, 0)
+        destLock.lock()
+        var dest = peerSockaddr
+        let ready = hasPeer
+        destLock.unlock()
+        guard ready else { return }
+        _ = withUnsafePointer(to: &dest) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.sendto(udpFd, data, count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
     }
 
     private func sendHandshakeInitiation() {
         guard let handle = tunnelHandle else { return }
         var dst = [UInt8](repeating: 0, count: 2048)
         var dstLen = dst.count
-        let r = wgQueue.sync { bh_wg_update_timers(handle, &dst, &dstLen) }
+        let r = wgQueue.sync { bh_wg_force_handshake(handle, &dst, &dstLen) }
         if r == BH_WG_WRITE_TO_NET && dstLen > 0 { sendUDP(dst, count: dstLen) }
+    }
+
+    private func performNetcheck(args: [String: Any]) {
+        guard let host = args["netcheckHost"] as? String, !host.isEmpty,
+              let port = args["netcheckPort"] as? Int, port > 0 else {
+            return
+        }
+        guard var dest = resolveIPv4(addr: host, port: port) else {
+            NSLog("[VpnPlugin] netcheck resolve failed for \(host)")
+            return
+        }
+        let nonce = UUID().uuidString
+        netcheckNonce = nonce
+        let payload = "{\"type\":\"netcheck\",\"nonce\":\"\(nonce)\"}"
+        guard let data = payload.data(using: .utf8) else { return }
+        data.withUnsafeBytes { raw in
+            guard let ptr = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+            udpPacketsOut &+= 1
+            _ = withUnsafePointer(to: &dest) { destPtr in
+                destPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.sendto(udpFd, ptr, data.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+        }
+        let deadline = Date().addingTimeInterval(netcheckTimeout)
+        while netcheckNonce != nil && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        netcheckNonce = nil
+    }
+
+    private func handleNetcheckResponse(_ datagram: Data) -> Bool {
+        guard let nonce = netcheckNonce else { return false }
+        guard let object = try? JSONSerialization.jsonObject(with: datagram) as? [String: Any],
+              object["nonce"] as? String == nonce,
+              let observedAddr = object["observedAddr"] as? String else {
+            return false
+        }
+        let observedPort: Int
+        if let number = object["observedPort"] as? NSNumber {
+            observedPort = number.intValue
+        } else if let intPort = object["observedPort"] as? Int {
+            observedPort = intPort
+        } else {
+            return true
+        }
+        if !observedAddr.isEmpty, observedPort > 0 {
+            observedCandidates = [[
+                "addr": observedAddr,
+                "port": observedPort,
+                "scope": "public_observed",
+                "priority": 180,
+                "source": "wormhole_netcheck",
+            ]]
+            notifyStatusChange()
+        }
+        netcheckNonce = nil
+        return true
     }
 
     private func startTimerLoop() {
@@ -377,9 +511,44 @@ class VpnPlugin: NSObject, FlutterPlugin {
             var dstLen = dst.count
             let r = self.wgQueue.sync { bh_wg_update_timers(handle, &dst, &dstLen) }
             if r == BH_WG_WRITE_TO_NET && dstLen > 0 { self.sendUDP(dst, count: dstLen) }
+            let stats = self.currentWireGuardStats()
+            if stats.handshakeAgeSecs < 0,
+               let startedAt = self.tunnelStartedAt,
+               Date().timeIntervalSince(startedAt) >= self.handshakeTotalBudget {
+                self.lastError = "WireGuard handshake timed out"
+                self.stopTunnel()
+            }
         }
         timer.resume()
         timerSource = timer
+    }
+
+    private func setActiveCandidate(args: Any?, result: @escaping FlutterResult) {
+        guard let args = args as? [String: Any],
+              let addr = args["addr"] as? String, !addr.isEmpty,
+              let port = args["port"] as? Int, port > 0 else {
+            result(FlutterError(code: "INVALID_ARGS", message: "setActiveCandidate requires addr and port", details: nil))
+            return
+        }
+        guard tunnelHandle != nil else {
+            result(FlutterError(code: "NO_VPN", message: "VPN is not running", details: nil))
+            return
+        }
+        guard setPeer(addr: addr, port: port) else {
+            result(FlutterError(code: "RESOLVE", message: "Failed to resolve \(addr)", details: nil))
+            return
+        }
+        NSLog("[VpnPlugin] Active candidate set to \(addr):\(port)")
+        sendHandshakeInitiation()
+        notifyStatusChange()
+        result(nil)
+    }
+
+    private func failTunnel(args: Any?, result: @escaping FlutterResult) {
+        let message = (args as? [String: Any])?["error"] as? String ?? "WireGuard handshake timed out"
+        lastError = message
+        stopTunnel()
+        result(nil)
     }
 
     // MARK: - Lifecycle
@@ -392,22 +561,62 @@ class VpnPlugin: NSObject, FlutterPlugin {
         if tunFd >= 0 { close(tunFd); tunFd = -1 }
         if helperSocket >= 0 { close(helperSocket); helperSocket = -1 }
         if let h = tunnelHandle { bh_wg_tunnel_free(h); tunnelHandle = nil }
+        destLock.lock(); hasPeer = false; destLock.unlock()
+        netcheckNonce = nil
         notifyStatusChange()
     }
 
     private func stopVpn(result: @escaping FlutterResult) {
-        stopTunnel(); result(nil)
+        lastError = nil
+        stopTunnel()
+        result(nil)
+    }
+
+    private struct WireGuardStats {
+        var handshakeAgeSecs: Int64
+        var txBytes: UInt64
+        var rxBytes: UInt64
+    }
+
+    private func currentWireGuardStats() -> WireGuardStats {
+        guard let h = tunnelHandle else {
+            return WireGuardStats(handshakeAgeSecs: -1, txBytes: 0, rxBytes: 0)
+        }
+        var s = bh_wg_stats(
+            time_since_last_handshake_secs: -1,
+            tx_bytes: 0,
+            rx_bytes: 0,
+            estimated_loss: 0,
+            estimated_rtt_ms: -1
+        )
+        guard withUnsafeMutablePointer(to: &s, { bh_wg_get_stats(h, $0) }) == 1 else {
+            return WireGuardStats(handshakeAgeSecs: -1, txBytes: 0, rxBytes: 0)
+        }
+        return WireGuardStats(
+            handshakeAgeSecs: s.time_since_last_handshake_secs,
+            txBytes: s.tx_bytes,
+            rxBytes: s.rx_bytes
+        )
     }
 
     private func currentStatusPayload() -> [String: Any] {
         var r: [String: Any] = [:]
-        if isActive {
-            r["status"] = "connected"; r["connectionMode"] = "direct"
-        } else if tunnelHandle != nil {
+        let stats = currentWireGuardStats()
+        let handshakeReady = stats.handshakeAgeSecs >= 0
+        if let lastError, tunnelHandle == nil, !isActive {
+            r["status"] = "error"
+            r["connectionMode"] = "direct"
+            r["error"] = lastError
+        } else if isActive && handshakeReady {
+            r["status"] = "connected"
+            r["connectionMode"] = "direct"
+        } else if isActive || tunnelHandle != nil {
             r["status"] = "connecting"
+            r["connectionMode"] = "direct"
         } else {
             r["status"] = "disconnected"
         }
+        r["timestamp"] = ISO8601DateFormatter().string(from: Date())
         r["clientIp"] = activeConfig?["clientIp"] as? String
         r["serverIp"] = activeConfig?["serverIp"] as? String
         r["lanPort"] = activeConfig?["lanPort"] as? Int
@@ -415,11 +624,12 @@ class VpnPlugin: NSObject, FlutterPlugin {
         r["tunPacketsIn"] = Int64(tunPacketsIn)
         r["udpPacketsOut"] = Int64(udpPacketsOut)
         r["udpPacketsIn"] = Int64(udpPacketsIn)
-        if let h = tunnelHandle {
-            var s = bh_wg_stats(time_since_last_handshake_secs: -1, tx_bytes: 0, rx_bytes: 0, estimated_loss: 0, estimated_rtt_ms: -1)
-            if withUnsafeMutablePointer(to: &s, { bh_wg_get_stats(h, $0) }) == 1 {
-                r["wgTxBytes"] = Int64(s.tx_bytes); r["wgRxBytes"] = Int64(s.rx_bytes)
-            }
+        r["wgTxBytes"] = Int64(stats.txBytes)
+        r["wgRxBytes"] = Int64(stats.rxBytes)
+        r["timeSinceLastHandshakeSecs"] = stats.handshakeAgeSecs
+        r["directSessionReady"] = handshakeReady
+        if !observedCandidates.isEmpty {
+            r["observedCandidates"] = observedCandidates
         }
         return r
     }

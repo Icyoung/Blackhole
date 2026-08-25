@@ -585,6 +585,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         signatureParts.append(String(directProbeWriteAttempts))
         signatureParts.append(String(wgTxBytes ?? 0))
         signatureParts.append(String(wgRxBytes ?? 0))
+        signatureParts.append(String(didLoadStats ? stats.time_since_last_handshake_secs : -1))
         signatureParts.append(directCandidates.map { "\($0.scope):\($0.addr):\($0.port):\($0.priority)" }.joined(separator: ","))
         signatureParts.append(String(activeDirectCandidateIndex))
         signatureParts.append(activeDirectCandidate?.addr ?? "")
@@ -614,6 +615,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             udpPacketsIn: udpPacketsIn,
             wgTxBytes: wgTxBytes,
             wgRxBytes: wgRxBytes,
+            timeSinceLastHandshakeSecs: didLoadStats ? stats.time_since_last_handshake_secs : -1,
             plannedDirectCandidates: directCandidates.isEmpty ? nil : directCandidates,
             observedCandidates: observedCandidates.isEmpty ? nil : observedCandidates,
             activeDirectCandidateIndex: activeDirectCandidate != nil ? activeDirectCandidateIndex : nil,

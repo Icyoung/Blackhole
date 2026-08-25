@@ -101,12 +101,78 @@ class VpnConfig {
   };
 }
 
+List<Map<String, dynamic>> planUserspaceDirectCandidates({
+  required List<Map<String, dynamic>> configured,
+  required String fallbackAddr,
+  required int fallbackPort,
+}) {
+  final candidates = <Map<String, dynamic>>[];
+  for (final raw in configured) {
+    final addr = (raw['addr'] ?? raw['host'])?.toString().trim() ?? '';
+    final port = (raw['port'] as num?)?.toInt() ?? 0;
+    if (addr.isEmpty || port <= 0) {
+      continue;
+    }
+    candidates.add(<String, dynamic>{
+      'addr': addr,
+      'port': port,
+      'scope': raw['scope'] ?? 'configured',
+      'priority': (raw['priority'] as num?)?.toInt() ?? 0,
+      'source': raw['source'] ?? 'vpn_config',
+    });
+  }
+
+  final normalizedFallback = fallbackAddr.trim();
+  if (normalizedFallback.isNotEmpty && fallbackPort > 0) {
+    candidates.add(<String, dynamic>{
+      'addr': normalizedFallback,
+      'port': fallbackPort,
+      'scope': 'legacy',
+      'priority': 0,
+      'source': 'vpn_config',
+    });
+  }
+
+  final prioritized =
+      candidates.indexed.toList()..sort((lhs, rhs) {
+        final lp = lhs.$2['priority'] as int;
+        final rp = rhs.$2['priority'] as int;
+        if (lp == rp) {
+          return lhs.$1.compareTo(rhs.$1);
+        }
+        return rp.compareTo(lp);
+      });
+
+  final deduped = <Map<String, dynamic>>[];
+  for (final candidate in prioritized.map((entry) => entry.$2)) {
+    final duplicate = deduped.any(
+      (existing) =>
+          existing['addr'] == candidate['addr'] &&
+          existing['port'] == candidate['port'],
+    );
+    if (!duplicate) {
+      deduped.add(candidate);
+    }
+  }
+  return deduped;
+}
+
 /// Service for managing VPN connections.
 ///
 /// Uses platform MethodChannel to control the native Network Extension
 /// (iOS/macOS) and listens for status changes via EventChannel.
 class VpnService extends ChangeNotifier {
-  VpnService();
+  VpnService({
+    Duration handshakeCandidateTimeout = const Duration(seconds: 12),
+    Duration handshakeTotalBudget = const Duration(seconds: 30),
+    DateTime Function()? clock,
+  }) : _handshakeCandidateTimeout = handshakeCandidateTimeout,
+       _handshakeTotalBudget = handshakeTotalBudget,
+       _clock = clock ?? DateTime.now;
+
+  final Duration _handshakeCandidateTimeout;
+  final Duration _handshakeTotalBudget;
+  final DateTime Function() _clock;
 
   // Native VPN is enabled by default for iOS builds.
   static const bool isFeatureEnabled = bool.fromEnvironment(
@@ -126,6 +192,17 @@ class VpnService extends ChangeNotifier {
     };
   }
 
+  /// Android/macOS userspace owns dest switching; iOS keeps the NE planner.
+  static bool get dartOwnsDirectCandidates {
+    if (!isSupportedPlatform) {
+      return false;
+    }
+    return switch (defaultTargetPlatform) {
+      TargetPlatform.android || TargetPlatform.macOS => true,
+      _ => false,
+    };
+  }
+
   static const _methodChannel = MethodChannel('com.blackhole.voyager/vpn');
   static const _eventChannel = EventChannel('com.blackhole.voyager/vpn_status');
 
@@ -140,6 +217,7 @@ class VpnService extends ChangeNotifier {
   int? _udpPacketsIn;
   int? _wgTxBytes;
   int? _wgRxBytes;
+  int? _timeSinceLastHandshakeSecs;
   List<Map<String, dynamic>> _plannedDirectCandidates =
       const <Map<String, dynamic>>[];
   List<Map<String, dynamic>> _observedCandidates =
@@ -161,7 +239,13 @@ class VpnService extends ChangeNotifier {
   String? _error;
   StreamSubscription? _statusSubscription;
   Timer? _statusPollTimer;
+  Timer? _candidateRotationTimer;
   DateTime? _negotiationStartedAt;
+  DateTime? _handshakeAttemptStartedAt;
+  DateTime? _handshakeCandidateStartedAt;
+  int _userspaceCandidateIndex = 0;
+  List<Map<String, dynamic>> _userspaceCandidates =
+      const <Map<String, dynamic>>[];
 
   VpnStatus get status => _status;
   VpnConnectionMode get connectionMode => _connectionMode;
@@ -174,6 +258,7 @@ class VpnService extends ChangeNotifier {
   int? get udpPacketsIn => _udpPacketsIn;
   int? get wgTxBytes => _wgTxBytes;
   int? get wgRxBytes => _wgRxBytes;
+  int? get timeSinceLastHandshakeSecs => _timeSinceLastHandshakeSecs;
   List<Map<String, dynamic>> get plannedDirectCandidates =>
       _plannedDirectCandidates;
   List<Map<String, dynamic>> get observedCandidates => _observedCandidates;
@@ -202,6 +287,7 @@ class VpnService extends ChangeNotifier {
       return;
     }
     _stopStatusPolling();
+    _stopCandidateRotation();
     _negotiationStartedAt = DateTime.now().toUtc();
     _status = VpnStatus.connecting;
     _connectionMode = VpnConnectionMode.unknown;
@@ -215,6 +301,7 @@ class VpnService extends ChangeNotifier {
     _udpPacketsIn = null;
     _wgTxBytes = null;
     _wgRxBytes = null;
+    _timeSinceLastHandshakeSecs = null;
     _plannedDirectCandidates = const <Map<String, dynamic>>[];
     _observedCandidates = const <Map<String, dynamic>>[];
     _activeDirectCandidateIndex = null;
@@ -241,6 +328,7 @@ class VpnService extends ChangeNotifier {
       return;
     }
     _stopStatusPolling();
+    _stopCandidateRotation();
     _negotiationStartedAt = null;
     _status = VpnStatus.error;
     _error = message;
@@ -252,6 +340,7 @@ class VpnService extends ChangeNotifier {
       return;
     }
     _stopStatusPolling();
+    _stopCandidateRotation();
     _negotiationStartedAt = null;
     _status = VpnStatus.disconnected;
     _connectionMode = VpnConnectionMode.unknown;
@@ -265,6 +354,7 @@ class VpnService extends ChangeNotifier {
     _udpPacketsIn = null;
     _wgTxBytes = null;
     _wgRxBytes = null;
+    _timeSinceLastHandshakeSecs = null;
     _plannedDirectCandidates = const <Map<String, dynamic>>[];
     _observedCandidates = const <Map<String, dynamic>>[];
     _activeDirectCandidateIndex = null;
@@ -339,6 +429,8 @@ class VpnService extends ChangeNotifier {
     _udpPacketsIn = (payload['udpPacketsIn'] as num?)?.toInt();
     _wgTxBytes = (payload['wgTxBytes'] as num?)?.toInt();
     _wgRxBytes = (payload['wgRxBytes'] as num?)?.toInt();
+    _timeSinceLastHandshakeSecs =
+        (payload['timeSinceLastHandshakeSecs'] as num?)?.toInt();
     _plannedDirectCandidates =
         (payload['plannedDirectCandidates'] as List<dynamic>?)
             ?.whereType<Map>()
@@ -376,8 +468,12 @@ class VpnService extends ChangeNotifier {
     _error = payload['error'] as String?;
     if (_status == VpnStatus.disconnected || _status == VpnStatus.error) {
       _stopStatusPolling();
+      _stopCandidateRotation();
       _negotiationStartedAt = null;
-    } else if (_status == VpnStatus.connected) {
+    } else if (_status == VpnStatus.connected ||
+        (_timeSinceLastHandshakeSecs != null &&
+            _timeSinceLastHandshakeSecs! >= 0)) {
+      _stopCandidateRotation();
       _negotiationStartedAt = null;
     }
     _vpnLog(
@@ -425,6 +521,7 @@ class VpnService extends ChangeNotifier {
       _udpPacketsIn = null;
       _wgTxBytes = null;
       _wgRxBytes = null;
+      _timeSinceLastHandshakeSecs = null;
       _plannedDirectCandidates = const <Map<String, dynamic>>[];
       _observedCandidates = const <Map<String, dynamic>>[];
       _activeDirectCandidateIndex = null;
@@ -445,10 +542,14 @@ class VpnService extends ChangeNotifier {
       notifyListeners();
 
       await _methodChannel.invokeMethod('start', config.toMap());
+      if (dartOwnsDirectCandidates) {
+        await _beginCandidateRotation(config);
+      }
       await refreshStatus();
       _startStatusPolling();
     } on PlatformException catch (e) {
       _stopStatusPolling();
+      _stopCandidateRotation();
       _negotiationStartedAt = null;
       _status = VpnStatus.error;
       _error = e.message;
@@ -465,6 +566,7 @@ class VpnService extends ChangeNotifier {
     try {
       _status = VpnStatus.disconnecting;
       _negotiationStartedAt = null;
+      _stopCandidateRotation();
       _startStatusPolling();
       notifyListeners();
 
@@ -486,6 +588,110 @@ class VpnService extends ChangeNotifier {
   void _stopStatusPolling() {
     _statusPollTimer?.cancel();
     _statusPollTimer = null;
+  }
+
+  Future<void> setActiveCandidate({
+    required String addr,
+    required int port,
+  }) async {
+    if (!dartOwnsDirectCandidates) {
+      return;
+    }
+    await _methodChannel.invokeMethod('setActiveCandidate', {
+      'addr': addr,
+      'port': port,
+    });
+  }
+
+  Future<void> _beginCandidateRotation(VpnConfig config) async {
+    _stopCandidateRotation();
+    _userspaceCandidates = planUserspaceDirectCandidates(
+      configured: config.directCandidates,
+      fallbackAddr: config.serverAddr,
+      fallbackPort: config.serverPort,
+    );
+    if (_userspaceCandidates.isEmpty) {
+      return;
+    }
+    _userspaceCandidateIndex = 0;
+    _handshakeAttemptStartedAt = _clock().toUtc();
+    await _activateCurrentUserspaceCandidate();
+    _candidateRotationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      unawaited(_tickUserspaceCandidates());
+    });
+  }
+
+  Future<void> _activateCurrentUserspaceCandidate() async {
+    if (_userspaceCandidateIndex < 0 ||
+        _userspaceCandidateIndex >= _userspaceCandidates.length) {
+      return;
+    }
+    final candidate = _userspaceCandidates[_userspaceCandidateIndex];
+    final addr = candidate['addr'] as String? ?? '';
+    final port = (candidate['port'] as num?)?.toInt() ?? 0;
+    _handshakeCandidateStartedAt = _clock().toUtc();
+    if (addr.isEmpty || port <= 0) {
+      return;
+    }
+    try {
+      await setActiveCandidate(addr: addr, port: port);
+    } on PlatformException catch (e) {
+      _vpnLog('setActiveCandidate error: ${e.message}');
+    }
+  }
+
+  Future<void> _tickUserspaceCandidates() async {
+    if (!dartOwnsDirectCandidates) {
+      return;
+    }
+    if (_status == VpnStatus.connected ||
+        (_timeSinceLastHandshakeSecs != null &&
+            _timeSinceLastHandshakeSecs! >= 0)) {
+      _stopCandidateRotation();
+      return;
+    }
+    if (_status == VpnStatus.error || _status == VpnStatus.disconnected) {
+      _stopCandidateRotation();
+      return;
+    }
+    final now = _clock().toUtc();
+    final attemptStartedAt = _handshakeAttemptStartedAt;
+    final candidateStartedAt = _handshakeCandidateStartedAt;
+    if (attemptStartedAt != null &&
+        now.difference(attemptStartedAt) >= _handshakeTotalBudget) {
+      await _failUserspaceHandshake();
+      return;
+    }
+    if (candidateStartedAt != null &&
+        now.difference(candidateStartedAt) >= _handshakeCandidateTimeout) {
+      if (_userspaceCandidateIndex + 1 < _userspaceCandidates.length) {
+        _userspaceCandidateIndex += 1;
+        await _activateCurrentUserspaceCandidate();
+      } else {
+        await _failUserspaceHandshake();
+      }
+    }
+  }
+
+  Future<void> _failUserspaceHandshake() async {
+    _stopCandidateRotation();
+    try {
+      await _methodChannel.invokeMethod('fail', {
+        'error': 'WireGuard handshake timed out',
+      });
+    } on PlatformException catch (e) {
+      _vpnLog('fail error: ${e.message}');
+    }
+    failNegotiation('WireGuard handshake timed out');
+  }
+
+  void _stopCandidateRotation() {
+    _candidateRotationTimer?.cancel();
+    _candidateRotationTimer = null;
+    _handshakeAttemptStartedAt = null;
+    _handshakeCandidateStartedAt = null;
+    _userspaceCandidateIndex = 0;
+    _userspaceCandidates = const <Map<String, dynamic>>[];
   }
 
   /// Generate a new X25519 keypair via the native layer.
@@ -510,6 +716,7 @@ class VpnService extends ChangeNotifier {
   void dispose() {
     _statusSubscription?.cancel();
     _stopStatusPolling();
+    _stopCandidateRotation();
     super.dispose();
   }
 }

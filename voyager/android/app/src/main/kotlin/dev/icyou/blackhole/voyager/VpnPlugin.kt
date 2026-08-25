@@ -91,6 +91,8 @@ class VpnPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
                 }
             }
             "generateKeypair" -> generateKeypair(result)
+            "setActiveCandidate" -> setActiveCandidate(call, result)
+            "fail" -> failTunnel(call, result)
             else -> result.notImplemented()
         }
     }
@@ -146,6 +148,34 @@ class VpnPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
         BlackholeVpnService.instance?.stopTunnel(clearError = true)
         val ctx = context ?: return
         ctx.stopService(Intent(ctx, BlackholeVpnService::class.java))
+    }
+
+    private fun setActiveCandidate(call: MethodCall, result: MethodChannel.Result) {
+        val args = call.arguments as? Map<*, *>
+        val addr = args?.get("addr") as? String
+        val port = (args?.get("port") as? Number)?.toInt()
+        if (addr.isNullOrEmpty() || port == null || port <= 0) {
+            result.error("INVALID_ARGS", "setActiveCandidate requires addr and port", null)
+            return
+        }
+        val service = BlackholeVpnService.instance
+        if (service == null || !service.setActiveCandidate(addr, port)) {
+            result.error("NO_VPN", "VPN is not running", null)
+            return
+        }
+        result.success(null)
+    }
+
+    private fun failTunnel(call: MethodCall, result: MethodChannel.Result) {
+        val args = call.arguments as? Map<*, *>
+        val message = args?.get("error") as? String ?: "WireGuard handshake timed out"
+        val service = BlackholeVpnService.instance
+        if (service == null) {
+            result.success(null)
+            return
+        }
+        service.failTunnel(message)
+        result.success(null)
     }
 
     private fun generateKeypair(result: MethodChannel.Result) {

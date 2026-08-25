@@ -197,9 +197,48 @@ final class TunnelRuntimeCoordinatorTests: XCTestCase {
             inboundWireGuardBytes: 0,
             inboundUdpPackets: 0,
             availableDirectCandidateCount: 3,
-            now: startedAt.addingTimeInterval(36.3)
+            now: startedAt.addingTimeInterval(30.0)
         )
         XCTAssertEqual(exhausted, .none)
+        XCTAssertEqual(runtime.snapshot.status, .error)
+        XCTAssertEqual(runtime.snapshot.error, "WireGuard handshake timed out")
+    }
+
+    func testTotalBudgetExpiresEvenIfCandidatesRemain() {
+        let runtime = TunnelRuntimeCoordinator(
+            handshakeTimeout: 12,
+            totalBudget: 30
+        )
+        let startedAt = Date(timeIntervalSince1970: 100)
+
+        runtime.start(now: startedAt)
+
+        let retry1 = runtime.refresh(
+            handshakeAgeSeconds: nil,
+            inboundWireGuardBytes: 0,
+            inboundUdpPackets: 0,
+            availableDirectCandidateCount: 4,
+            now: startedAt.addingTimeInterval(12.1)
+        )
+        XCTAssertEqual(retry1, .retryDirect(1))
+
+        let retry2 = runtime.refresh(
+            handshakeAgeSeconds: nil,
+            inboundWireGuardBytes: 0,
+            inboundUdpPackets: 0,
+            availableDirectCandidateCount: 4,
+            now: startedAt.addingTimeInterval(24.2)
+        )
+        XCTAssertEqual(retry2, .retryDirect(2))
+
+        let budgetExpired = runtime.refresh(
+            handshakeAgeSeconds: nil,
+            inboundWireGuardBytes: 0,
+            inboundUdpPackets: 0,
+            availableDirectCandidateCount: 4,
+            now: startedAt.addingTimeInterval(30.0)
+        )
+        XCTAssertEqual(budgetExpired, .none)
         XCTAssertEqual(runtime.snapshot.status, .error)
         XCTAssertEqual(runtime.snapshot.error, "WireGuard handshake timed out")
     }

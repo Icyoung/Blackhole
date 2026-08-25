@@ -69,6 +69,7 @@ struct TunnelRuntimeSnapshot: Equatable {
 final class TunnelRuntimeCoordinator {
     let handshakeTimeout: TimeInterval
     let directHealthGracePeriod: TimeInterval
+    let totalBudget: TimeInterval
 
     private(set) var snapshot = TunnelRuntimeSnapshot(
         status: .disconnected,
@@ -76,16 +77,19 @@ final class TunnelRuntimeCoordinator {
         error: nil
     )
 
+    private var attemptStartedAt: Date?
     private var tunnelStartedAt: Date?
     private var activeDirectCandidateIndex = 0
     private var directHealthyAt: Date?
 
     init(
         handshakeTimeout: TimeInterval = 12,
-        directHealthGracePeriod: TimeInterval = 8
+        directHealthGracePeriod: TimeInterval = 8,
+        totalBudget: TimeInterval = 30
     ) {
         self.handshakeTimeout = handshakeTimeout
         self.directHealthGracePeriod = directHealthGracePeriod
+        self.totalBudget = totalBudget
     }
 
     func start(now: Date = Date()) {
@@ -94,6 +98,7 @@ final class TunnelRuntimeCoordinator {
             connectionMode: .direct,
             error: nil
         )
+        attemptStartedAt = now
         tunnelStartedAt = now
         activeDirectCandidateIndex = 0
         directHealthyAt = nil
@@ -113,6 +118,7 @@ final class TunnelRuntimeCoordinator {
             connectionMode: .direct,
             error: nil
         )
+        attemptStartedAt = nil
         tunnelStartedAt = nil
         activeDirectCandidateIndex = 0
         directHealthyAt = nil
@@ -144,19 +150,40 @@ final class TunnelRuntimeCoordinator {
             return .none
         }
 
-        guard let startedAt = tunnelStartedAt else {
+        guard snapshot.status != .error else {
             return .none
         }
 
-        let elapsed = now.timeIntervalSince(startedAt)
-        guard elapsed >= handshakeTimeout, snapshot.status != .error else {
+        if snapshot.status == .connected {
+            guard let startedAt = tunnelStartedAt else {
+                return .none
+            }
+            let elapsed = now.timeIntervalSince(startedAt)
+            guard elapsed >= handshakeTimeout else {
+                return .none
+            }
+            if let directHealthyAt,
+               now.timeIntervalSince(directHealthyAt) < handshakeTimeout + directHealthGracePeriod {
+                return .none
+            }
+            fail("WireGuard handshake timed out")
             return .none
         }
 
-        if snapshot.connectionMode == .direct,
-           snapshot.status == .connected,
-           let directHealthyAt,
-           now.timeIntervalSince(directHealthyAt) < handshakeTimeout + directHealthGracePeriod {
+        guard snapshot.status == .connecting else {
+            return .none
+        }
+
+        guard let attemptStartedAt, let candidateStartedAt = tunnelStartedAt else {
+            return .none
+        }
+
+        if now.timeIntervalSince(attemptStartedAt) >= totalBudget {
+            fail("WireGuard handshake timed out")
+            return .none
+        }
+
+        guard now.timeIntervalSince(candidateStartedAt) >= handshakeTimeout else {
             return .none
         }
 

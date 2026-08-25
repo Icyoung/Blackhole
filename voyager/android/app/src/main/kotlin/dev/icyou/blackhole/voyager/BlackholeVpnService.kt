@@ -7,7 +7,9 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.util.Log
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -17,6 +19,7 @@ import java.net.InetSocketAddress
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
+import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -29,6 +32,7 @@ class BlackholeVpnService : VpnService() {
         private const val TAG = "BlackholeVPN"
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "vpn_service"
+        private const val HANDSHAKE_TOTAL_BUDGET_MS = 30_000L
 
         @Volatile var instance: BlackholeVpnService? = null
             private set
@@ -38,9 +42,15 @@ class BlackholeVpnService : VpnService() {
     private var tunOutput: FileOutputStream? = null
     private val tunnelHandle = AtomicLong(0)
     private var udpSocket: DatagramSocket? = null
+    private val destLock = Any()
+    @Volatile private var peerAddress: InetSocketAddress? = null
     private val isActive = AtomicBoolean(false)
     private var activeConfig: JSONObject? = null
     @Volatile private var lastError: String? = null
+    @Volatile private var startedAtElapsedMs: Long = 0L
+    @Volatile private var announcedConnected = false
+    @Volatile private var pendingNetcheckNonce: String? = null
+    @Volatile private var observedCandidates: JSONArray? = null
 
     val tunPacketsOut = AtomicLong(0)
     val tunPacketsIn = AtomicLong(0)
@@ -93,6 +103,10 @@ class BlackholeVpnService : VpnService() {
         tunPacketsIn.set(0)
         udpPacketsOut.set(0)
         udpPacketsIn.set(0)
+        announcedConnected = false
+        observedCandidates = null
+        pendingNetcheckNonce = null
+        startedAtElapsedMs = SystemClock.elapsedRealtime()
 
         // 1. Create WG tunnel handle
         val wgConfig = JSONObject().apply {
@@ -108,15 +122,20 @@ class BlackholeVpnService : VpnService() {
         tunnelHandle.set(handle)
         Log.i(TAG, "WG tunnel created")
 
-        // 2. Create UDP socket — protect before connect
-        val socket = DatagramSocket()
+        // 2. Bind one unconnected UDP socket and protect it before any send.
+        val localPort = config.optInt("localPort", 0)
+        val socket = DatagramSocket(null)
+        socket.reuseAddress = true
+        socket.bind(InetSocketAddress(localPort))
         if (!protect(socket)) {
             socket.close()
             throw RuntimeException("Failed to protect VPN UDP socket")
         }
-        socket.connect(InetSocketAddress(serverAddr, serverPort))
         udpSocket = socket
-        Log.i(TAG, "UDP connected to $serverAddr:$serverPort")
+        synchronized(destLock) {
+            peerAddress = InetSocketAddress(serverAddr, serverPort)
+        }
+        Log.i(TAG, "UDP bound localPort=${socket.localPort} dest=$serverAddr:$serverPort")
 
         // 3. Create TUN interface
         val prefixLen = subnet.substringAfter("/", "24").toInt()
@@ -145,21 +164,39 @@ class BlackholeVpnService : VpnService() {
             }
         }
 
-        val fd = builder.establish() ?: throw RuntimeException("VPN permission not granted")
+        val fd = builder.establish() ?: throw RuntimeException("VPN TUN interface missing")
         tunFd = fd
         tunOutput = FileOutputStream(fd.fileDescriptor)
         Log.i(TAG, "TUN interface created")
 
         isActive.set(true)
 
-        // 4. Start packet loops
+        // 4. Start packet loops. Netcheck shares this protected mapping.
         startUdpReadThread()
         startTunReadThread()
+        performNetcheck(config)
         startTimerLoop()
         sendHandshakeInitiation()
 
-        updateNotification("Connected")
+        updateNotification("Connecting...")
         VpnPlugin.notifyStatusChanged()
+    }
+
+    fun setActiveCandidate(addr: String, port: Int): Boolean {
+        if (tunnelHandle.get() == 0L) return false
+        synchronized(destLock) {
+            peerAddress = InetSocketAddress(addr, port)
+        }
+        Log.i(TAG, "Active candidate set to $addr:$port")
+        sendHandshakeInitiation()
+        VpnPlugin.notifyStatusChanged()
+        return true
+    }
+
+    fun failTunnel(message: String) {
+        lastError = message
+        stopTunnel(clearError = false)
+        stopSelf()
     }
 
     private fun startTunReadThread() {
@@ -202,6 +239,7 @@ class BlackholeVpnService : VpnService() {
                     socket.receive(packet)
                     val n = packet.length
                     if (n <= 0) continue
+                    if (maybeHandleNetcheck(buf, n)) continue
                     udpPacketsIn.incrementAndGet()
                     handleIncomingUdp(buf, n)
                 } catch (e: Exception) {
@@ -235,6 +273,7 @@ class BlackholeVpnService : VpnService() {
                 drainTunnel()
             }
         }
+        VpnPlugin.notifyStatusChanged()
     }
 
     private fun drainTunnel() {
@@ -273,8 +312,9 @@ class BlackholeVpnService : VpnService() {
     private fun sendUdp(data: ByteArray, len: Int) {
         udpPacketsOut.incrementAndGet()
         val socket = udpSocket ?: return
+        val dest = synchronized(destLock) { peerAddress } ?: return
         try {
-            socket.send(DatagramPacket(data, len))
+            socket.send(DatagramPacket(data, len, dest))
         } catch (e: Exception) {
             Log.e(TAG, "UDP send error", e)
         }
@@ -286,10 +326,59 @@ class BlackholeVpnService : VpnService() {
         val dst = ByteArray(2048)
         val dstLen = intArrayOf(dst.size)
         val r = synchronized(wgLock) {
-            TunnelJni.bhWgUpdateTimers(handle, dst, dstLen)
+            TunnelJni.bhWgForceHandshake(handle, dst, dstLen)
         }
         if (r == TunnelJni.WG_WRITE_TO_NET && dstLen[0] > 0) {
             sendUdp(dst, dstLen[0])
+        }
+    }
+
+    private fun performNetcheck(config: JSONObject) {
+        val host = config.optString("netcheckHost").trim()
+        val port = config.optInt("netcheckPort", 0)
+        if (host.isEmpty() || port <= 0) return
+        val nonce = UUID.randomUUID().toString()
+        val payload = """{"type":"netcheck","nonce":"$nonce"}""".toByteArray(Charsets.UTF_8)
+        pendingNetcheckNonce = nonce
+        try {
+            val socket = udpSocket ?: return
+            socket.send(DatagramPacket(payload, payload.size, InetSocketAddress(host, port)))
+            udpPacketsOut.incrementAndGet()
+        } catch (e: Exception) {
+            Log.w(TAG, "UDP netcheck failed", e)
+            pendingNetcheckNonce = null
+        }
+    }
+
+    private fun maybeHandleNetcheck(data: ByteArray, len: Int): Boolean {
+        val nonce = pendingNetcheckNonce ?: return false
+        val text = try {
+            String(data, 0, len, Charsets.UTF_8)
+        } catch (_: Exception) {
+            return false
+        }
+        if (!text.contains("observedAddr")) return false
+        return try {
+            val obj = JSONObject(text)
+            if (obj.optString("nonce") != nonce) return false
+            val addr = obj.optString("observedAddr")
+            val port = obj.optInt("observedPort")
+            if (addr.isNotEmpty() && port > 0) {
+                observedCandidates = JSONArray().put(
+                    JSONObject().apply {
+                        put("addr", addr)
+                        put("port", port)
+                        put("scope", "public_observed")
+                        put("priority", 180)
+                        put("source", "wormhole_netcheck")
+                    },
+                )
+            }
+            pendingNetcheckNonce = null
+            VpnPlugin.notifyStatusChanged()
+            true
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -306,6 +395,20 @@ class BlackholeVpnService : VpnService() {
                 }
                 if (r == TunnelJni.WG_WRITE_TO_NET && dstLen[0] > 0) {
                     sendUdp(dst, dstLen[0])
+                }
+                val stats = currentWireGuardStats()
+                if (stats.handshakeAgeSecs >= 0 && !announcedConnected) {
+                    announcedConnected = true
+                    updateNotification("Connected")
+                    VpnPlugin.notifyStatusChanged()
+                } else if (
+                    stats.handshakeAgeSecs < 0 &&
+                    SystemClock.elapsedRealtime() - startedAtElapsedMs >= HANDSHAKE_TOTAL_BUDGET_MS
+                ) {
+                    recordFatalError(
+                        "WireGuard handshake timed out",
+                        RuntimeException("WireGuard handshake timed out"),
+                    )
                 }
             } catch (t: Throwable) {
                 recordFatalError("VPN timer loop failed", t)
@@ -325,6 +428,8 @@ class BlackholeVpnService : VpnService() {
 
         udpSocket?.close()
         udpSocket = null
+        synchronized(destLock) { peerAddress = null }
+        pendingNetcheckNonce = null
         tunOutput = null
         tunFd?.close()
         tunFd = null
@@ -343,13 +448,17 @@ class BlackholeVpnService : VpnService() {
     fun getStatusPayload(): Map<String, Any?> {
         val result = mutableMapOf<String, Any?>()
         val handle = tunnelHandle.get()
+        val stats = currentWireGuardStats()
+        val handshakeReady = stats.handshakeAgeSecs >= 0
         if (lastError != null && handle == 0L) {
             result["status"] = "error"
-        } else if (isActive.get() && udpPacketsIn.get() > 0) {
+            result["connectionMode"] = "direct"
+        } else if (isActive.get() && handshakeReady) {
             result["status"] = "connected"
             result["connectionMode"] = "direct"
-        } else if (handle != 0L) {
+        } else if (handle != 0L || isActive.get()) {
             result["status"] = "connecting"
+            result["connectionMode"] = "direct"
         } else {
             result["status"] = "disconnected"
         }
@@ -361,21 +470,60 @@ class BlackholeVpnService : VpnService() {
         result["tunPacketsIn"] = tunPacketsIn.get()
         result["udpPacketsOut"] = udpPacketsOut.get()
         result["udpPacketsIn"] = udpPacketsIn.get()
+        result["wgTxBytes"] = stats.txBytes
+        result["wgRxBytes"] = stats.rxBytes
+        result["timeSinceLastHandshakeSecs"] = stats.handshakeAgeSecs
+        result["directSessionReady"] = handshakeReady
         result["error"] = lastError
-
-        if (handle != 0L) {
-            val stats = LongArray(5)
-            try {
-                if (TunnelJni.bhWgGetStats(handle, stats) == 1) {
-                    result["wgTxBytes"] = stats[1]
-                    result["wgRxBytes"] = stats[2]
-                }
-            } catch (t: Throwable) {
-                Log.e(TAG, "Failed to read WireGuard stats", t)
-                result["error"] = t.message ?: "Failed to read WireGuard stats"
-            }
+        observedCandidates?.let { result["observedCandidates"] = jsonArrayToList(it) }
+        val dest = synchronized(destLock) { peerAddress }
+        if (dest != null) {
+            result["activeDirectCandidate"] = mapOf(
+                "addr" to dest.hostString,
+                "port" to dest.port,
+            )
         }
         return result
+    }
+
+    private data class WireGuardStats(
+        val handshakeAgeSecs: Long,
+        val txBytes: Long,
+        val rxBytes: Long,
+    )
+
+    private fun currentWireGuardStats(): WireGuardStats {
+        val handle = tunnelHandle.get()
+        if (handle == 0L) {
+            return WireGuardStats(handshakeAgeSecs = -1, txBytes = 0, rxBytes = 0)
+        }
+        val stats = LongArray(5)
+        return try {
+            val ok = synchronized(wgLock) { TunnelJni.bhWgGetStats(handle, stats) == 1 }
+            if (ok) {
+                WireGuardStats(
+                    handshakeAgeSecs = stats[0],
+                    txBytes = stats[1],
+                    rxBytes = stats[2],
+                )
+            } else {
+                WireGuardStats(handshakeAgeSecs = -1, txBytes = 0, rxBytes = 0)
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "Failed to read WireGuard stats", t)
+            WireGuardStats(handshakeAgeSecs = -1, txBytes = 0, rxBytes = 0)
+        }
+    }
+
+    private fun jsonArrayToList(array: JSONArray): List<Map<String, Any?>> {
+        val out = ArrayList<Map<String, Any?>>(array.length())
+        for (i in 0 until array.length()) {
+            val obj = array.optJSONObject(i) ?: continue
+            val map = mutableMapOf<String, Any?>()
+            obj.keys().forEach { key -> map[key] = obj.opt(key) }
+            out.add(map)
+        }
+        return out
     }
 
     override fun onRevoke() {

@@ -444,6 +444,9 @@ class VpnPlugin: NSObject, FlutterPlugin {
                 if let udpPacketsIn = json["udpPacketsIn"] as? NSNumber { response["udpPacketsIn"] = udpPacketsIn.int64Value }
                 if let wgTxBytes = json["wgTxBytes"] as? NSNumber { response["wgTxBytes"] = wgTxBytes.int64Value }
                 if let wgRxBytes = json["wgRxBytes"] as? NSNumber { response["wgRxBytes"] = wgRxBytes.int64Value }
+                if let handshakeAge = json["timeSinceLastHandshakeSecs"] as? NSNumber {
+                    response["timeSinceLastHandshakeSecs"] = handshakeAge.int64Value
+                }
                 if let plannedDirectCandidates = json["plannedDirectCandidates"] as? [Any] { response["plannedDirectCandidates"] = plannedDirectCandidates }
                 if let observedCandidates = json["observedCandidates"] as? [Any] { response["observedCandidates"] = observedCandidates }
                 if let activeDirectCandidateIndex = json["activeDirectCandidateIndex"] as? NSNumber { response["activeDirectCandidateIndex"] = activeDirectCandidateIndex.intValue }
@@ -484,6 +487,9 @@ class VpnPlugin: NSObject, FlutterPlugin {
             if let udpPacketsIn = json["udpPacketsIn"] as? NSNumber { response["udpPacketsIn"] = udpPacketsIn.int64Value }
             if let wgTxBytes = json["wgTxBytes"] as? NSNumber { response["wgTxBytes"] = wgTxBytes.int64Value }
             if let wgRxBytes = json["wgRxBytes"] as? NSNumber { response["wgRxBytes"] = wgRxBytes.int64Value }
+            if let handshakeAge = json["timeSinceLastHandshakeSecs"] as? NSNumber {
+                response["timeSinceLastHandshakeSecs"] = handshakeAge.int64Value
+            }
             if let plannedDirectCandidates = json["plannedDirectCandidates"] as? [Any] { response["plannedDirectCandidates"] = plannedDirectCandidates }
             if let observedCandidates = json["observedCandidates"] as? [Any] { response["observedCandidates"] = observedCandidates }
             if let activeDirectCandidateIndex = json["activeDirectCandidateIndex"] as? NSNumber { response["activeDirectCandidateIndex"] = activeDirectCandidateIndex.intValue }
