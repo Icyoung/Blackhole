@@ -717,11 +717,21 @@ async fn handle_socket(
 
     // Send session_assigned message to Horizon
     if role == Role::Horizon {
+        // Include the current Voyager count so a reconnecting Horizon can
+        // correctly decide whether to stream PTY output to the relay.
+        let voyager_count = {
+            let sessions = state.sessions.lock().await;
+            sessions
+                .get(&session_id)
+                .map(|s| s.voyagers.len())
+                .unwrap_or(0)
+        };
         let assign_msg = serde_json::json!({
             "v": 1,
             "type": "session_assigned",
             "sessionId": session_id,
-            "custom": custom_session
+            "custom": custom_session,
+            "voyagerCount": voyager_count
         });
         if sender
             .send(Message::Text(assign_msg.to_string()))

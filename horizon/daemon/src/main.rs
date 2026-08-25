@@ -63,6 +63,10 @@ struct AppState {
     wormhole_requested_session: Option<String>,
     wormhole_has_token: bool,
     lan_client_count: AtomicUsize,
+    /// Number of Voyagers currently subscribed via Wormhole. PTY output is
+    /// only uploaded to the relay while this is > 0, so a Horizon that is
+    /// merely connected to Wormhole (no viewers) does not stream in real time.
+    wormhole_subscriber_count: AtomicUsize,
     wormhole_state: Mutex<WormholeState>,
     data_dir: PathBuf,
     paired_devices: Mutex<Vec<PairedDevice>>,
@@ -356,6 +360,7 @@ async fn run_server(
             .as_ref()
             .is_some_and(|v| !v.trim().is_empty()),
         lan_client_count: AtomicUsize::new(0),
+        wormhole_subscriber_count: AtomicUsize::new(0),
         wormhole_state: Mutex::new(WormholeState::default()),
         data_dir,
         paired_devices: Mutex::new(paired_devices),
@@ -3107,7 +3112,12 @@ fn start_output_thread(state: Arc<AppState>, session: Arc<PtySession>) {
             append_history(&session.history, &session.history_base_offset, chunk);
             let msg = BroadcastMsg::Binary(build_stdout_message(&session.session_id, chunk));
             let _ = state.lan_broadcast.send(msg.clone());
-            let _ = state.wormhole_broadcast.send(msg);
+            // Skip the relay upload when no Voyager is subscribed through
+            // Wormhole. History is still appended above, so a later subscriber
+            // gets the full backlog via "sync"/"session_sync".
+            if state.wormhole_subscriber_count.load(Ordering::SeqCst) > 0 {
+                let _ = state.wormhole_broadcast.send(msg);
+            }
         }
     });
 }
@@ -3128,7 +3138,10 @@ fn start_output_thread(state: Arc<AppState>, session: Arc<PtySession>) {
             append_history(&session.history, &session.history_base_offset, chunk);
             let msg = BroadcastMsg::Binary(build_stdout_message(&session.session_id, chunk));
             let _ = state.lan_broadcast.send(msg.clone());
-            let _ = state.wormhole_broadcast.send(msg);
+            // Skip the relay upload when no Voyager is subscribed (see unix path).
+            if state.wormhole_subscriber_count.load(Ordering::SeqCst) > 0 {
+                let _ = state.wormhole_broadcast.send(msg);
+            }
         }
     });
 }
@@ -5260,6 +5273,9 @@ async fn run_wormhole(
             let mut wh = state.wormhole_state.lock().await;
             wh.connected = false;
         }
+        // Reset subscriber count so stale counts don't suppress the PTY
+        // stream after reconnect (session_assigned re-initialises it).
+        state.wormhole_subscriber_count.store(0, Ordering::SeqCst);
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 }
@@ -5446,11 +5462,25 @@ async fn handle_wormhole_incoming(
                         let mut wh = state.wormhole_state.lock().await;
                         wh.session_id = Some(session_id.to_string());
                     }
+                    // Initialise the subscriber counter from the relay's current
+                    // voyager count so a reconnecting Horizon gates correctly.
+                    let count = value
+                        .get("voyagerCount")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
+                    state.wormhole_subscriber_count.store(count, Ordering::SeqCst);
                 }
                 "voyager_connect" => {
+                    state.wormhole_subscriber_count.fetch_add(1, Ordering::SeqCst);
                     handle_voyager_connect_wormhole(state, &value, write).await;
                 }
-                "voyager_disconnect" => {}
+                "voyager_disconnect" => {
+                    state.wormhole_subscriber_count.fetch_update(
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                        |n| Some(n.saturating_sub(1)),
+                    ).ok();
+                }
                 "list" => {
                     let ids = list_session_ids(state).await;
                     let _ = write
