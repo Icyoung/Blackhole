@@ -46,18 +46,29 @@ class DirectCandidate {
 }
 
 class HostInfo {
-  const HostInfo({this.hostName, this.vpnPeer, this.remoteAddr});
+  const HostInfo({
+    this.hostName,
+    this.vpnPeer,
+    this.remoteAddr,
+    this.fromInTunnel = false,
+  });
 
   final String? hostName;
   final bool? vpnPeer;
   final String? remoteAddr;
+  final bool fromInTunnel;
 
-  factory HostInfo.fromMap(Map<String, dynamic> map) {
+  factory HostInfo.fromMap(
+    Map<String, dynamic> map, {
+    bool fromInTunnel = false,
+  }) {
     final hostName = map['hostName'];
     return HostInfo(
       hostName: hostName is String && hostName.isNotEmpty ? hostName : null,
-      vpnPeer: map['vpnPeer'] as bool?,
-      remoteAddr: map['remoteAddr'] as String?,
+      // Control-plane host_info must not drive Direct/fallback.
+      vpnPeer: fromInTunnel ? map['vpnPeer'] as bool? : null,
+      remoteAddr: fromInTunnel ? map['remoteAddr'] as String? : null,
+      fromInTunnel: fromInTunnel,
     );
   }
 }
@@ -314,6 +325,7 @@ class ConnectionManager {
     this.onSessionSync,
     this.onEndpointInfo,
     this.onVpnConfig,
+    this.onDataPlaneClosed,
   });
 
   final void Function({required bool waitForPairing}) onConnected;
@@ -354,11 +366,19 @@ class ConnectionManager {
   /// Called when Horizon sends a vpn_config response after peer registration.
   final void Function(EndpointInfo info)? onVpnConfig;
 
+  /// In-tunnel data-plane socket closed; control WS is still up.
+  final VoidCallback? onDataPlaneClosed;
+
   EndpointInfo? _endpointInfo;
   EndpointInfo? get endpointInfo => _endpointInfo;
 
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
+  WebSocketChannel? _dataChannel;
+  StreamSubscription? _dataSubscription;
+  Uri? _dataPlaneUri;
+  String? _dataPlaneDeviceKey;
+  TransportKind? _controlTransportKind;
   Timer? _reconnectTimer;
   Timer? _heartbeatTimer;
   DateTime? _lastMessageAt;
@@ -384,6 +404,8 @@ class ConnectionManager {
   bool get connected => _connected;
   bool get pairingPending => _pairingPending;
   bool get shouldReconnect => _shouldReconnect;
+  bool get hasDataPlane => _dataChannel != null;
+  Uri? get dataPlaneUri => _dataPlaneUri;
   Uri? get activeUri => _lastUri;
   TransportKind get activeTransportKind => _activeTransportKind;
   String? get activeTransportId => _activeTransportId;
@@ -608,9 +630,81 @@ class ConnectionManager {
       );
     }
     _shouldReconnect = shouldReconnect;
+    closeDataPlane(silent: true);
     _resetConnectionState(silent: silent);
     if (shouldReconnect) {
       _scheduleReconnect();
+    }
+  }
+
+  /// Open the in-tunnel data WS without replacing the control connection.
+  Future<void> openDataPlane({
+    required Uri uri,
+    String? deviceKey,
+    Duration readyTimeout = const Duration(seconds: 5),
+  }) async {
+    uri = _ensureWsPath(uri);
+    if (_dataChannel != null && _dataPlaneUri == uri) {
+      return;
+    }
+    closeDataPlane(silent: true);
+    _dataPlaneDeviceKey = deviceKey;
+    _controlTransportKind ??= _activeTransportKind;
+    debugPrint(
+      '[Connection] open data plane uri=$uri deviceKey=${deviceKey ?? "-"}',
+    );
+    try {
+      final channel = WebSocketChannel.connect(uri);
+      try {
+        await channel.ready.timeout(readyTimeout);
+      } catch (error) {
+        debugPrint(
+          '[Connection] data plane ready failed uri=$uri error=$error',
+        );
+        channel.sink.close();
+        onError('Failed to open in-tunnel data plane: $error');
+        return;
+      }
+      final subscription = channel.stream.listen(
+        _handleDataPlaneMessage,
+        onDone: () => _handleDataPlaneClosedFor(channel),
+        onError: (error) {
+          if (!identical(_dataChannel, channel)) {
+            return;
+          }
+          debugPrint('[Connection] data plane error: $error');
+          _handleDataPlaneClosedFor(channel);
+        },
+        cancelOnError: false,
+      );
+      _dataChannel = channel;
+      _dataSubscription = subscription;
+      _dataPlaneUri = uri;
+      debugPrint('[Connection] data plane connected uri=$uri');
+    } catch (error) {
+      debugPrint('[Connection] data plane threw uri=$uri error=$error');
+      _dataChannel = null;
+      _dataSubscription = null;
+      _dataPlaneUri = null;
+      onError('Failed to open in-tunnel data plane: $error');
+    }
+  }
+
+  void closeDataPlane({bool silent = false}) {
+    final hadDataPlane = _dataChannel != null;
+    final subscription = _dataSubscription;
+    final channel = _dataChannel;
+    _dataSubscription = null;
+    _dataChannel = null;
+    _dataPlaneUri = null;
+    _dataPlaneDeviceKey = null;
+    subscription?.cancel();
+    channel?.sink.close();
+    if (_activeTransportKind == TransportKind.wireguardDirect) {
+      _activeTransportKind = _controlTransportKind ?? TransportKind.unknown;
+    }
+    if (hadDataPlane && !silent) {
+      onDataPlaneClosed?.call();
     }
   }
 
@@ -634,8 +728,11 @@ class ConnectionManager {
     }
   }
 
+  WebSocketChannel? get _jsonChannel => _channel;
+  WebSocketChannel? get _binaryChannel => _dataChannel ?? _channel;
+
   void sendCommand(Map<String, dynamic> payload) {
-    final channel = _channel;
+    final channel = _jsonChannel;
     if (channel == null) {
       return;
     }
@@ -662,7 +759,7 @@ class ConnectionManager {
   static const int _maxChunkSize = 1024;
 
   void sendRaw(String sessionId, String data) {
-    final channel = _channel;
+    final channel = _binaryChannel;
     if (channel == null) {
       return;
     }
@@ -686,7 +783,7 @@ class ConnectionManager {
   }
 
   Future<void> _sendChunked(String sessionId, List<int> bytes) async {
-    final channel = _channel;
+    final channel = _binaryChannel;
     if (channel == null) return;
 
     for (var offset = 0; offset < bytes.length; offset += _maxChunkSize) {
@@ -711,7 +808,7 @@ class ConnectionManager {
   }
 
   void sendResize(String sessionId, int cols, int rows) {
-    final channel = _channel;
+    final channel = _binaryChannel;
     if (channel == null) {
       return;
     }
@@ -730,7 +827,7 @@ class ConnectionManager {
   }
 
   void sendPing() {
-    final channel = _channel;
+    final channel = _jsonChannel;
     if (channel == null) {
       return;
     }
@@ -879,10 +976,12 @@ class ConnectionManager {
   }
 
   void _resetConnectionState({bool silent = false}) {
-    _subscription?.cancel();
+    final subscription = _subscription;
+    final channel = _channel;
     _subscription = null;
-    _channel?.sink.close();
     _channel = null;
+    subscription?.cancel();
+    channel?.sink.close();
     _stopHeartbeat();
     _setConnected(false);
     _setPairingPending(false);
@@ -968,7 +1067,7 @@ class ConnectionManager {
       return;
     }
     if (type == 'host_info') {
-      onHostInfo(HostInfo.fromMap(decoded));
+      onHostInfo(HostInfo.fromMap(decoded, fromInTunnel: false));
       return;
     }
     if (type == 'endpoint_info' || type == 'endpoint_probe_response') {
@@ -1036,21 +1135,74 @@ class ConnectionManager {
       return;
     }
     if (type == 'stdout') {
-      final data = decoded['data'];
-      final raw = decoded['raw'];
-      final sessionId = decoded['sessionId'];
-      if (sessionId is String) {
-        Uint8List? bytes;
-        if (data is String) {
-          bytes = Uint8List.fromList(utf8.encode(data));
-        } else if (raw is Uint8List) {
-          bytes = raw;
-        }
-        if (bytes != null) {
-          _logDeleteProbe(utf8.decode(bytes, allowMalformed: true));
-          _logStdoutProbe(bytes);
-          onStdout(sessionId, bytes);
-        }
+      if (_dataChannel != null) {
+        return;
+      }
+      _deliverStdout(decoded);
+    }
+  }
+
+  void _handleDataPlaneClosedFor(WebSocketChannel channel) {
+    if (!identical(_dataChannel, channel)) {
+      return;
+    }
+    closeDataPlane();
+  }
+
+  void _sendDataPlaneActive({bool active = true}) {
+    final channel = _dataChannel;
+    if (channel == null) {
+      return;
+    }
+    channel.sink.add(
+      _encodeMessage({
+        'type': 'data_plane',
+        'active': active,
+        if (_dataPlaneDeviceKey != null) 'deviceKey': _dataPlaneDeviceKey,
+      }),
+    );
+  }
+
+  void _handleDataPlaneMessage(dynamic message) {
+    final decoded = _decodeIncoming(message);
+    if (decoded == null) {
+      return;
+    }
+    if (decoded['type'] == 'unsupported') {
+      return;
+    }
+    final type = decoded['type'];
+    if (type == 'pong') {
+      return;
+    }
+    if (type == 'host_info') {
+      final info = HostInfo.fromMap(decoded, fromInTunnel: true);
+      if (info.vpnPeer == true) {
+        _sendDataPlaneActive();
+      }
+      onHostInfo(info);
+      return;
+    }
+    if (type == 'stdout') {
+      _deliverStdout(decoded);
+    }
+  }
+
+  void _deliverStdout(Map<String, dynamic> decoded) {
+    final data = decoded['data'];
+    final raw = decoded['raw'];
+    final sessionId = decoded['sessionId'];
+    if (sessionId is String) {
+      Uint8List? bytes;
+      if (data is String) {
+        bytes = Uint8List.fromList(utf8.encode(data));
+      } else if (raw is Uint8List) {
+        bytes = raw;
+      }
+      if (bytes != null) {
+        _logDeleteProbe(utf8.decode(bytes, allowMalformed: true));
+        _logStdoutProbe(bytes);
+        onStdout(sessionId, bytes);
       }
     }
   }
@@ -1095,7 +1247,10 @@ class ConnectionManager {
             '[Connection] heartbeat exceeded max misses, reconnecting silently',
           );
           _heartbeatMisses = 0;
-          disconnect(shouldReconnect: true);
+          // Reconnect control only; keep an established in-tunnel data plane.
+          _shouldReconnect = true;
+          _resetConnectionState(silent: true);
+          _scheduleReconnect();
         }
       } else {
         _heartbeatMisses = 0;

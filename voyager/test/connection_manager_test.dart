@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -35,15 +37,16 @@ void main() {
         'hostName': 'Horizon',
         'vpnPeer': true,
         'remoteAddr': '10.13.37.2:4242',
-      });
+      }, fromInTunnel: true);
 
       expect(info.hostName, 'Horizon');
       expect(info.vpnPeer, isTrue);
       expect(info.remoteAddr, '10.13.37.2:4242');
+      expect(info.fromInTunnel, isTrue);
     });
 
     test('treats empty hostName as null and keeps vpnPeer omitted', () {
-      final info = HostInfo.fromMap({'hostName': ''});
+      final info = HostInfo.fromMap({'hostName': ''}, fromInTunnel: true);
 
       expect(info.hostName, isNull);
       expect(info.vpnPeer, isNull);
@@ -55,10 +58,23 @@ void main() {
         'hostName': 'Horizon',
         'vpnPeer': false,
         'remoteAddr': '192.168.1.20:9',
-      });
+      }, fromInTunnel: true);
 
       expect(info.vpnPeer, isFalse);
       expect(info.remoteAddr, '192.168.1.20:9');
+    });
+
+    test('control-plane host_info does not parse vpnPeer', () {
+      final info = HostInfo.fromMap({
+        'hostName': 'Horizon',
+        'vpnPeer': true,
+        'remoteAddr': '10.13.37.2:4242',
+      });
+
+      expect(info.hostName, 'Horizon');
+      expect(info.vpnPeer, isNull);
+      expect(info.remoteAddr, isNull);
+      expect(info.fromInTunnel, isFalse);
     });
   });
 
@@ -1653,6 +1669,192 @@ void main() {
       );
     });
   });
+
+  group('dual-plane control + data sockets', () {
+    late CallbackTracker tracker;
+    late ConnectionManager manager;
+    late _LoopbackWs control;
+    late _LoopbackWs data;
+
+    setUp(() {
+      tracker = CallbackTracker();
+      manager = tracker.createManager();
+      control = _LoopbackWs();
+      data = _LoopbackWs();
+    });
+
+    tearDown(() async {
+      manager.disconnect(silent: true);
+      await control.close();
+      await data.close();
+    });
+
+    test('keeps control WS and routes binary only to data', () async {
+      final controlUri = await control.start();
+      final dataUri = await data.start();
+
+      await manager.connect(
+        uri: controlUri,
+        waitForPairing: false,
+        autoReconnect: false,
+        transportKind: TransportKind.wormholeRelay,
+      );
+      await control.waitForClient();
+      expect(manager.connected, isTrue);
+
+      await manager.openDataPlane(uri: dataUri, deviceKey: 'dev-a');
+      await data.waitForClient();
+      expect(manager.hasDataPlane, isTrue);
+      expect(manager.connected, isTrue);
+      expect(manager.activeUri?.host, controlUri.host);
+      expect(manager.activeUri?.port, controlUri.port);
+
+      manager.sendCommand({'type': 'list'});
+      manager.sendRaw('session-1', 'x');
+
+      await _waitUntil(() => control.messages.isNotEmpty);
+      await _waitUntil(() => data.messages.isNotEmpty);
+
+      expect(
+        control.messages.whereType<String>().any(
+          (msg) => msg.contains('"list"'),
+        ),
+        isTrue,
+      );
+      expect(control.messages.whereType<List<int>>(), isEmpty);
+      expect(data.messages.whereType<String>(), isEmpty);
+      final binary = data.messages.whereType<List<int>>().first;
+      expect(binary[0], 1);
+      expect(binary[1], 1); // stdin
+    });
+
+    test('parses vpnPeer only from in-tunnel host_info', () async {
+      final controlUri = await control.start();
+      final dataUri = await data.start();
+
+      await manager.connect(
+        uri: controlUri,
+        waitForPairing: false,
+        autoReconnect: false,
+      );
+      await control.waitForClient();
+      await manager.openDataPlane(uri: dataUri, deviceKey: 'dev-a');
+      await data.waitForClient();
+
+      control.socket!.add(
+        jsonEncode({
+          'v': 1,
+          'type': 'host_info',
+          'hostName': 'Horizon',
+          'vpnPeer': false,
+        }),
+      );
+      await _waitUntil(() => tracker.hostInfos.length == 1);
+      expect(tracker.hostInfos.single.fromInTunnel, isFalse);
+      expect(tracker.hostInfos.single.vpnPeer, isNull);
+
+      data.socket!.add(
+        jsonEncode({
+          'v': 1,
+          'type': 'host_info',
+          'hostName': 'Horizon',
+          'vpnPeer': true,
+          'remoteAddr': '10.13.37.2:4242',
+        }),
+      );
+      await _waitUntil(() => tracker.hostInfos.length == 2);
+      expect(tracker.hostInfos.last.fromInTunnel, isTrue);
+      expect(tracker.hostInfos.last.vpnPeer, isTrue);
+
+      await _waitUntil(
+        () => data.messages.whereType<String>().any(
+          (msg) => msg.contains('"data_plane"'),
+        ),
+      );
+      final dataPlane = jsonDecode(
+        data.messages.whereType<String>().firstWhere(
+          (msg) => msg.contains('"data_plane"'),
+        ),
+      );
+      expect(dataPlane['type'], 'data_plane');
+      expect(dataPlane['active'], isTrue);
+      expect(dataPlane['deviceKey'], 'dev-a');
+      expect(dataPlane['v'], 1);
+    });
+
+    test(
+      'closeDataPlane keeps control connected and does not re-pair',
+      () async {
+        final controlUri = await control.start();
+        final dataUri = await data.start();
+
+        await manager.connect(
+          uri: controlUri,
+          waitForPairing: false,
+          autoReconnect: false,
+        );
+        await control.waitForClient();
+        await manager.openDataPlane(uri: dataUri, deviceKey: 'dev-a');
+        await data.waitForClient();
+
+        manager.closeDataPlane(silent: true);
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+
+        expect(manager.hasDataPlane, isFalse);
+        expect(manager.connected, isTrue);
+        expect(manager.pairingPending, isFalse);
+        expect(tracker.pairingResults, isEmpty);
+      },
+    );
+  });
+}
+
+Future<void> _waitUntil(bool Function() test) async {
+  final end = DateTime.now().add(const Duration(seconds: 3));
+  while (!test()) {
+    if (DateTime.now().isAfter(end)) {
+      throw TimeoutException('condition not met');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+  }
+}
+
+class _LoopbackWs {
+  HttpServer? _server;
+  WebSocket? socket;
+  final messages = <dynamic>[];
+  Completer<WebSocket>? _ready;
+
+  Future<Uri> start() async {
+    _ready = Completer<WebSocket>();
+    _server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    unawaited(
+      _server!.forEach((request) async {
+        if (WebSocketTransformer.isUpgradeRequest(request)) {
+          final ws = await WebSocketTransformer.upgrade(request);
+          socket = ws;
+          ws.listen(messages.add);
+          final ready = _ready;
+          if (ready != null && !ready.isCompleted) {
+            ready.complete(ws);
+          }
+        } else {
+          request.response.statusCode = HttpStatus.notFound;
+          await request.response.close();
+        }
+      }),
+    );
+    return Uri.parse('ws://${_server!.address.address}:${_server!.port}/ws');
+  }
+
+  Future<void> waitForClient() {
+    return _ready!.future.timeout(const Duration(seconds: 3));
+  }
+
+  Future<void> close() async {
+    await socket?.close();
+    await _server?.close(force: true);
+  }
 }
 
 // =============================================================================

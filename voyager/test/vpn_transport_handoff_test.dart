@@ -549,6 +549,13 @@ void main() {
         ),
         VpnHostInfoAction.ignore,
       );
+      expect(
+        VpnTransportHandoffCoordinator.hostInfoAction(
+          socketHost: null,
+          vpnPeer: false,
+        ),
+        VpnHostInfoAction.ignore,
+      );
     });
   });
 

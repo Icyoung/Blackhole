@@ -1,5 +1,6 @@
 mod dns_forwarder;
 mod nat;
+mod pty_fanout;
 mod session_persist;
 mod tun_device;
 mod upnp;
@@ -23,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
 use axum::extract::connect_info::Connected;
@@ -56,11 +58,32 @@ enum BroadcastMsg {
     Binary(Vec<u8>),
 }
 
+struct PtySink {
+    tx: mpsc::UnboundedSender<BroadcastMsg>,
+    device_key: Option<String>,
+    data_plane: bool,
+}
+
+impl PtySink {
+    fn meta(&self, id: u64) -> pty_fanout::PtySinkMeta {
+        pty_fanout::PtySinkMeta {
+            id,
+            device_key: self.device_key.clone(),
+            data_plane: self.data_plane,
+        }
+    }
+}
+
 struct AppState {
     sessions: Arc<Mutex<HashMap<String, Arc<PtySession>>>>,
     inject_tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     lan_broadcast: broadcast::Sender<BroadcastMsg>,
     wormhole_broadcast: broadcast::Sender<BroadcastMsg>,
+    /// Per-socket PTY binary sinks. Std mutex so the PTY reader thread can fan out.
+    pty_sinks: StdMutex<HashMap<u64, PtySink>>,
+    pty_sink_next_id: AtomicU64,
+    /// Wormhole Voyager device_keys (refcount). Dual-plane gating is per-key.
+    wormhole_device_keys: StdMutex<HashMap<String, usize>>,
     config_id: Option<String>,
     host_name: String,
     shell: String,
@@ -408,6 +431,9 @@ async fn run_server(
         inject_tasks: Mutex::new(HashMap::new()),
         lan_broadcast: lan_tx,
         wormhole_broadcast: wormhole_tx,
+        pty_sinks: StdMutex::new(HashMap::new()),
+        pty_sink_next_id: AtomicU64::new(1),
+        wormhole_device_keys: StdMutex::new(HashMap::new()),
         config_id: config.config_id.clone(),
         host_name: config.host_name.clone(),
         shell: config.shell.clone(),
@@ -1075,6 +1101,8 @@ async fn handle_lan_socket(
     state.lan_client_count.fetch_add(1, Ordering::SeqCst);
     let (mut sink, mut stream) = socket.split();
     let mut broadcast_rx = state.lan_broadcast.subscribe();
+    let (pty_tx, mut pty_rx) = mpsc::unbounded_channel();
+    let sink_id = register_pty_sink(&state, pty_tx);
     let remote_addr = remote.remote;
     let mut first_vpn_stdout_logged = false;
 
@@ -1125,7 +1153,7 @@ async fn handle_lan_socket(
         tokio::select! {
             msg = stream.next() => {
                 let Some(Ok(msg)) = msg else { break };
-                if handle_lan_incoming(&state, msg, &mut sink, remote_addr, vpn_peer)
+                if handle_lan_incoming(&state, msg, &mut sink, remote_addr, vpn_peer, sink_id)
                     .await
                     .is_err()
                 {
@@ -1134,6 +1162,20 @@ async fn handle_lan_socket(
             }
             out = broadcast_rx.recv() => {
                 let Ok(out) = out else { break };
+                // Data-plane sockets carry binary PTY only; JSON stays on control.
+                if pty_sink_is_data_plane(&state, sink_id) {
+                    continue;
+                }
+                let msg = match out {
+                    BroadcastMsg::Text(text) => AxumMessage::Text(text),
+                    BroadcastMsg::Binary(bytes) => AxumMessage::Binary(bytes),
+                };
+                if sink.send(msg).await.is_err() {
+                    break;
+                }
+            }
+            out = pty_rx.recv() => {
+                let Some(out) = out else { continue };
                 if vpn_peer && !first_vpn_stdout_logged {
                     if let BroadcastMsg::Binary(bytes) = &out {
                         if let Some(decoded) = decode_binary(bytes) {
@@ -1160,12 +1202,153 @@ async fn handle_lan_socket(
         }
     }
 
+    unregister_pty_sink(&state, sink_id);
     state.lan_client_count.fetch_sub(1, Ordering::SeqCst);
     info!(
         remote_addr = %remote_addr,
         vpn_peer = vpn_peer,
         "websocket closed"
     );
+}
+
+fn pty_sinks_lock(state: &AppState) -> std::sync::MutexGuard<'_, HashMap<u64, PtySink>> {
+    state.pty_sinks.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn wormhole_device_keys_lock(
+    state: &AppState,
+) -> std::sync::MutexGuard<'_, HashMap<String, usize>> {
+    state
+        .wormhole_device_keys
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+fn register_pty_sink(state: &AppState, tx: mpsc::UnboundedSender<BroadcastMsg>) -> u64 {
+    let id = state.pty_sink_next_id.fetch_add(1, Ordering::SeqCst);
+    pty_sinks_lock(state).insert(
+        id,
+        PtySink {
+            tx,
+            device_key: None,
+            data_plane: false,
+        },
+    );
+    id
+}
+
+fn unregister_pty_sink(state: &AppState, sink_id: u64) {
+    pty_sinks_lock(state).remove(&sink_id);
+}
+
+fn pty_sink_is_data_plane(state: &AppState, sink_id: u64) -> bool {
+    pty_sinks_lock(state)
+        .get(&sink_id)
+        .is_some_and(|sink| sink.data_plane)
+}
+
+fn update_pty_sink_data_plane(
+    state: &AppState,
+    sink_id: u64,
+    active: bool,
+    device_key: Option<String>,
+) {
+    let mut sinks = pty_sinks_lock(state);
+    let Some(sink) = sinks.get_mut(&sink_id) else {
+        return;
+    };
+    let mut meta = sink.meta(sink_id);
+    meta.apply_data_plane(active, device_key);
+    sink.device_key = meta.device_key;
+    sink.data_plane = meta.data_plane;
+}
+
+fn track_wormhole_device_key(state: &AppState, device_key: Option<&str>, add: bool) {
+    let Some(key) = device_key.map(str::trim).filter(|k| !k.is_empty()) else {
+        return;
+    };
+    let mut keys = wormhole_device_keys_lock(state);
+    if add {
+        *keys.entry(key.to_string()).or_insert(0) += 1;
+        return;
+    }
+    if let Some(count) = keys.get_mut(key) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            keys.remove(key);
+        }
+    }
+}
+
+fn fanout_pty_binary(state: &AppState, msg: BroadcastMsg) {
+    let (txs, send_wormhole) = {
+        let sinks = pty_sinks_lock(state);
+        let wormhole_keys = wormhole_device_keys_lock(state);
+        let metas: Vec<_> = sinks.iter().map(|(id, sink)| sink.meta(*id)).collect();
+        let keys: Vec<String> = wormhole_keys.keys().cloned().collect();
+        let plan = pty_fanout::plan_pty_binary_fanout(metas, keys);
+        let txs: Vec<_> = plan
+            .lan_sink_ids
+            .iter()
+            .filter_map(|id| sinks.get(id).map(|sink| sink.tx.clone()))
+            .collect();
+        (txs, plan.send_wormhole)
+    };
+    for tx in txs {
+        let _ = tx.send(msg.clone());
+    }
+    // subscriber_count is "is anyone on Wormhole at all?", not the dual-plane gate.
+    if send_wormhole && state.wormhole_subscriber_count.load(Ordering::SeqCst) > 0 {
+        let _ = state.wormhole_broadcast.send(msg);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_app_state() -> Arc<AppState> {
+    let (lan_tx, _) = broadcast::channel::<BroadcastMsg>(8);
+    let (wormhole_tx, _) = broadcast::channel::<BroadcastMsg>(8);
+    let (vpn_explicit_ws, _) = watch::channel(false);
+    Arc::new(AppState {
+        sessions: Arc::new(Mutex::new(HashMap::new())),
+        inject_tasks: Mutex::new(HashMap::new()),
+        lan_broadcast: lan_tx,
+        wormhole_broadcast: wormhole_tx,
+        pty_sinks: StdMutex::new(HashMap::new()),
+        pty_sink_next_id: AtomicU64::new(1),
+        wormhole_device_keys: StdMutex::new(HashMap::new()),
+        config_id: None,
+        host_name: "test-host".to_string(),
+        shell: "/bin/sh".to_string(),
+        dev_mode: true,
+        bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        ws_bind_addrs: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+        port: 9527,
+        wormhole_url: None,
+        wormhole_token: None,
+        wormhole_requested_session: None,
+        wormhole_has_token: false,
+        lan_client_count: AtomicUsize::new(0),
+        wormhole_subscriber_count: AtomicUsize::new(0),
+        wormhole_state: Mutex::new(WormholeState::default()),
+        data_dir: std::env::temp_dir(),
+        paired_devices: Mutex::new(Vec::new()),
+        pending_pairing: Mutex::new(None),
+        wormhole_sender: Mutex::new(None),
+        groups: Mutex::new(Vec::new()),
+        session_names: Mutex::new(HashMap::new()),
+        wg_public_key: Mutex::new(Some("server-pub".to_string())),
+        wg_udp_port: Mutex::new(Some(51820)),
+        wg_observed_addr: Mutex::new(None),
+        wg_observed_endpoints: Mutex::new(Vec::new()),
+        wg_internal_routes: Mutex::new(vec!["192.168.1.0/24".to_string()]),
+        wg_peer_tx: Mutex::new(None),
+        vpn_explicit_ws,
+        vpn_tcp_probe: Mutex::new(None),
+        last_punch_epoch: AtomicU64::new(0),
+        last_endpoint_register_sig: Mutex::new(None),
+        endpoint_register_retrying: AtomicBool::new(false),
+        wg_netcheck_notify: Notify::new(),
+    })
 }
 
 async fn status_handler(
@@ -2012,6 +2195,7 @@ async fn handle_lan_incoming(
     sink: &mut futures_util::stream::SplitSink<WebSocket, AxumMessage>,
     remote_addr: SocketAddr,
     vpn_peer: bool,
+    sink_id: u64,
 ) -> Result<(), ()> {
     match msg {
         AxumMessage::Text(text) => {
@@ -2041,6 +2225,17 @@ async fn handle_lan_incoming(
                 }
                 "ping" => {
                     let _ = sink.send(AxumMessage::Binary(build_pong_message())).await;
+                }
+                "data_plane" => {
+                    let active = value
+                        .get("active")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let key = value
+                        .get("deviceKey")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    update_pty_sink_data_plane(state, sink_id, active, key);
                 }
                 "list" => {
                     let _ = send_session_list(state, sink, remote_addr, vpn_peer).await;
@@ -3451,13 +3646,7 @@ fn start_output_thread(state: Arc<AppState>, session: Arc<PtySession>) {
                 chunk,
             );
             let msg = BroadcastMsg::Binary(build_stdout_message(&session.session_id, chunk));
-            let _ = state.lan_broadcast.send(msg.clone());
-            // Skip the relay upload when no Voyager is subscribed through
-            // Wormhole. History is still appended above, so a later subscriber
-            // gets the full backlog via "sync"/"session_sync".
-            if state.wormhole_subscriber_count.load(Ordering::SeqCst) > 0 {
-                let _ = state.wormhole_broadcast.send(msg);
-            }
+            fanout_pty_binary(&state, msg);
         }
     });
 }
@@ -3482,11 +3671,7 @@ fn start_output_thread(state: Arc<AppState>, session: Arc<PtySession>) {
                 chunk,
             );
             let msg = BroadcastMsg::Binary(build_stdout_message(&session.session_id, chunk));
-            let _ = state.lan_broadcast.send(msg.clone());
-            // Skip the relay upload when no Voyager is subscribed (see unix path).
-            if state.wormhole_subscriber_count.load(Ordering::SeqCst) > 0 {
-                let _ = state.wormhole_broadcast.send(msg);
-            }
+            fanout_pty_binary(&state, msg);
         }
     });
 }
@@ -5990,6 +6175,7 @@ async fn run_wormhole(
         // Reset subscriber count so stale counts don't suppress the PTY
         // stream after reconnect (session_assigned re-initialises it).
         state.wormhole_subscriber_count.store(0, Ordering::SeqCst);
+        wormhole_device_keys_lock(&state).clear();
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 }
@@ -6174,6 +6360,11 @@ async fn handle_wormhole_incoming(
                     state
                         .wormhole_subscriber_count
                         .fetch_add(1, Ordering::SeqCst);
+                    track_wormhole_device_key(
+                        state,
+                        value.get("deviceKey").and_then(|v| v.as_str()),
+                        true,
+                    );
                     handle_voyager_connect_wormhole(state, &value, write).await;
                 }
                 "voyager_disconnect" => {
@@ -6183,6 +6374,11 @@ async fn handle_wormhole_incoming(
                             Some(n.saturating_sub(1))
                         })
                         .ok();
+                    track_wormhole_device_key(
+                        state,
+                        value.get("deviceKey").and_then(|v| v.as_str()),
+                        false,
+                    );
                 }
                 "list" => {
                     let ids = list_session_ids(state).await;

@@ -386,58 +386,17 @@ pub(crate) fn spawn_upnp_udp_candidate_task(state: Arc<AppState>, wg_port: u16) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use serde_json::json;
-    use tokio::sync::{broadcast, mpsc, watch, Mutex, Notify};
+    use tokio::sync::mpsc;
 
-    use crate::{BroadcastMsg, WgPeerCommand, WormholeState};
+    use crate::{test_app_state, WgPeerCommand};
 
     fn test_state() -> Arc<AppState> {
-        let (lan_tx, _) = broadcast::channel::<BroadcastMsg>(8);
-        let (wormhole_tx, _) = broadcast::channel::<BroadcastMsg>(8);
-        let (vpn_explicit_ws, _) = watch::channel(false);
-        Arc::new(AppState {
-            sessions: Arc::new(Mutex::new(HashMap::new())),
-            inject_tasks: Mutex::new(HashMap::new()),
-            lan_broadcast: lan_tx,
-            wormhole_broadcast: wormhole_tx,
-            config_id: None,
-            host_name: "test-host".to_string(),
-            shell: "/bin/sh".to_string(),
-            dev_mode: true,
-            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            ws_bind_addrs: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
-            port: 9527,
-            wormhole_url: None,
-            wormhole_token: None,
-            wormhole_requested_session: None,
-            wormhole_has_token: false,
-            lan_client_count: AtomicUsize::new(0),
-            wormhole_subscriber_count: AtomicUsize::new(0),
-            wormhole_state: Mutex::new(WormholeState::default()),
-            data_dir: std::env::temp_dir(),
-            paired_devices: Mutex::new(Vec::new()),
-            pending_pairing: Mutex::new(None),
-            wormhole_sender: Mutex::new(None),
-            groups: Mutex::new(Vec::new()),
-            session_names: Mutex::new(HashMap::new()),
-            wg_public_key: Mutex::new(Some("server-pub".to_string())),
-            wg_udp_port: Mutex::new(Some(51820)),
-            wg_observed_addr: Mutex::new(None),
-            wg_observed_endpoints: Mutex::new(Vec::new()),
-            wg_internal_routes: Mutex::new(vec!["192.168.1.0/24".to_string()]),
-            wg_peer_tx: Mutex::new(None),
-            vpn_explicit_ws,
-            vpn_tcp_probe: Mutex::new(None),
-            last_punch_epoch: AtomicU64::new(0),
-            last_endpoint_register_sig: Mutex::new(None),
-            endpoint_register_retrying: AtomicBool::new(false),
-            wg_netcheck_notify: Notify::new(),
-        })
+        test_app_state()
     }
 
     fn spawn_add_peer_responder() -> mpsc::UnboundedSender<WgPeerCommand> {
