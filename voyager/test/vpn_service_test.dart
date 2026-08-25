@@ -472,6 +472,7 @@ void main() {
           'clientIp': '10.13.37.2',
           'serverIp': '10.13.37.1',
           'lanPort': 9527,
+          'timeSinceLastHandshakeSecs': 0,
         };
 
         await service.refreshStatus();
@@ -491,6 +492,7 @@ void main() {
           'connectionMode': 'relay',
           'clientIp': '10.0.0.2',
           'serverIp': '10.0.0.1',
+          'timeSinceLastHandshakeSecs': 0,
         };
 
         await service.refreshStatus();
@@ -503,6 +505,7 @@ void main() {
           'status': 'connected',
           'clientIp': '10.0.0.2',
           'serverIp': '10.0.0.1',
+          'timeSinceLastHandshakeSecs': 0,
         };
 
         await service.refreshStatus();
@@ -537,6 +540,7 @@ void main() {
         mockGetStatusResult = {
           'status': 'connected',
           'connectionMode': 'direct',
+          'timeSinceLastHandshakeSecs': 0,
           'plannedDirectCandidates': [
             {'host': '192.168.1.5', 'port': 51821},
             {'host': '10.0.0.5', 'port': 51822},
@@ -618,6 +622,7 @@ void main() {
           'status': 'connected',
           'clientIp': '10.0.0.2',
           'serverIp': '10.0.0.1',
+          'timeSinceLastHandshakeSecs': 0,
         };
 
         await service.refreshStatus();
@@ -665,6 +670,7 @@ void main() {
           'timestamp': freshTime,
           'clientIp': '10.0.0.2',
           'serverIp': '10.0.0.1',
+          'timeSinceLastHandshakeSecs': 0,
         };
 
         await service.refreshStatus();
@@ -722,6 +728,7 @@ void main() {
           'status': 'connected',
           'clientIp': '10.0.0.2',
           'serverIp': '10.0.0.1',
+          'timeSinceLastHandshakeSecs': 0,
         };
 
         await service.refreshStatus();
@@ -745,6 +752,7 @@ void main() {
           'timestamp': freshTime,
           'clientIp': '10.0.0.2',
           'serverIp': '10.0.0.1',
+          'timeSinceLastHandshakeSecs': 0,
         };
 
         await service.refreshStatus();
@@ -764,6 +772,7 @@ void main() {
           'timestamp': oldTime,
           'clientIp': '10.0.0.3',
           'serverIp': '10.0.0.1',
+          'timeSinceLastHandshakeSecs': 1,
         };
 
         await service.refreshStatus();
@@ -771,7 +780,10 @@ void main() {
       });
 
       test('missing list fields default to empty lists', () async {
-        mockGetStatusResult = {'status': 'connected'};
+        mockGetStatusResult = {
+          'status': 'connected',
+          'timeSinceLastHandshakeSecs': 0,
+        };
 
         await service.refreshStatus();
 
@@ -814,6 +826,28 @@ void main() {
         expect(service.lastDirectWriteLabel, isNull);
         expect(service.lastDirectWriteError, isNull);
         expect(service.error, isNull);
+      });
+
+      test('connected without handshake age stays connecting', () async {
+        mockGetStatusResult = {'status': 'connected', 'clientIp': '10.0.0.2'};
+
+        await service.refreshStatus();
+
+        expect(service.status, VpnStatus.connecting);
+        expect(service.isConnected, isFalse);
+        expect(service.clientIp, '10.0.0.2');
+      });
+
+      test('connected with negative handshake age stays connecting', () async {
+        mockGetStatusResult = {
+          'status': 'connected',
+          'timeSinceLastHandshakeSecs': -1,
+        };
+
+        await service.refreshStatus();
+
+        expect(service.status, VpnStatus.connecting);
+        expect(service.isConnected, isFalse);
       });
     });
 
@@ -881,6 +915,7 @@ void main() {
           'status': 'connected',
           'clientIp': '10.13.37.2',
           'serverIp': '10.13.37.1',
+          'timeSinceLastHandshakeSecs': 0,
         };
 
         await service.start(testConfig);
@@ -1015,6 +1050,7 @@ void main() {
           'status': 'connected',
           'clientIp': '10.0.0.2',
           'serverIp': '10.0.0.1',
+          'timeSinceLastHandshakeSecs': 0,
         };
 
         final status = await service.getStatus();
@@ -1109,15 +1145,17 @@ void main() {
     late VpnService service;
     final List<MethodCall> methodCalls = [];
     const channel = MethodChannel('com.blackhole.voyager/vpn');
+    Map<String, dynamic> rotationStatus = {'status': 'connecting'};
 
     setUp(() {
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
       methodCalls.clear();
+      rotationStatus = {'status': 'connecting'};
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(channel, (MethodCall call) async {
             methodCalls.add(call);
             if (call.method == 'getStatus') {
-              return {'status': 'connecting'};
+              return rotationStatus;
             }
             return null;
           });
@@ -1164,6 +1202,110 @@ void main() {
       expect(
         methodCalls.where((call) => call.method == 'setActiveCandidate'),
         isEmpty,
+      );
+    });
+
+    VpnService rotationService(DateTime Function() clock) {
+      return VpnService(
+        clock: clock,
+        candidateTickInterval: const Duration(days: 1),
+        setActiveCandidateRetries: 3,
+        setActiveCandidateRetryDelay: Duration.zero,
+      );
+    }
+
+    const rotationConfig = VpnConfig(
+      privateKey: 'pk',
+      peerPublicKey: 'ppk',
+      serverAddr: '1.2.3.4',
+      serverPort: 51820,
+      clientIp: '10.13.37.2',
+      serverIp: '10.13.37.1',
+      directCandidates: [
+        {'addr': '192.168.1.5', 'port': 51821, 'priority': 250},
+        {'addr': '203.0.113.5', 'port': 51822, 'priority': 100},
+        {'addr': '198.51.100.8', 'port': 51823, 'priority': 50},
+      ],
+    );
+
+    test('advances dest after 12s without handshake', () async {
+      var now = DateTime.utc(2026, 1, 1);
+      service.dispose();
+      service = rotationService(() => now);
+      await service.start(rotationConfig);
+
+      now = now.add(const Duration(seconds: 12));
+      await service.tickUserspaceCandidatesForTest();
+
+      final candidateCalls =
+          methodCalls
+              .where((call) => call.method == 'setActiveCandidate')
+              .toList();
+      expect(candidateCalls, hasLength(2));
+      expect((candidateCalls[1].arguments as Map)['addr'], '203.0.113.5');
+    });
+
+    test('fails when 30s handshake budget expires', () async {
+      var now = DateTime.utc(2026, 1, 1);
+      service.dispose();
+      service = rotationService(() => now);
+      await service.start(rotationConfig);
+
+      now = now.add(const Duration(seconds: 12));
+      await service.tickUserspaceCandidatesForTest();
+      now = now.add(const Duration(seconds: 12));
+      await service.tickUserspaceCandidatesForTest();
+      now = now.add(const Duration(seconds: 6));
+      await service.tickUserspaceCandidatesForTest();
+
+      expect(methodCalls.where((call) => call.method == 'fail'), isNotEmpty);
+      expect(service.status, VpnStatus.error);
+      expect(service.error, 'WireGuard handshake timed out');
+    });
+
+    test('does not rotate after handshake age is set', () async {
+      var now = DateTime.utc(2026, 1, 1);
+      service.dispose();
+      service = rotationService(() => now);
+      await service.start(rotationConfig);
+
+      rotationStatus = {
+        'status': 'connecting',
+        'timeSinceLastHandshakeSecs': 0,
+      };
+      now = now.add(const Duration(seconds: 12));
+      await service.tickUserspaceCandidatesForTest();
+
+      expect(
+        methodCalls.where((call) => call.method == 'setActiveCandidate'),
+        hasLength(1),
+      );
+    });
+
+    test('retries setActiveCandidate after NO_VPN', () async {
+      var noVpnRemaining = 2;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall call) async {
+            methodCalls.add(call);
+            if (call.method == 'getStatus') {
+              return {'status': 'connecting'};
+            }
+            if (call.method == 'setActiveCandidate' && noVpnRemaining > 0) {
+              noVpnRemaining -= 1;
+              throw PlatformException(
+                code: 'NO_VPN',
+                message: 'VPN is not running',
+              );
+            }
+            return null;
+          });
+      service.dispose();
+      service = rotationService(() => DateTime.utc(2026, 1, 1));
+      await service.start(rotationConfig);
+
+      expect(
+        methodCalls.where((call) => call.method == 'setActiveCandidate'),
+        hasLength(3),
       );
     });
   });

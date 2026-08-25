@@ -20,6 +20,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -36,6 +37,49 @@ class BlackholeVpnService : VpnService() {
 
         @Volatile var instance: BlackholeVpnService? = null
             private set
+
+        @Volatile var startError: String? = null
+            private set
+        @Volatile private var lastStatusPayload: Map<String, Any?>? = null
+        private val startMutex = Any()
+        @Volatile private var startGeneration = 0
+        @Volatile private var startLatch: CountDownLatch? = null
+
+        private val disconnectedPayload: Map<String, Any?> = mapOf(
+            "status" to "disconnected",
+            "connectionMode" to "unknown",
+            "directSessionReady" to false,
+            "udpPacketsIn" to 0L,
+            "tunPacketsIn" to 0L,
+            "wgRxBytes" to 0L,
+            "timeSinceLastHandshakeSecs" to -1L,
+        )
+
+        fun prepareStart(): Pair<CountDownLatch, Int> {
+            synchronized(startMutex) {
+                startGeneration += 1
+                startError = null
+                val latch = CountDownLatch(1)
+                startLatch = latch
+                return latch to startGeneration
+            }
+        }
+
+        fun completeStart(generation: Int, error: String?) {
+            synchronized(startMutex) {
+                if (generation != startGeneration) return
+                startError = error
+                startLatch?.countDown()
+            }
+        }
+
+        fun currentStatusPayload(): Map<String, Any?> {
+            return instance?.getStatusPayload() ?: lastStatusPayload ?: disconnectedPayload
+        }
+
+        fun rememberStatusPayload(payload: Map<String, Any?>) {
+            lastStatusPayload = payload
+        }
     }
 
     private var tunFd: ParcelFileDescriptor? = null
@@ -69,8 +113,10 @@ class BlackholeVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val generation = intent?.getIntExtra("startGeneration", -1) ?: -1
         val configJson = intent?.getStringExtra("config")
         if (configJson == null) {
+            completeStart(generation, "Missing VPN config")
             stopSelf()
             return START_NOT_STICKY
         }
@@ -79,8 +125,10 @@ class BlackholeVpnService : VpnService() {
 
         try {
             startTunnel(JSONObject(configJson))
+            completeStart(generation, null)
         } catch (t: Throwable) {
             recordFatalError("Failed to start tunnel", t)
+            completeStart(generation, t.message ?: "Failed to start tunnel")
         }
 
         return START_NOT_STICKY
@@ -106,7 +154,6 @@ class BlackholeVpnService : VpnService() {
         announcedConnected = false
         observedCandidates = null
         pendingNetcheckNonce = null
-        startedAtElapsedMs = SystemClock.elapsedRealtime()
 
         // 1. Create WG tunnel handle
         val wgConfig = JSONObject().apply {
@@ -122,20 +169,23 @@ class BlackholeVpnService : VpnService() {
         tunnelHandle.set(handle)
         Log.i(TAG, "WG tunnel created")
 
-        // 2. Bind one unconnected UDP socket and protect it before any send.
         val localPort = config.optInt("localPort", 0)
         val socket = DatagramSocket(null)
         socket.reuseAddress = true
         socket.bind(InetSocketAddress(localPort))
+        // protect() before establish() so WG UDP is not routed into the TUN.
         if (!protect(socket)) {
             socket.close()
             throw RuntimeException("Failed to protect VPN UDP socket")
         }
         udpSocket = socket
+        val netcheckDest = resolveNetcheckDest(config)
         synchronized(destLock) {
-            peerAddress = InetSocketAddress(serverAddr, serverPort)
+            if (peerAddress == null) {
+                peerAddress = InetSocketAddress(serverAddr, serverPort)
+            }
         }
-        Log.i(TAG, "UDP bound localPort=${socket.localPort} dest=$serverAddr:$serverPort")
+        Log.i(TAG, "UDP bound localPort=${socket.localPort}")
 
         // 3. Create TUN interface
         val prefixLen = subnet.substringAfter("/", "24").toInt()
@@ -170,11 +220,11 @@ class BlackholeVpnService : VpnService() {
         Log.i(TAG, "TUN interface created")
 
         isActive.set(true)
+        startedAtElapsedMs = SystemClock.elapsedRealtime()
 
-        // 4. Start packet loops. Netcheck shares this protected mapping.
         startUdpReadThread()
         startTunReadThread()
-        performNetcheck(config)
+        sendNetcheck(netcheckDest)
         startTimerLoop()
         sendHandshakeInitiation()
 
@@ -183,9 +233,15 @@ class BlackholeVpnService : VpnService() {
     }
 
     fun setActiveCandidate(addr: String, port: Int): Boolean {
-        if (tunnelHandle.get() == 0L) return false
+        if (currentWireGuardStats().handshakeAgeSecs >= 0) {
+            return true
+        }
+        val dest = InetSocketAddress(addr, port)
         synchronized(destLock) {
-            peerAddress = InetSocketAddress(addr, port)
+            peerAddress = dest
+        }
+        if (tunnelHandle.get() == 0L) {
+            return false
         }
         Log.i(TAG, "Active candidate set to $addr:$port")
         sendHandshakeInitiation()
@@ -333,16 +389,26 @@ class BlackholeVpnService : VpnService() {
         }
     }
 
-    private fun performNetcheck(config: JSONObject) {
+    private fun resolveNetcheckDest(config: JSONObject): InetSocketAddress? {
         val host = config.optString("netcheckHost").trim()
         val port = config.optInt("netcheckPort", 0)
-        if (host.isEmpty() || port <= 0) return
+        if (host.isEmpty() || port <= 0) return null
+        return try {
+            InetSocketAddress(host, port)
+        } catch (e: Exception) {
+            Log.w(TAG, "UDP netcheck resolve failed", e)
+            null
+        }
+    }
+
+    private fun sendNetcheck(dest: InetSocketAddress?) {
+        if (dest == null) return
         val nonce = UUID.randomUUID().toString()
         val payload = """{"type":"netcheck","nonce":"$nonce"}""".toByteArray(Charsets.UTF_8)
         pendingNetcheckNonce = nonce
         try {
             val socket = udpSocket ?: return
-            socket.send(DatagramPacket(payload, payload.size, InetSocketAddress(host, port)))
+            socket.send(DatagramPacket(payload, payload.size, dest))
             udpPacketsOut.incrementAndGet()
         } catch (e: Exception) {
             Log.w(TAG, "UDP netcheck failed", e)
@@ -461,6 +527,7 @@ class BlackholeVpnService : VpnService() {
             result["connectionMode"] = "direct"
         } else {
             result["status"] = "disconnected"
+            result["connectionMode"] = "unknown"
         }
         result["timestamp"] = currentTimestamp()
         result["clientIp"] = activeConfig?.optString("clientIp")
@@ -483,6 +550,7 @@ class BlackholeVpnService : VpnService() {
                 "port" to dest.port,
             )
         }
+        rememberStatusPayload(result)
         return result
     }
 
@@ -533,7 +601,7 @@ class BlackholeVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        stopTunnel(clearError = true)
+        stopTunnel(clearError = false)
         instance = null
         super.onDestroy()
     }

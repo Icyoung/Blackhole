@@ -4,6 +4,8 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.net.VpnService
 import android.util.Base64
 import android.util.Log
@@ -16,6 +18,7 @@ import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.PluginRegistry
 import java.util.Timer
 import java.util.TimerTask
+import java.util.concurrent.TimeUnit
 
 class VpnPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
     EventChannel.StreamHandler, ActivityAware, PluginRegistry.ActivityResultListener {
@@ -26,9 +29,8 @@ class VpnPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
         private var eventSink: EventChannel.EventSink? = null
 
         fun notifyStatusChanged() {
-            val payload = BlackholeVpnService.instance?.getStatusPayload()
-                ?: mapOf("status" to "disconnected")
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
+            val payload = BlackholeVpnService.currentStatusPayload()
+            Handler(Looper.getMainLooper()).post {
                 eventSink?.success(payload)
             }
         }
@@ -77,8 +79,7 @@ class VpnPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
             }
             "getStatus" -> {
                 try {
-                    val payload = BlackholeVpnService.instance?.getStatusPayload()
-                        ?: mapOf("status" to "disconnected")
+                    val payload = BlackholeVpnService.currentStatusPayload()
                     result.success(payload)
                 } catch (t: Throwable) {
                     Log.e(TAG, "Failed to get VPN status", t)
@@ -119,29 +120,49 @@ class VpnPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
             return
         }
 
-        // Permission already granted
+        launchAndWait(configJson, result)
+    }
+
+    private fun launchAndWait(configJson: String, result: MethodChannel.Result) {
+        val ctx = context ?: run {
+            result.error("NO_CONTEXT", "No context available", null)
+            return
+        }
+        val (latch, generation) = BlackholeVpnService.prepareStart()
         try {
-            launchVpnService(configJson)
-            result.success(null)
+            val intent = Intent(ctx, BlackholeVpnService::class.java)
+            intent.putExtra("config", configJson)
+            intent.putExtra("startGeneration", generation)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ctx.startForegroundService(intent)
+            } else {
+                ctx.startService(intent)
+            }
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to launch VPN service", t)
+            BlackholeVpnService.completeStart(generation, t.message ?: "Failed to launch VPN service")
             result.error(
                 "VPN_START_FAILED",
                 t.message ?: "Failed to launch VPN service",
                 Log.getStackTraceString(t),
             )
+            return
         }
-    }
-
-    private fun launchVpnService(configJson: String) {
-        val ctx = context ?: return
-        val intent = Intent(ctx, BlackholeVpnService::class.java)
-        intent.putExtra("config", configJson)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            ctx.startForegroundService(intent)
-        } else {
-            ctx.startService(intent)
-        }
+        Thread({
+            val completed = latch.await(20, TimeUnit.SECONDS)
+            val error = BlackholeVpnService.startError
+            Handler(Looper.getMainLooper()).post {
+                when {
+                    !completed -> result.error(
+                        "VPN_START_FAILED",
+                        "Timed out waiting for VPN service",
+                        null,
+                    )
+                    error != null -> result.error("VPN_START_FAILED", error, null)
+                    else -> result.success(null)
+                }
+            }
+        }, "VpnPlugin.startWait").start()
     }
 
     private fun stopVpn() {
@@ -237,18 +258,8 @@ class VpnPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
         pendingResult = null
         pendingConfig = null
 
-        if (resultCode == Activity.RESULT_OK && config != null) {
-            try {
-                launchVpnService(config)
-                result?.success(null)
-            } catch (t: Throwable) {
-                Log.e(TAG, "Failed to launch VPN service after consent", t)
-                result?.error(
-                    "VPN_START_FAILED",
-                    t.message ?: "Failed to launch VPN service",
-                    Log.getStackTraceString(t),
-                )
-            }
+        if (resultCode == Activity.RESULT_OK && config != null && result != null) {
+            launchAndWait(config, result)
         } else {
             result?.error("VPN_DENIED", "User denied VPN permission", null)
         }

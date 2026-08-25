@@ -168,6 +168,36 @@ final class TunnelRuntimeCoordinatorTests: XCTestCase {
         XCTAssertEqual(runtime.snapshot.error, "WireGuard handshake timed out")
     }
 
+    func testDirectRetriesNextCandidateAfterHealthyGraceExpires() {
+        let runtime = TunnelRuntimeCoordinator(
+            handshakeTimeout: 12,
+            directHealthGracePeriod: 8
+        )
+        let startedAt = Date(timeIntervalSince1970: 100)
+
+        runtime.start(now: startedAt)
+        _ = runtime.refresh(
+            handshakeAgeSeconds: 0,
+            inboundWireGuardBytes: 1024,
+            inboundUdpPackets: 1,
+            availableDirectCandidateCount: 3,
+            now: startedAt.addingTimeInterval(1)
+        )
+
+        let action = runtime.refresh(
+            handshakeAgeSeconds: nil,
+            inboundWireGuardBytes: 0,
+            inboundUdpPackets: 0,
+            availableDirectCandidateCount: 3,
+            now: startedAt.addingTimeInterval(21.5)
+        )
+
+        XCTAssertEqual(action, .retryDirect(1))
+        XCTAssertEqual(runtime.snapshot.status, .connecting)
+        XCTAssertEqual(runtime.snapshot.connectionMode, .direct)
+        XCTAssertNil(runtime.snapshot.error)
+    }
+
     func testAllDirectCandidatesExhaustedEmitsError() {
         let runtime = TunnelRuntimeCoordinator(handshakeTimeout: 12)
         let startedAt = Date(timeIntervalSince1970: 100)

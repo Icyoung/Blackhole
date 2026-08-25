@@ -166,25 +166,23 @@ final class TunnelRuntimeCoordinator {
                now.timeIntervalSince(directHealthyAt) < handshakeTimeout + directHealthGracePeriod {
                 return .none
             }
-            fail("WireGuard handshake timed out")
-            return .none
-        }
+        } else {
+            guard snapshot.status == .connecting else {
+                return .none
+            }
 
-        guard snapshot.status == .connecting else {
-            return .none
-        }
+            guard let attemptStartedAt, let candidateStartedAt = tunnelStartedAt else {
+                return .none
+            }
 
-        guard let attemptStartedAt, let candidateStartedAt = tunnelStartedAt else {
-            return .none
-        }
+            if now.timeIntervalSince(attemptStartedAt) >= totalBudget {
+                fail("WireGuard handshake timed out")
+                return .none
+            }
 
-        if now.timeIntervalSince(attemptStartedAt) >= totalBudget {
-            fail("WireGuard handshake timed out")
-            return .none
-        }
-
-        guard now.timeIntervalSince(candidateStartedAt) >= handshakeTimeout else {
-            return .none
+            guard now.timeIntervalSince(candidateStartedAt) >= handshakeTimeout else {
+                return .none
+            }
         }
 
         if snapshot.connectionMode == .direct {

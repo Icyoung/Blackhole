@@ -139,7 +139,6 @@ class VpnPlugin: NSObject, FlutterPlugin {
         NSLog("[VpnPlugin] UDP bound localPort=\(localPort) dest=\(serverAddr):\(serverPort)")
 
         isActive = true
-        tunnelStartedAt = Date()
         startUDPReceive()
         performNetcheck(args: args)
 
@@ -161,6 +160,7 @@ class VpnPlugin: NSObject, FlutterPlugin {
         tunFd = fd
         NSLog("[VpnPlugin] got TUN fd=\(fd)")
         startTUNReadLoop()
+        tunnelStartedAt = Date()
         startTimerLoop()
         sendHandshakeInitiation()
 
@@ -534,6 +534,10 @@ class VpnPlugin: NSObject, FlutterPlugin {
             result(FlutterError(code: "NO_VPN", message: "VPN is not running", details: nil))
             return
         }
+        if currentWireGuardStats().handshakeAgeSecs >= 0 {
+            result(nil)
+            return
+        }
         guard setPeer(addr: addr, port: port) else {
             result(FlutterError(code: "RESOLVE", message: "Failed to resolve \(addr)", details: nil))
             return
@@ -615,6 +619,7 @@ class VpnPlugin: NSObject, FlutterPlugin {
             r["connectionMode"] = "direct"
         } else {
             r["status"] = "disconnected"
+            r["connectionMode"] = "unknown"
         }
         r["timestamp"] = ISO8601DateFormatter().string(from: Date())
         r["clientIp"] = activeConfig?["clientIp"] as? String
