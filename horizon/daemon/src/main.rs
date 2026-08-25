@@ -6,6 +6,7 @@ mod upnp;
 mod vpn_config;
 mod vpn_helper_client;
 mod vpn_helper_protocol;
+mod vpn_signaling;
 mod wg_server;
 
 use std::collections::HashMap;
@@ -17,7 +18,7 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -87,6 +88,11 @@ struct AppState {
     wg_internal_routes: Mutex<Vec<String>>,
     /// Channel to send peer add/remove commands to the WgServer event loop.
     wg_peer_tx: Mutex<Option<mpsc::UnboundedSender<WgPeerCommand>>>,
+    /// Highest punchEpoch accepted from signaling candidate lists.
+    last_punch_epoch: AtomicU64,
+    /// Dedupes endpoint_register floods on the same candidate set.
+    last_endpoint_register_sig: Mutex<Option<String>>,
+    endpoint_register_retrying: AtomicBool,
 }
 
 /// Commands sent to the WgServer event loop for adding/removing peers.
@@ -384,6 +390,9 @@ async fn run_server(
         wg_observed_endpoints: Mutex::new(Vec::new()),
         wg_internal_routes: Mutex::new(config.vpn_routes.clone()),
         wg_peer_tx: Mutex::new(None),
+        last_punch_epoch: AtomicU64::new(0),
+        last_endpoint_register_sig: Mutex::new(None),
+        endpoint_register_retrying: AtomicBool::new(false),
     });
 
     let pid_path = daemon_pid_path(&state.data_dir);
@@ -2103,6 +2112,13 @@ async fn handle_lan_incoming(
                 "getCwd" => {
                     if let Some(session_id) = value.get("sessionId").and_then(|v| v.as_str()) {
                         handle_get_cwd(state, session_id, sink).await;
+                    }
+                }
+                ty if vpn_signaling::is_vpn_control_type(ty) => {
+                    let (reply_tx, mut reply_rx) = mpsc::unbounded_channel();
+                    vpn_signaling::handle_vpn_control(state, &value, reply_tx).await;
+                    while let Some(reply) = reply_rx.recv().await {
+                        let _ = sink.send(AxumMessage::Text(encode_json(reply))).await;
                     }
                 }
                 _ => {}
@@ -5406,22 +5422,15 @@ async fn start_vpn_server(
         .map_err(|e| format!("failed to create WG server: {e}"))?;
     info!("WireGuard server listening on UDP port {port}");
 
-    // Try UPnP port mapping so external clients can reach us
-    tokio::spawn(async move {
-        match upnp::add_port_mapping(port).await {
-            Ok(external) => info!("UPnP: external UDP endpoint {external}"),
-            Err(e) => warn!("UPnP: {e} (external clients may need manual port forwarding)"),
-        }
-    });
-    // Renew UPnP mapping periodically in background
-    let _upnp_task = upnp::spawn_renewal_task(port);
-
     // Create peer command channel and store sender in AppState
     let (peer_tx, peer_rx) = mpsc::unbounded_channel::<WgPeerCommand>();
     {
         let mut tx = state.wg_peer_tx.lock().await;
         *tx = Some(peer_tx);
     }
+    vpn_signaling::schedule_publish_horizon_endpoint(state.clone());
+    vpn_signaling::spawn_horizon_endpoint_refresh_timer(state.clone());
+    vpn_signaling::spawn_upnp_udp_candidate_task(state.clone(), port);
 
     // Run the WG server event loop with peer command receiver
     if let Err(e) = server.run_with_peer_commands(peer_rx).await {
@@ -5461,26 +5470,6 @@ async fn vpn_status_handler(
         "observedAddr": wg_addr,
     }))
     .into_response()
-}
-
-async fn wait_for_wormhole_session(state: &Arc<AppState>) -> Option<String> {
-    loop {
-        if state.wormhole_url.is_none() {
-            return None;
-        }
-        let session_id = {
-            let wormhole = state.wormhole_state.lock().await;
-            if wormhole.connected {
-                wormhole.session_id.clone()
-            } else {
-                None
-            }
-        };
-        if session_id.is_some() {
-            return session_id;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    }
 }
 
 fn configured_wg_netcheck_endpoint(state: &Arc<AppState>) -> (Option<String>, Option<u16>) {
@@ -5623,24 +5612,7 @@ async fn connect_wormhole(
         )))
         .await;
 
-    // Send WG endpoint registration if VPN is configured.
-    {
-        let wg_pub = state.wg_public_key.lock().await.clone();
-        let wg_port = state.wg_udp_port.lock().await.clone();
-        if wg_pub.is_some() || wg_port.is_some() {
-            let horizon_candidates = current_horizon_direct_candidates(state).await;
-            let _ = write
-                .send(tokio_tungstenite::tungstenite::Message::Text(encode_json(
-                    json!({
-                        "type": "endpoint_register",
-                        "wgPublicKey": wg_pub,
-                        "wgUdpPort": wg_port,
-                        "horizonCandidates": horizon_candidates,
-                    }),
-                )))
-                .await;
-        }
-    }
+    vpn_signaling::publish_horizon_endpoint_on_wormhole_connect(state).await;
 
     loop {
         tokio::select! {
@@ -5905,177 +5877,15 @@ async fn handle_wormhole_incoming(
                         );
                     }
                 }
-                "endpoint_request" | "endpoint_probe_request" => {
-                    let device_key = value.get("deviceKey").and_then(|v| v.as_str());
-                    let wg_pub = value.get("wgPublicKey").and_then(|v| v.as_str());
-                    let voyager_candidates = parse_direct_candidates(&value, "voyagerCandidates");
-                    let response_type = if value.get("type").and_then(|v| v.as_str())
-                        == Some("endpoint_probe_request")
-                    {
-                        "endpoint_probe_response"
-                    } else {
-                        "endpoint_info"
-                    };
-                    let server_pub = state.wg_public_key.lock().await.clone();
-                    let wg_port = state.wg_udp_port.lock().await.clone();
-                    let horizon_addr = state.wg_observed_addr.lock().await.clone();
-                    let (netcheck_host, netcheck_port) = configured_wg_netcheck_endpoint(state);
-                    let horizon_candidates = current_horizon_direct_candidates(state).await;
-                    let observed_endpoints = state.wg_observed_endpoints.lock().await.clone();
-                    let nat_mapping_behavior = classify_nat_mapping_behavior(&observed_endpoints);
-                    let hairpin_likely =
-                        hairpin_likely(horizon_addr.as_deref(), &voyager_candidates);
-                    let direct_reachability_score = compute_direct_reachability_score(
-                        &horizon_candidates,
-                        &voyager_candidates,
-                        nat_mapping_behavior,
-                        hairpin_likely,
-                    );
-                    let response = encode_json(json!({
-                        "type": response_type,
-                        "wgPublicKey": server_pub,
-                        "wgUdpPort": wg_port,
-                        "netcheckHost": netcheck_host,
-                        "netcheckPort": netcheck_port,
-                        "horizonAddr": horizon_addr,
-                        "horizonPort": serde_json::Value::Null,
-                        "horizonCandidates": horizon_candidates,
-                        "observedEndpoints": observed_endpoints,
-                        "natMappingBehavior": nat_mapping_behavior,
-                        "hairpinLikely": hairpin_likely,
-                        "directReachabilityScore": direct_reachability_score,
-                    }));
-                    let _ = write
-                        .send(tokio_tungstenite::tungstenite::Message::Text(response))
-                        .await;
-                    info!(
-                        "direct endpoint_request received: device={:?} has_wg_pub={} horizon_addr={:?} wg_port={:?}",
-                        device_key,
-                        wg_pub.is_some(),
-                        horizon_addr,
-                        wg_port,
-                    );
-                }
-                "peer_endpoint" | "direct_candidates_update" => {
-                    let device_key = value.get("deviceKey").and_then(|v| v.as_str());
-                    let wg_pub = value.get("wgPublicKey").and_then(|v| v.as_str());
-                    let observed_addr = value.get("observedAddr").and_then(|v| v.as_str());
-                    let observed_port = value.get("observedPort").and_then(|v| v.as_u64());
-                    let voyager_candidates = merge_direct_candidates(
-                        parse_direct_candidates(&value, "voyagerCandidates"),
-                        observed_direct_candidate(
-                            observed_addr,
-                            observed_port.map(|port| port as u16),
-                        ),
-                    );
-                    info!(
-                        "peer endpoint received: device={:?} wg_pub={} addr={}:{} candidate_count={}",
-                        device_key,
-                        wg_pub.unwrap_or("none"),
-                        observed_addr.unwrap_or("?"),
-                        observed_port.unwrap_or(0),
-                        voyager_candidates.len(),
-                    );
-
-                    // Send add_peer command to the WgServer via channel
-                    if let Some(pub_key) = wg_pub {
-                        let endpoint = best_direct_endpoint(
-                            &voyager_candidates,
-                            observed_addr.and_then(|addr| {
-                                let port = observed_port.unwrap_or(0) as u16;
-                                format!("{addr}:{port}").parse::<SocketAddr>().ok()
-                            }),
-                        );
-                        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                        let sent = {
-                            let tx = state.wg_peer_tx.lock().await;
-                            if let Some(tx) = tx.as_ref() {
-                                tx.send(WgPeerCommand::AddPeer {
-                                    public_key: pub_key.to_string(),
-                                    device_key: device_key.map(|s| s.to_string()),
-                                    endpoint,
-                                    candidate_endpoints: voyager_candidates
-                                        .iter()
-                                        .filter_map(|candidate| {
-                                            format!("{}:{}", candidate.addr, candidate.port)
-                                                .parse::<SocketAddr>()
-                                                .ok()
-                                        })
-                                        .collect(),
-                                    reply_tx,
-                                })
-                                .is_ok()
-                            } else {
-                                false
-                            }
-                        }; // lock dropped here
-                        if sent {
-                            if let Ok(Ok(assignment)) = reply_rx.await {
-                                let server_pub = state.wg_public_key.lock().await.clone();
-                                let wg_port = state.wg_udp_port.lock().await.clone();
-                                let internal_routes = state.wg_internal_routes.lock().await.clone();
-                                let (netcheck_host, netcheck_port) =
-                                    configured_wg_netcheck_endpoint(state);
-                                let horizon_candidates =
-                                    current_horizon_direct_candidates(state).await;
-                                let observed_endpoints =
-                                    state.wg_observed_endpoints.lock().await.clone();
-                                let horizon_addr = state.wg_observed_addr.lock().await.clone();
-                                let nat_mapping_behavior =
-                                    classify_nat_mapping_behavior(&observed_endpoints);
-                                let hairpin_likely =
-                                    hairpin_likely(horizon_addr.as_deref(), &voyager_candidates);
-                                let direct_reachability_score = compute_direct_reachability_score(
-                                    &horizon_candidates,
-                                    &voyager_candidates,
-                                    nat_mapping_behavior,
-                                    hairpin_likely,
-                                );
-                                let response = encode_json(json!({
-                                    "type": "vpn_config",
-                                    "clientIp": assignment.client_ip,
-                                    "serverIp": assignment.server_ip,
-                                    "subnet": assignment.subnet,
-                                    "dns": assignment.dns,
-                                    "internalRoutes": internal_routes,
-                                    "mtu": assignment.mtu,
-                                    "wgPublicKey": server_pub,
-                                    "wgUdpPort": wg_port,
-                                    "horizonAddr": horizon_addr,
-                                    "netcheckHost": netcheck_host,
-                                    "netcheckPort": netcheck_port,
-                                    "horizonCandidates": horizon_candidates,
-                                    "voyagerCandidates": voyager_candidates,
-                                    "observedEndpoints": observed_endpoints,
-                                    "natMappingBehavior": nat_mapping_behavior,
-                                    "hairpinLikely": hairpin_likely,
-                                    "directReachabilityScore": direct_reachability_score,
-                                    "lanPort": state.port,
-                                }));
-                                let _ = write
-                                    .send(tokio_tungstenite::tungstenite::Message::Text(response))
-                                    .await;
-                                info!(
-                                    "vpn_config sent: device={:?} client_ip={} server_ip={} wg_port={:?}",
-                                    device_key,
-                                    assignment.client_ip,
-                                    assignment.server_ip,
-                                    wg_port,
-                                );
-                            } else {
-                                warn!(
-                                    "peer_endpoint add_peer failed or channel dropped: device={:?} wg_pub={}",
-                                    device_key,
-                                    pub_key,
-                                );
-                            }
-                        } else {
-                            warn!(
-                                "peer_endpoint ignored because WG server channel is unavailable: device={:?} wg_pub={}",
-                                device_key,
-                                pub_key,
-                            );
-                        }
+                ty if vpn_signaling::is_vpn_control_type(ty) => {
+                    let (reply_tx, mut reply_rx) = mpsc::unbounded_channel();
+                    vpn_signaling::handle_vpn_control(state, &value, reply_tx).await;
+                    while let Some(reply) = reply_rx.recv().await {
+                        let _ = write
+                            .send(tokio_tungstenite::tungstenite::Message::Text(encode_json(
+                                reply,
+                            )))
+                            .await;
                     }
                 }
                 _ => {}

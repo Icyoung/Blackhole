@@ -37,7 +37,7 @@ const MTU: u16 = 1420;
 /// Timer tick interval for WireGuard keepalives / handshake retries.
 const TIMER_TICK: Duration = Duration::from_millis(250);
 const DIRECT_PROBE_INTERVAL: Duration = Duration::from_secs(1);
-const DIRECT_PROBE_WINDOW: Duration = Duration::from_secs(12);
+const DIRECT_PROBE_WINDOW: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // Public types

@@ -9,7 +9,7 @@ use tracing::{info, warn};
 /// Duration of the UPnP lease in seconds.
 const LEASE_DURATION_SECS: u32 = 3600;
 /// How often to renew the mapping.
-const RENEW_INTERVAL_SECS: u64 = 2700;
+pub(crate) const RENEW_INTERVAL_SECS: u64 = 2700;
 
 /// Try to add a UPnP port mapping for the given port and protocol.
 /// Returns the external IP if successful.
@@ -89,19 +89,6 @@ pub async fn remove_port_mapping(port: u16) {
         }
         Err(e) => warn!("UPnP gateway not found for cleanup: {e}"),
     }
-}
-
-/// Spawn a background task that maintains the UPnP mapping.
-pub fn spawn_renewal_task(local_port: u16) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(RENEW_INTERVAL_SECS)).await;
-            match add_port_mapping(local_port).await {
-                Ok(ip) => info!("UPnP renewal OK: external={ip}:{local_port}"),
-                Err(e) => warn!("UPnP renewal failed: {e}"),
-            }
-        }
-    })
 }
 
 fn get_local_ip_for_gateway(gateway_addr: &SocketAddr) -> Result<Ipv4Addr, String> {
