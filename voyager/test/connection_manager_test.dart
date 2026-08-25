@@ -896,6 +896,17 @@ void main() {
 
         expect(manager.activeTransportKind, TransportKind.unknown);
       });
+
+      test('opens in-tunnel reconnects as unknown, not Direct', () async {
+        await manager.connect(
+          uri: Uri.parse('ws://10.13.37.1:9527/ws'),
+          waitForPairing: false,
+          autoReconnect: false,
+          transportKind: TransportKind.wireguardDirect,
+        );
+
+        expect(manager.activeTransportKind, TransportKind.unknown);
+      });
     });
 
     // -----------------------------------------------------------------------
@@ -1693,18 +1704,17 @@ class CallbackTracker {
       onGroupError: (message) {
         groupErrors.add(message);
       },
-      onPairingResult:
-          ({
-            required bool approved,
-            String? assignedKey,
-            String? horizonPublicKey,
-          }) {
-            pairingResults.add((
-              approved: approved,
-              assignedKey: assignedKey,
-              horizonPublicKey: horizonPublicKey,
-            ));
-          },
+      onPairingResult: ({
+        required bool approved,
+        String? assignedKey,
+        String? horizonPublicKey,
+      }) {
+        pairingResults.add((
+          approved: approved,
+          assignedKey: assignedKey,
+          horizonPublicKey: horizonPublicKey,
+        ));
+      },
       onSessionList: (sessions, {activeSessionId, activeGroupId}) {
         sessionLists.add(sessions);
       },

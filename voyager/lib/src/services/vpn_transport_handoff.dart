@@ -22,6 +22,43 @@ enum VpnTunnelMode {
 
 enum VpnHostInfoAction { ignore, markDirect, fallback }
 
+enum VpnFallbackReason { vpnDisconnected, inTunnelNotPeer }
+
+enum VpnPunchRetryAction { none, sendPeerEndpoint, startUpgrade }
+
+class VpnPunchRetryDecision {
+  const VpnPunchRetryDecision._({
+    required this.action,
+    required this.clearSwitchSuppression,
+    required this.rearm,
+  });
+
+  const VpnPunchRetryDecision.none()
+    : this._(
+        action: VpnPunchRetryAction.none,
+        clearSwitchSuppression: false,
+        rearm: false,
+      );
+
+  const VpnPunchRetryDecision.sendPeerEndpoint()
+    : this._(
+        action: VpnPunchRetryAction.sendPeerEndpoint,
+        clearSwitchSuppression: true,
+        rearm: true,
+      );
+
+  const VpnPunchRetryDecision.startUpgrade()
+    : this._(
+        action: VpnPunchRetryAction.startUpgrade,
+        clearSwitchSuppression: false,
+        rearm: false,
+      );
+
+  final VpnPunchRetryAction action;
+  final bool clearSwitchSuppression;
+  final bool rearm;
+}
+
 class VpnTransportEndpoint {
   const VpnTransportEndpoint({required this.serverIp, required this.lanPort});
 
@@ -81,8 +118,8 @@ class VpnTunnelSnapshot {
       udpPacketsIn: (map['udpPacketsIn'] as num?)?.toInt(),
       wgRxBytes: (map['wgRxBytes'] as num?)?.toInt(),
       directSessionReady: map['directSessionReady'] as bool?,
-      timeSinceLastHandshakeSecs: (map['timeSinceLastHandshakeSecs'] as num?)
-          ?.toInt(),
+      timeSinceLastHandshakeSecs:
+          (map['timeSinceLastHandshakeSecs'] as num?)?.toInt(),
       error: map['error'] as String?,
     );
   }
@@ -148,6 +185,7 @@ class VpnTransportHandoffCoordinator {
   final Duration _fallbackSuppressionWindow;
 
   bool get pendingSwitch => _pendingSwitch;
+  bool get switchSuppressed => _switchSuppressed;
 
   void reset() {
     _wasVpnConnected = false;
@@ -402,6 +440,7 @@ class VpnTransportHandoffCoordinator {
     required bool handoffPending,
     required TransportKind activeKind,
     required String? socketHost,
+    required bool connected,
   }) {
     if (handoffPending) {
       return false;
@@ -409,10 +448,29 @@ class VpnTransportHandoffCoordinator {
     if (activeKind == TransportKind.wireguardDirect) {
       return false;
     }
-    if (isVpnAppWebsocketHost(socketHost)) {
+    // Stale lastUri of 10.13.37.1 after silent disconnect is still StayOnWs.
+    if (connected && isVpnAppWebsocketHost(socketHost)) {
       return false;
     }
     return true;
+  }
+
+  static bool keepPunchIdentity(VpnFallbackReason reason) {
+    return reason == VpnFallbackReason.inTunnelNotPeer;
+  }
+
+  static VpnPunchRetryDecision onPunchRetryTimer({
+    required bool stayOnWs,
+    required bool connected,
+    required String? publicKey,
+  }) {
+    if (!stayOnWs) {
+      return const VpnPunchRetryDecision.none();
+    }
+    if (publicKey != null && publicKey.isNotEmpty && connected) {
+      return const VpnPunchRetryDecision.sendPeerEndpoint();
+    }
+    return const VpnPunchRetryDecision.startUpgrade();
   }
 
   static bool _needsInTunnelHandoff(TransportKind activeTransportKind) {

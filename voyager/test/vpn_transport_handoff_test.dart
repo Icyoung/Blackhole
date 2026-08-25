@@ -529,6 +529,7 @@ void main() {
           handoffPending: false,
           activeKind: TransportKind.wormholeRelay,
           socketHost: 'wormhole.blackhole-ai.com',
+          connected: true,
         ),
         isTrue,
       );
@@ -540,6 +541,7 @@ void main() {
           handoffPending: true,
           activeKind: TransportKind.unknown,
           socketHost: kVpnAppWebsocketHost,
+          connected: true,
         ),
         isFalse,
       );
@@ -548,6 +550,7 @@ void main() {
           handoffPending: false,
           activeKind: TransportKind.wireguardDirect,
           socketHost: kVpnAppWebsocketHost,
+          connected: true,
         ),
         isFalse,
       );
@@ -556,9 +559,118 @@ void main() {
           handoffPending: false,
           activeKind: TransportKind.unknown,
           socketHost: kVpnAppWebsocketHost,
+          connected: true,
         ),
         isFalse,
       );
+    });
+
+    test(
+      'stale 10.13.37.1 lastUri after silent disconnect is still StayOnWs',
+      () {
+        expect(
+          VpnTransportHandoffCoordinator.isStayOnWs(
+            handoffPending: false,
+            activeKind: TransportKind.unknown,
+            socketHost: kVpnAppWebsocketHost,
+            connected: false,
+          ),
+          isTrue,
+        );
+      },
+    );
+  });
+
+  group('vpnPeer false punch retry', () {
+    test('in-tunnel not-peer fallback keeps punch identity', () {
+      expect(
+        VpnTransportHandoffCoordinator.keepPunchIdentity(
+          VpnFallbackReason.inTunnelNotPeer,
+        ),
+        isTrue,
+      );
+      expect(
+        VpnTransportHandoffCoordinator.keepPunchIdentity(
+          VpnFallbackReason.vpnDisconnected,
+        ),
+        isFalse,
+      );
+    });
+
+    test(
+      'timer sends peer_endpoint and only then clears switch suppression',
+      () {
+        final blocked = VpnTransportHandoffCoordinator.onPunchRetryTimer(
+          stayOnWs: false,
+          connected: false,
+          publicKey: 'pk',
+        );
+        expect(blocked.action, VpnPunchRetryAction.none);
+        expect(blocked.clearSwitchSuppression, isFalse);
+
+        final send = VpnTransportHandoffCoordinator.onPunchRetryTimer(
+          stayOnWs: true,
+          connected: true,
+          publicKey: 'pk',
+        );
+        expect(send.action, VpnPunchRetryAction.sendPeerEndpoint);
+        expect(send.clearSwitchSuppression, isTrue);
+        expect(send.rearm, isTrue);
+
+        final noKey = VpnTransportHandoffCoordinator.onPunchRetryTimer(
+          stayOnWs: true,
+          connected: true,
+          publicKey: null,
+        );
+        expect(noKey.action, VpnPunchRetryAction.startUpgrade);
+        expect(noKey.clearSwitchSuppression, isFalse);
+      },
+    );
+
+    test('switch stays suppressed until punch retry clears it', () {
+      final coordinator = VpnTransportHandoffCoordinator();
+      final connectedAt = DateTime.utc(2026, 1, 1, 0, 0, 0);
+      coordinator.onVpnStatusChanged(
+        snapshot: _snapshot(),
+        primaryConnectionConnected: true,
+        activeTransportKind: TransportKind.wormholeRelay,
+        endpoint: _endpoint,
+        now: connectedAt,
+      );
+      final switched = coordinator.onVpnStatusChanged(
+        snapshot: _snapshot(directSessionReady: true),
+        primaryConnectionConnected: true,
+        activeTransportKind: TransportKind.wormholeRelay,
+        endpoint: _endpoint,
+        now: connectedAt.add(const Duration(seconds: 3)),
+      );
+      expect(switched.shouldSwitch, isTrue);
+
+      coordinator.suppressSwitch();
+      expect(coordinator.switchSuppressed, isTrue);
+
+      final stillSuppressed = coordinator.onVpnStatusChanged(
+        snapshot: _snapshot(directSessionReady: true),
+        primaryConnectionConnected: true,
+        activeTransportKind: TransportKind.wormholeRelay,
+        endpoint: _endpoint,
+        now: connectedAt.add(const Duration(seconds: 20)),
+      );
+      expect(stillSuppressed.shouldSwitch, isFalse);
+      expect(coordinator.switchSuppressed, isTrue);
+
+      coordinator.clearSwitchSuppression();
+      expect(coordinator.switchSuppressed, isFalse);
+
+      final retry = coordinator.onVpnStatusChanged(
+        snapshot: _snapshot(directSessionReady: true),
+        primaryConnectionConnected: true,
+        activeTransportKind: TransportKind.wormholeRelay,
+        endpoint: _endpoint,
+        now: connectedAt.add(const Duration(seconds: 21)),
+      );
+      expect(retry.shouldSwitch, isTrue);
+      expect(retry.transportKind, TransportKind.unknown);
     });
   });
 

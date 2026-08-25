@@ -9,7 +9,6 @@ import 'remote_log_service.dart';
 import 'transport_models.dart';
 import 'transport_orchestrator.dart';
 import 'transport_telemetry.dart';
-import 'vpn_transport_handoff.dart';
 
 /// Horizon's WireGuard endpoint info received via Wormhole signaling.
 class DirectCandidate {
@@ -158,14 +157,17 @@ class EndpointInfo {
       if (raw is! List) {
         return null;
       }
-      final candidates = raw
-          .whereType<Map>()
-          .map(
-            (entry) =>
-                DirectCandidate.fromMap(Map<String, dynamic>.from(entry)),
-          )
-          .where((candidate) => candidate.addr.isNotEmpty && candidate.port > 0)
-          .toList();
+      final candidates =
+          raw
+              .whereType<Map>()
+              .map(
+                (entry) =>
+                    DirectCandidate.fromMap(Map<String, dynamic>.from(entry)),
+              )
+              .where(
+                (candidate) => candidate.addr.isNotEmpty && candidate.port > 0,
+              )
+              .toList();
       return candidates.isEmpty ? null : candidates;
     }
 
@@ -181,9 +183,10 @@ class EndpointInfo {
       subnet: map['subnet'] as String?,
       dns: (map['dns'] as List<dynamic>?)?.map((e) => e as String).toList(),
       lanPort: (map['lanPort'] as num?)?.toInt(),
-      internalRoutes: (map['internalRoutes'] as List<dynamic>?)
-          ?.map((e) => e as String)
-          .toList(),
+      internalRoutes:
+          (map['internalRoutes'] as List<dynamic>?)
+              ?.map((e) => e as String)
+              .toList(),
       mtu: (map['mtu'] as num?)?.toInt(),
       punchEpoch: (map['punchEpoch'] as num?)?.toInt(),
       horizonCandidates: parseCandidates('horizonCandidates'),
@@ -191,8 +194,8 @@ class EndpointInfo {
       observedEndpoints: parseCandidates('observedEndpoints'),
       natMappingBehavior: map['natMappingBehavior'] as String?,
       hairpinLikely: map['hairpinLikely'] as bool?,
-      directReachabilityScore: (map['directReachabilityScore'] as num?)
-          ?.toInt(),
+      directReachabilityScore:
+          (map['directReachabilityScore'] as num?)?.toInt(),
     );
   }
 }
@@ -255,8 +258,8 @@ List<DirectCandidate>? _mergeDirectCandidateLists(
   putAll(previous);
   putAll(current);
 
-  final result = merged.values.toList()
-    ..sort((a, b) => b.priority.compareTo(a.priority));
+  final result =
+      merged.values.toList()..sort((a, b) => b.priority.compareTo(a.priority));
   return result;
 }
 
@@ -414,8 +417,7 @@ class ConnectionManager {
     _autoReconnect = autoReconnect;
     // Auto-append /ws if not present (LAN mode).
     uri = _ensureWsPath(uri);
-    if (transportKind == TransportKind.wireguardDirect &&
-        !isVpnAppWebsocketHost(uri.host)) {
+    if (transportKind == TransportKind.wireguardDirect) {
       transportKind = TransportKind.unknown;
     }
     if (!keepExisting) {
@@ -688,9 +690,10 @@ class ConnectionManager {
     if (channel == null) return;
 
     for (var offset = 0; offset < bytes.length; offset += _maxChunkSize) {
-      final end = (offset + _maxChunkSize < bytes.length)
-          ? offset + _maxChunkSize
-          : bytes.length;
+      final end =
+          (offset + _maxChunkSize < bytes.length)
+              ? offset + _maxChunkSize
+              : bytes.length;
       final chunk = bytes.sublist(offset, end);
 
       final payload = _encodeBinaryMessage(
@@ -747,9 +750,8 @@ class ConnectionManager {
       if (wgUdpPort != null) 'wgUdpPort': wgUdpPort,
       if (deviceKey != null) 'deviceKey': deviceKey,
       if (voyagerCandidates.isNotEmpty)
-        'voyagerCandidates': voyagerCandidates
-            .map((candidate) => candidate.toMap())
-            .toList(),
+        'voyagerCandidates':
+            voyagerCandidates.map((candidate) => candidate.toMap()).toList(),
       'supportsCandidateSet': true,
     });
   }
@@ -767,9 +769,8 @@ class ConnectionManager {
       if (deviceKey != null) 'deviceKey': deviceKey,
       if (wgUdpPort != null) 'wgUdpPort': wgUdpPort,
       if (voyagerCandidates.isNotEmpty)
-        'voyagerCandidates': voyagerCandidates
-            .map((candidate) => candidate.toMap())
-            .toList(),
+        'voyagerCandidates':
+            voyagerCandidates.map((candidate) => candidate.toMap()).toList(),
       'supportsCandidateSet': true,
     });
   }
@@ -957,11 +958,12 @@ class ConnectionManager {
     if (type == 'group_error') {
       final message = decoded['message'];
       final code = decoded['code'];
-      final text = message is String
-          ? message
-          : code is String
-          ? code
-          : 'Unknown group error';
+      final text =
+          message is String
+              ? message
+              : code is String
+              ? code
+              : 'Unknown group error';
       onGroupError(text);
       return;
     }
@@ -1175,11 +1177,12 @@ class ConnectionManager {
     required Uint8List data,
   }) {
     final sessionBytes = utf8.encode(sessionId);
-    final buffer = BytesBuilder(copy: false)
-      ..add([1, type.code])
-      ..add([(sessionBytes.length >> 8) & 0xFF, sessionBytes.length & 0xFF])
-      ..add(sessionBytes)
-      ..add(data);
+    final buffer =
+        BytesBuilder(copy: false)
+          ..add([1, type.code])
+          ..add([(sessionBytes.length >> 8) & 0xFF, sessionBytes.length & 0xFF])
+          ..add(sessionBytes)
+          ..add(data);
     return buffer.toBytes();
   }
 
