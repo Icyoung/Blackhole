@@ -7,11 +7,14 @@ use serde_json::{json, Value};
 use crate::tun_device::TunTransport;
 
 pub const VPN_SERVER_V4: Ipv4Addr = Ipv4Addr::new(10, 13, 37, 1);
-pub const VPN_PROBE_CLIENT_V4: Ipv4Addr = Ipv4Addr::new(10, 13, 37, 2);
+/// Outside the WG assignment pool (`.2`–`.253`); never handed to a Voyager peer.
+pub const VPN_PROBE_CLIENT_V4: Ipv4Addr = Ipv4Addr::new(10, 13, 37, 254);
+pub const VPN_TCP_PROBE_PATH: &str = "/vpn-tcp-probe";
 const VPN_SUBNET_PREFIX: [u8; 3] = [10, 13, 37];
 const TCP_SYN: u8 = 0x02;
 const TCP_ACK: u8 = 0x10;
 const TCP_PSH: u8 = 0x08;
+const TCP_RST: u8 = 0x04;
 const MAX_TUN_IO_ATTEMPTS: u32 = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,7 +166,7 @@ pub async fn tun_tcp_handshake(
 pub async fn tun_tcp_send(
     tun_fd: i32,
     transport: TunTransport,
-    session: &TunTcpSession,
+    session: &mut TunTcpSession,
     payload: &[u8],
     timeout: Duration,
 ) -> Result<(), String> {
@@ -177,11 +180,49 @@ pub async fn tun_tcp_send(
         TCP_ACK | TCP_PSH,
         payload,
     );
+    tun_write_all(tun_fd, transport, &packet, timeout).await?;
+    session.seq = session.seq.wrapping_add(payload.len() as u32);
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub async fn tun_tcp_rst(
+    tun_fd: i32,
+    transport: TunTransport,
+    session: &TunTcpSession,
+    timeout: Duration,
+) -> Result<(), String> {
+    let packet = ipv4_tcp_segment(
+        session.src,
+        session.dst,
+        session.sport,
+        session.dport,
+        session.seq,
+        session.ack,
+        TCP_RST | TCP_ACK,
+        &[],
+    );
     tun_write_all(tun_fd, transport, &packet, timeout).await
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub async fn tun_drain(tun_fd: i32, transport: TunTransport, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        match tun_read_ip(tun_fd, transport, remaining.min(Duration::from_millis(20))).await {
+            Ok(Some(_)) | Ok(None) => continue,
+            Err(_) => return,
+        }
+    }
+}
+
 pub fn vpn_probe_http_get(host: &str) -> Vec<u8> {
-    format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").into_bytes()
+    format!("GET {VPN_TCP_PROBE_PATH} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+        .into_bytes()
 }
 
 fn ipv4_tcp_segment(
@@ -498,6 +539,21 @@ mod tests {
     }
 
     #[test]
+    fn probe_client_is_outside_wg_assignment_pool() {
+        assert_eq!(VPN_PROBE_CLIENT_V4.octets()[3], 254);
+        assert_ne!(VPN_PROBE_CLIENT_V4, Ipv4Addr::new(10, 13, 37, 2));
+    }
+
+    #[test]
+    fn probe_http_targets_dedicated_route() {
+        let req = vpn_probe_http_get("10.13.37.1");
+        let text = String::from_utf8(req).unwrap();
+        assert!(text.starts_with("GET /vpn-tcp-probe HTTP/1.1"));
+        assert!(!text.contains("/health"));
+        assert!(!text.contains("/ws"));
+    }
+
+    #[test]
     fn parse_ipv4_tcp_reads_syn_ack_ports() {
         let packet = ipv4_tcp_segment(
             VPN_SERVER_V4,
@@ -593,10 +649,13 @@ mod delivery_harness {
             Duration::from_secs(2),
         )
         .await;
-        if let Err(err) = handshake {
-            let _ = accept.await;
-            harness_fail(format!("handshake: {err}"));
-        }
+        let session = match handshake {
+            Ok(session) => session,
+            Err(err) => {
+                let _ = accept.await;
+                harness_fail(format!("handshake: {err}"));
+            }
+        };
 
         match accept.await {
             Ok(Ok(Ok((stream, remote)))) => {
@@ -613,6 +672,9 @@ mod delivery_harness {
             Ok(Err(_)) => harness_fail("no accept within timeout"),
             Err(err) => harness_fail(format!("join accept task: {err}")),
         }
+
+        let _ = tun_tcp_rst(tun.fd, transport, &session, Duration::from_millis(200)).await;
+        tun_drain(tun.fd, transport, Duration::from_millis(100)).await;
 
         if install_rdr {
             let _ = crate::nat::teardown_nat();

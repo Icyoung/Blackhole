@@ -5,7 +5,8 @@ use std::net::Ipv4Addr;
 ///
 /// Default subnet: `10.13.37.0/24`
 /// - `.1` is reserved for the Horizon server
-/// - `.2` through `.254` are available for Voyager clients
+/// - `.2` through `.253` are available for Voyager clients
+/// - `.254` is reserved for Horizon's in-tunnel TCP probe
 ///
 /// Allocations are persistent per device key (a string identifier
 /// unique to each connecting device).
@@ -29,7 +30,7 @@ impl IpPool {
     /// Allocate an IP address for the given device key.
     ///
     /// If the device already has an allocation, returns the same address.
-    /// Otherwise, assigns the next available address in `.2` through `.254`.
+    /// Otherwise, assigns the next available address in `.2` through `.253`.
     /// Returns `None` if the pool is exhausted.
     pub fn allocate(&mut self, device_key: &str) -> Option<Ipv4Addr> {
         // Return existing allocation if present.
@@ -37,9 +38,9 @@ impl IpPool {
             return Some(self.addr_from_octet(octet));
         }
 
-        // Find the next free octet in the range 2..=254.
+        // Find the next free octet in the range 2..=253 (.254 is the TCP probe).
         let used: std::collections::HashSet<u8> = self.allocations.values().copied().collect();
-        for candidate in 2..=254u8 {
+        for candidate in 2..=253u8 {
             if !used.contains(&candidate) {
                 self.allocations.insert(device_key.to_string(), candidate);
                 return Some(self.addr_from_octet(candidate));
@@ -72,5 +73,25 @@ impl IpPool {
 impl Default for IpPool {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allocate_skips_server_and_probe_octets() {
+        let mut pool = IpPool::new();
+        let first = pool.allocate("a").unwrap();
+        assert_eq!(first, Ipv4Addr::new(10, 13, 37, 2));
+        for i in 3..=253u8 {
+            pool.allocate(&format!("d{i}")).unwrap();
+        }
+        assert!(pool.allocate("full").is_none());
+        assert!(pool
+            .allocations
+            .values()
+            .all(|&octet| octet != 1 && octet != 254));
     }
 }

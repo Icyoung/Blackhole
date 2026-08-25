@@ -498,7 +498,8 @@ async fn run_server(
     install_signal_handlers();
 
     let app = Router::new()
-        .route("/health", get(health_handler))
+        .route("/health", get(|| async { "ok" }))
+        .route("/vpn-tcp-probe", get(vpn_tcp_probe_handler))
         .route("/status", get(status_handler))
         .route("/shutdown", post(shutdown_handler))
         .route("/pairing/pending", get(pairing_pending))
@@ -1034,7 +1035,6 @@ async fn ws_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let vpn_peer = vpn_tcp_delivery::classify_vpn_peer(addr.remote, addr.local);
-    report_vpn_tcp_probe(&state, addr).await;
     info!(
         remote_addr = %addr.remote,
         local_addr = %addr.local,
@@ -1044,7 +1044,7 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| handle_lan_socket(state, socket, addr, vpn_peer))
 }
 
-async fn health_handler(
+async fn vpn_tcp_probe_handler(
     ConnectInfo(addr): ConnectInfo<ClientConnectInfo>,
     State(state): State<Arc<AppState>>,
 ) -> &'static str {
@@ -5399,12 +5399,12 @@ async fn measure_and_maybe_failover(
         )
         .await
         {
-            Ok(session) => {
+            Ok(mut session) => {
                 let host = vpn_tcp_delivery::VPN_SERVER_V4.to_string();
                 if let Err(e) = vpn_tcp_delivery::tun_tcp_send(
                     tun_fd,
                     transport,
-                    &session,
+                    &mut session,
                     &vpn_tcp_delivery::vpn_probe_http_get(&host),
                     timeout,
                 )
@@ -5412,10 +5412,16 @@ async fn measure_and_maybe_failover(
                 {
                     warn!("in-tunnel TCP probe HTTP write failed: {e}");
                 }
+                if let Err(e) =
+                    vpn_tcp_delivery::tun_tcp_rst(tun_fd, transport, &session, timeout).await
+                {
+                    warn!("in-tunnel TCP probe RST failed: {e}");
+                }
             }
             Err(e) => {
                 warn!("in-tunnel TCP probe handshake failed: {e}");
                 *state.vpn_tcp_probe.lock().await = None;
+                vpn_tcp_delivery::tun_drain(tun_fd, transport, Duration::from_millis(100)).await;
                 enable_explicit_vpn_ws_bind(state, helper_session);
                 return;
             }
@@ -5425,6 +5431,8 @@ async fn measure_and_maybe_failover(
             .await
             .ok()
             .and_then(|result| result.ok());
+        *state.vpn_tcp_probe.lock().await = None;
+        vpn_tcp_delivery::tun_drain(tun_fd, transport, Duration::from_millis(100)).await;
         let remote = measured.map(|(remote, _)| remote);
         info!(
             remote_addr = ?remote,
