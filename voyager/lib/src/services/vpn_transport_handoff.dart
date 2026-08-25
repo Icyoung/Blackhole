@@ -448,7 +448,7 @@ class VpnTransportHandoffCoordinator {
     if (activeKind == TransportKind.wireguardDirect) {
       return false;
     }
-    // Stale lastUri of 10.13.37.1 after silent disconnect is still StayOnWs.
+    // lastUri is not the live socket until connected.
     if (connected && isVpnAppWebsocketHost(socketHost)) {
       return false;
     }
