@@ -437,7 +437,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -eu\nDAEMON_DIR=\"${SRCROOT}/../../horizon/daemon\"\nRESOURCES_DIR=\"${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/Resources\"\nUNIVERSAL=\"${DAEMON_DIR}/target/release/voyager-vpn-helper-universal\"\nif [ -f \"$UNIVERSAL\" ]; then\n  mkdir -p \"$RESOURCES_DIR\"\n  cp -f \"$UNIVERSAL\" \"${RESOURCES_DIR}/voyager-vpn-helper\"\n  chmod 755 \"${RESOURCES_DIR}/voyager-vpn-helper\"\n  echo \"Bundled voyager-vpn-helper (universal) into ${RESOURCES_DIR}\"\nelse\n  echo \"error: voyager-vpn-helper-universal not found at ${UNIVERSAL}\" >&2\n  exit 1\nfi\n";
+			shellScript = "/bin/sh \"${SRCROOT}/scripts/bundle_vpn_helper.sh\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
