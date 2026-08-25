@@ -87,9 +87,10 @@ class AppDelegate: FlutterAppDelegate {
         }
         result(nil)
       case "ensureVpnHelper":
+        let enabled = (call.arguments as? [String: Any])?["enabled"] as? Bool
         DispatchQueue.global(qos: .userInitiated).async {
           do {
-            let status = try self.ensureVpnHelper()
+            let status = try self.ensureVpnHelper(enabled: enabled)
             DispatchQueue.main.async {
               result(status)
             }
@@ -836,17 +837,16 @@ class AppDelegate: FlutterAppDelegate {
     }
   }
 
-  private func ensureVpnHelper() throws -> [String: Any] {
-    let settings = readNativeSettings()
-    let enabled = settings["vpnEnabled"] as? Bool ?? false
-    if enabled {
+  private func ensureVpnHelper(enabled: Bool? = nil) throws -> [String: Any] {
+    let resolved = enabled ?? (readNativeSettings()["vpnEnabled"] as? Bool ?? true)
+    if resolved {
       try startVpnHelperIfNeeded()
     }
-    return vpnHelperStatus(enabled: enabled)
+    return vpnHelperStatus(enabled: resolved)
   }
 
   private func vpnHelperStatus(enabled: Bool? = nil) -> [String: Any] {
-    let effectiveEnabled = enabled ?? (readNativeSettings()["vpnEnabled"] as? Bool ?? false)
+    let effectiveEnabled = enabled ?? (readNativeSettings()["vpnEnabled"] as? Bool ?? true)
     return [
       "enabled": effectiveEnabled,
       "running": isVpnHelperRunning(),
@@ -1172,7 +1172,7 @@ class AppDelegate: FlutterAppDelegate {
     process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
     process.arguments = [
       "-e",
-      "do shell script \(appleScriptString(shellCommand)) with administrator privileges",
+      "do shell script \(appleScriptString(shellCommand)) with administrator privileges with prompt \"Horizon needs administrator access to start the VPN helper.\"",
     ]
     let output = Pipe()
     let error = Pipe()

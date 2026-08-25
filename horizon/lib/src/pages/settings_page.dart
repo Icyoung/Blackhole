@@ -8,6 +8,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../app.dart';
+import '../services/vpn_pref.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -49,7 +50,7 @@ class _SettingsPageState extends State<SettingsPage> {
   final _remoteTokenController = TextEditingController();
 
   // VPN
-  bool _vpnEnabled = false;
+  bool _vpnEnabled = true;
   final _vpnSubnetController = TextEditingController(text: '10.13.37.0/24');
   final _vpnPortController = TextEditingController(text: '51820');
   final _vpnRoutesController = TextEditingController();
@@ -156,7 +157,7 @@ class _SettingsPageState extends State<SettingsPage> {
             savedRemoteToken.isNotEmpty
                 ? savedRemoteToken
                 : defaultWormholeToken;
-        _vpnEnabled = settings['vpnEnabled'] as bool? ?? false;
+        _vpnEnabled = resolveVpnEnabledPref(settings);
         _vpnSubnetController.text =
             settings['vpnSubnet'] as String? ?? '10.13.37.0/24';
         _vpnPortController.text =

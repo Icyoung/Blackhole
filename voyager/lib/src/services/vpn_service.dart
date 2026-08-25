@@ -201,6 +201,18 @@ class VpnService extends ChangeNotifier {
     };
   }
 
+  /// Missing user pref is on for supported platforms. Explicit false is kept.
+  static bool resolveUserEnabled(bool? stored) => stored ?? isSupportedPlatform;
+
+  static bool isHelperDenied(Object error) {
+    final text = error.toString().toLowerCase();
+    return text.contains('user canceled') ||
+        text.contains('user cancelled') ||
+        text.contains('authorization was cancelled') ||
+        text.contains('error -128') ||
+        text.contains('(-128)');
+  }
+
   /// iOS PacketTunnelProvider rotates dest internally.
   static bool get dartOwnsDirectCandidates {
     if (!isSupportedPlatform) {
@@ -236,7 +248,6 @@ class VpnService extends ChangeNotifier {
   String? _directSessionState;
   bool? _directSessionViable;
   bool? _directSessionReady;
-  int? _timeSinceLastHandshakeSecs;
   int? _pendingDirectQueueDepth;
   int? _directWriteAttempts;
   int? _directWriteErrors;
@@ -276,7 +287,6 @@ class VpnService extends ChangeNotifier {
   String? get directSessionState => _directSessionState;
   bool? get directSessionViable => _directSessionViable;
   bool? get directSessionReady => _directSessionReady;
-  int? get timeSinceLastHandshakeSecs => _timeSinceLastHandshakeSecs;
   int? get pendingDirectQueueDepth => _pendingDirectQueueDepth;
   int? get directWriteAttempts => _directWriteAttempts;
   int? get directWriteErrors => _directWriteErrors;

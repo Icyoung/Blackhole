@@ -370,9 +370,7 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
       _tokenController.text =
           prefs.getString('token') ?? 'InGodWeTrust@Blackhole2026';
       _useWormhole = prefs.getBool('useWormhole') ?? false;
-      _vpnEnabled =
-          prefs.getBool('vpnEnabled') ??
-          (_vpnAvailable && defaultTargetPlatform == TargetPlatform.android);
+      _vpnEnabled = VpnService.resolveUserEnabled(prefs.getBool('vpnEnabled'));
       _autoReconnect = prefs.getBool('autoReconnect') ?? true;
       _multiWindow = prefs.getBool('multiWindow') ?? false;
       _showKeyboardTools = prefs.getBool('showKeyboardTools') ?? true;
@@ -2540,6 +2538,9 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
             _vpnLog('Failed to start native VPN: $error');
             debugPrintStack(stackTrace: stackTrace);
             _vpnService.failNegotiation('Failed to start native VPN: $error');
+            if (mounted && VpnService.isHelperDenied(error)) {
+              _setVpnEnabled(false);
+            }
           }),
     );
   }

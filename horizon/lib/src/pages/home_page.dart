@@ -29,6 +29,7 @@ import '../widgets/dialogs/pairing_dialog.dart';
 import '../widgets/keyboard/hhkb_keyboard.dart';
 import '../widgets/quick_actions_bar.dart';
 import '../app.dart';
+import '../services/vpn_pref.dart';
 
 enum _SidebarConnectionState { connected, connecting, disconnect }
 
@@ -405,12 +406,12 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
 
   Future<void> _ensureLocalDaemonFromNativeSettings() async {
     final nativeSettings = await _readNativeSettings();
-    // Fire-and-forget: don't block startup on VPN helper (may show password dialog)
-    unawaited(_ensureNativeVpnHelper());
+    final vpnEnabled = resolveVpnEnabledPref(nativeSettings);
+    // Don't block startup on the admin password dialog.
+    unawaited(_ensureNativeVpnHelper(vpnEnabled: vpnEnabled));
     final lanEnabled = _readBool(nativeSettings['lanEnabled'], fallback: true);
     final lanPort = _readInt(nativeSettings['lanPort']) ?? 9527;
     final hostName = _readString(nativeSettings['hostName']) ?? _deviceName;
-    final vpnEnabled = _readBool(nativeSettings['vpnEnabled'], fallback: false);
 
     final wormholeEnabled = _readBool(
       nativeSettings['wormholeEnabled'],
@@ -587,22 +588,33 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
     return settings['appMode'] as String? ?? 'server';
   }
 
-  Future<void> _ensureNativeVpnHelper() async {
-    if (!Platform.isMacOS) {
+  Future<void> _ensureNativeVpnHelper({required bool vpnEnabled}) async {
+    if (!Platform.isMacOS || !vpnEnabled) {
       return;
     }
     try {
       final status = await _systemChannel.invokeMapMethod<String, dynamic>(
         'ensureVpnHelper',
+        {'enabled': vpnEnabled},
       );
       if (status != null) {
         debugPrint('[VPN Helper] ${jsonEncode(status)}');
       }
     } on PlatformException catch (error) {
       debugPrint('[VPN Helper] Failed to ensure helper: ${error.message}');
+      await _handleVpnHelperFailure(error);
     } catch (error) {
       debugPrint('[VPN Helper] Failed to ensure helper: $error');
+      await _handleVpnHelperFailure(error);
     }
+  }
+
+  Future<void> _handleVpnHelperFailure(Object error) async {
+    if (!isVpnHelperDenied(error)) {
+      return;
+    }
+    await persistHorizonVpnEnabled(enabled: false);
+    _handleNativeSettingsChanged();
   }
 
   Future<void> _loadSettings() async {

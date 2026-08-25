@@ -1374,4 +1374,60 @@ void main() {
       expect(service.status, VpnStatus.disconnected);
     });
   });
+
+  group('VpnService.resolveUserEnabled', () {
+    TestWidgetsFlutterBinding.ensureInitialized();
+
+    tearDown(() {
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    test('missing pref is on for iOS, Android, and macOS', () {
+      for (final platform in [
+        TargetPlatform.iOS,
+        TargetPlatform.android,
+        TargetPlatform.macOS,
+      ]) {
+        debugDefaultTargetPlatformOverride = platform;
+        expect(
+          VpnService.resolveUserEnabled(null),
+          isTrue,
+          reason: '$platform',
+        );
+        expect(VpnService.resolveUserEnabled(false), isFalse);
+        expect(VpnService.resolveUserEnabled(true), isTrue);
+      }
+    });
+
+    test('missing pref stays off on Linux and Windows', () {
+      for (final platform in [TargetPlatform.linux, TargetPlatform.windows]) {
+        debugDefaultTargetPlatformOverride = platform;
+        expect(
+          VpnService.resolveUserEnabled(null),
+          isFalse,
+          reason: '$platform',
+        );
+      }
+    });
+  });
+
+  group('VpnService.isHelperDenied', () {
+    test('matches osascript cancel and ignores other helper errors', () {
+      expect(
+        VpnService.isHelperDenied(
+          PlatformException(code: 'TUN', message: 'User canceled.'),
+        ),
+        isTrue,
+      );
+      expect(
+        VpnService.isHelperDenied(
+          PlatformException(
+            code: 'TUN',
+            message: 'VPN helper binary not found in app bundle',
+          ),
+        ),
+        isFalse,
+      );
+    });
+  });
 }
