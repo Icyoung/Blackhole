@@ -5,9 +5,12 @@ services:
     restart: unless-stopped
     ports:
       - "6666:6666"
+      - "6666:6666/udp"
     environment:
       - WORMHOLE_TOKEN=${WORMHOLE_TOKEN}
       - PORT=6666
+      - WORMHOLE_NETCHECK_HOST=wormhole.example.com
+      - WORMHOLE_NETCHECK_PORT=6666
       - RUST_LOG=info
     networks:
       - traefik

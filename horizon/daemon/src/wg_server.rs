@@ -5,6 +5,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rand::Rng;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -38,6 +39,8 @@ const MTU: u16 = 1420;
 const TIMER_TICK: Duration = Duration::from_millis(250);
 const DIRECT_PROBE_INTERVAL: Duration = Duration::from_secs(1);
 const DIRECT_PROBE_WINDOW: Duration = Duration::from_secs(30);
+const NETCHECK_RETRY: Duration = Duration::from_secs(2);
+const NETCHECK_MAX_ATTEMPTS: u8 = 3;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -50,6 +53,20 @@ pub struct VpnAssignment {
     pub subnet: String,
     pub dns: Vec<String>,
     pub mtu: u16,
+}
+
+/// Public UDP mapping learned from a Wormhole `netcheck_response`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetcheckObservation {
+    pub addr: String,
+    pub port: u16,
+}
+
+struct InFlightNetcheck {
+    nonce: String,
+    dest: SocketAddr,
+    attempts: u8,
+    next_retry_at: Instant,
 }
 
 /// A single connected WireGuard peer.
@@ -80,6 +97,8 @@ pub struct WgServer {
     tun_fd: RawFd,
     tun_transport: TunTransport,
     server_ip: Ipv4Addr,
+    in_flight_netcheck: Option<InFlightNetcheck>,
+    netcheck_observer: Option<mpsc::UnboundedSender<NetcheckObservation>>,
 }
 
 enum InboundPacket {
@@ -311,7 +330,38 @@ impl WgServer {
             tun_fd,
             tun_transport,
             server_ip: SERVER_IP,
+            in_flight_netcheck: None,
+            netcheck_observer: None,
         })
+    }
+
+    pub fn set_netcheck_observer(&mut self, tx: mpsc::UnboundedSender<NetcheckObservation>) {
+        self.netcheck_observer = Some(tx);
+    }
+
+    pub async fn send_raw(&self, buf: &[u8], dest: SocketAddr) -> std::io::Result<usize> {
+        self.udp.send_to(buf, dest).await
+    }
+
+    pub async fn begin_netcheck(&mut self, dest: SocketAddr) -> std::io::Result<()> {
+        if dest.port() == 0 || dest.port() == 443 {
+            return Ok(());
+        }
+        let nonce = random_netcheck_nonce();
+        let payload = serde_json::json!({
+            "v": 1,
+            "type": "netcheck",
+            "nonce": nonce,
+        })
+        .to_string();
+        self.in_flight_netcheck = Some(InFlightNetcheck {
+            nonce,
+            dest,
+            attempts: 1,
+            next_retry_at: Instant::now() + NETCHECK_RETRY,
+        });
+        self.send_raw(payload.as_bytes(), dest).await?;
+        Ok(())
     }
 
     /// Return the actual local UDP address the server is bound to.
@@ -611,6 +661,10 @@ impl WgServer {
         dst: &mut [u8],
         tun: &AsyncTun,
     ) {
+        // Netcheck replies share this socket; they are not WG packets and the responder is not a peer.
+        if self.consume_netcheck_response(packet) {
+            return;
+        }
         let inbound = if let Some(pk) = self.addr_to_pubkey.get(&src_addr).cloned() {
             let Some(peer) = self.peers.get_mut(&pk) else {
                 return;
@@ -846,6 +900,83 @@ impl WgServer {
         for pk in peers_to_probe {
             self.kick_peer_handshake(&pk, dst).await;
         }
+
+        self.retry_netcheck_if_needed().await;
+    }
+
+    #[cfg(unix)]
+    fn consume_netcheck_response(&mut self, packet: &[u8]) -> bool {
+        let Some(value) = parse_utf8_json(packet) else {
+            return false;
+        };
+        if value.get("type").and_then(|entry| entry.as_str()) != Some("netcheck_response") {
+            return false;
+        }
+
+        let Some(pending) = self.in_flight_netcheck.as_ref() else {
+            return true;
+        };
+        let nonce = value
+            .get("nonce")
+            .and_then(|entry| entry.as_str())
+            .unwrap_or_default();
+        if nonce != pending.nonce {
+            debug!("ignoring netcheck_response with unmatched nonce");
+            return true;
+        }
+
+        let addr = value
+            .get("observedAddr")
+            .and_then(|entry| entry.as_str())
+            .unwrap_or_default()
+            .trim();
+        let port = value
+            .get("observedPort")
+            .and_then(|entry| entry.as_u64())
+            .unwrap_or(0) as u16;
+        if addr.is_empty() || port == 0 {
+            return true;
+        }
+
+        self.in_flight_netcheck = None;
+        let observation = NetcheckObservation {
+            addr: addr.to_string(),
+            port,
+        };
+        info!(
+            addr = %observation.addr,
+            port = observation.port,
+            scope = "public_observed",
+            source = "wormhole_netcheck",
+            "recorded WG netcheck mapping"
+        );
+        if let Some(tx) = &self.netcheck_observer {
+            let _ = tx.send(observation);
+        }
+        true
+    }
+
+    async fn retry_netcheck_if_needed(&mut self) {
+        let (dest, nonce) = {
+            let Some(pending) = self.in_flight_netcheck.as_mut() else {
+                return;
+            };
+            if pending.attempts >= NETCHECK_MAX_ATTEMPTS || Instant::now() < pending.next_retry_at {
+                return;
+            }
+            pending.attempts = pending.attempts.saturating_add(1);
+            pending.next_retry_at = Instant::now() + NETCHECK_RETRY;
+            (pending.dest, pending.nonce.clone())
+        };
+        let payload = serde_json::json!({
+            "v": 1,
+            "type": "netcheck",
+            "nonce": nonce,
+        })
+        .to_string();
+        if let Err(error) = self.send_raw(payload.as_bytes(), dest).await {
+            warn!(error = %error, dest = %dest, "failed to retry WG netcheck");
+        }
     }
 
     async fn kick_peer_handshake(&mut self, peer_pk: &str, dst: &mut [u8]) {
@@ -900,6 +1031,16 @@ impl WgServer {
     }
 }
 
+fn random_netcheck_nonce() -> String {
+    format!("{:032x}", rand::thread_rng().gen::<u128>())
+}
+
+#[cfg(unix)]
+fn parse_utf8_json(packet: &[u8]) -> Option<serde_json::Value> {
+    let text = std::str::from_utf8(packet).ok()?;
+    serde_json::from_str(text).ok()
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -907,7 +1048,6 @@ mod tests {
     use std::os::fd::IntoRawFd;
     use std::os::unix::net::UnixDatagram as StdUnixDatagram;
 
-    use tokio::sync::oneshot;
     use tunnel::generate_keypair;
 
     fn build_ipv4_packet(src: Ipv4Addr, dst: Ipv4Addr, payload: &[u8]) -> Vec<u8> {
@@ -1141,5 +1281,128 @@ mod tests {
             peer.direct_probe_until.is_none(),
             "accepted direct UDP traffic should end the probe window"
         );
+    }
+
+    #[tokio::test]
+    async fn netcheck_response_is_recorded_and_does_not_learn_responder() {
+        let (_, server_private_key) = generate_keypair();
+        let mut server = build_test_server(server_private_key).await;
+        let (obs_tx, mut obs_rx) = mpsc::unbounded_channel();
+        server.set_netcheck_observer(obs_tx);
+
+        let responder = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind netcheck responder");
+        let responder_addr = responder
+            .local_addr()
+            .expect("responder local addr should exist");
+
+        server
+            .begin_netcheck(responder_addr)
+            .await
+            .expect("send_raw netcheck should succeed");
+
+        let mut request = vec![0u8; BUF_SIZE];
+        let (request_len, src) =
+            tokio::time::timeout(Duration::from_secs(1), responder.recv_from(&mut request))
+                .await
+                .expect("timed out waiting for netcheck request")
+                .expect("netcheck request recv failed");
+        let request_value: serde_json::Value =
+            serde_json::from_slice(&request[..request_len]).expect("netcheck request is JSON");
+        assert_eq!(
+            request_value.get("type").and_then(|entry| entry.as_str()),
+            Some("netcheck")
+        );
+        let nonce = request_value
+            .get("nonce")
+            .and_then(|entry| entry.as_str())
+            .expect("netcheck request should include nonce")
+            .to_string();
+
+        let response = serde_json::json!({
+            "v": 1,
+            "type": "netcheck_response",
+            "nonce": nonce,
+            "observedAddr": "203.0.113.50",
+            "observedPort": 41234,
+        })
+        .to_string();
+        responder
+            .send_to(response.as_bytes(), src)
+            .await
+            .expect("failed to send netcheck_response");
+
+        let mut packet = vec![0u8; BUF_SIZE];
+        let (packet_len, from) =
+            tokio::time::timeout(Duration::from_secs(1), server.udp.recv_from(&mut packet))
+                .await
+                .expect("timed out waiting for netcheck_response")
+                .expect("netcheck_response recv failed");
+        assert_eq!(from, responder_addr);
+
+        let tun_fd = unsafe { libc::dup(server.tun_fd) };
+        assert!(tun_fd >= 0, "failed to dup tun fd for test");
+        let tun = AsyncTun::new(tun_fd, TunTransport::PacketSocket)
+            .expect("failed to create async tun for test");
+        let mut dst = [0u8; BUF_SIZE];
+        server
+            .handle_udp_packet(&packet[..packet_len], from, &mut dst, &tun)
+            .await;
+
+        let observation = tokio::time::timeout(Duration::from_secs(1), obs_rx.recv())
+            .await
+            .expect("timed out waiting for netcheck observation")
+            .expect("netcheck observer closed");
+        assert_eq!(observation.addr, "203.0.113.50");
+        assert_eq!(observation.port, 41234);
+        assert!(
+            !server.addr_to_pubkey.contains_key(&responder_addr),
+            "netcheck responder must not be learned as a WG peer"
+        );
+        assert!(
+            server.peers.is_empty(),
+            "netcheck responder must not be added as a WG peer"
+        );
+        assert!(server.in_flight_netcheck.is_none());
+    }
+
+    #[tokio::test]
+    async fn unmatched_netcheck_nonce_is_ignored_and_not_decapsulated() {
+        let (_, server_private_key) = generate_keypair();
+        let mut server = build_test_server(server_private_key).await;
+        let (obs_tx, mut obs_rx) = mpsc::unbounded_channel();
+        server.set_netcheck_observer(obs_tx);
+
+        let responder_addr: SocketAddr = "127.0.0.1:41235".parse().unwrap();
+        server
+            .begin_netcheck(responder_addr)
+            .await
+            .expect("begin_netcheck should succeed");
+
+        let tun_fd = unsafe { libc::dup(server.tun_fd) };
+        assert!(tun_fd >= 0, "failed to dup tun fd for test");
+        let tun = AsyncTun::new(tun_fd, TunTransport::PacketSocket)
+            .expect("failed to create async tun for test");
+        let mut dst = [0u8; BUF_SIZE];
+        let packet = serde_json::json!({
+            "v": 1,
+            "type": "netcheck_response",
+            "nonce": "wrong-nonce",
+            "observedAddr": "198.51.100.10",
+            "observedPort": 51820,
+        })
+        .to_string();
+        server
+            .handle_udp_packet(packet.as_bytes(), responder_addr, &mut dst, &tun)
+            .await;
+
+        assert!(
+            obs_rx.try_recv().is_err(),
+            "mismatched nonce must not record public_observed"
+        );
+        assert!(!server.addr_to_pubkey.contains_key(&responder_addr));
+        assert!(server.peers.is_empty());
+        assert!(server.in_flight_netcheck.is_some());
     }
 }

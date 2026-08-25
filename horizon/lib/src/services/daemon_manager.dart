@@ -353,6 +353,11 @@ class DaemonManager {
     final env = <String, String>{};
     if (desiredWormholeUrl != null) {
       env['WORMHOLE_URL'] = desiredWormholeUrl;
+      env['WORMHOLE_NETCHECK_PORT'] = '6666';
+      final netcheckHost = Uri.tryParse(desiredWormholeUrl)?.host;
+      if (netcheckHost != null && netcheckHost.isNotEmpty) {
+        env['WORMHOLE_NETCHECK_HOST'] = netcheckHost;
+      }
     }
     if (desiredWormholeToken != null) {
       env['WORMHOLE_TOKEN'] = desiredWormholeToken;

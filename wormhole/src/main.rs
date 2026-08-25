@@ -58,8 +58,7 @@ impl Session {
     }
 
     fn has_live_connections(&self) -> bool {
-        self.horizon.is_some()
-            || !self.voyagers.is_empty()
+        self.horizon.is_some() || !self.voyagers.is_empty()
     }
 }
 
@@ -67,6 +66,10 @@ impl Session {
 struct AppState {
     sessions: Arc<Mutex<HashMap<String, Session>>>,
     token: Option<String>,
+}
+
+fn is_usable_netcheck_port(port: u16) -> bool {
+    port != 0 && port != 443
 }
 
 fn configured_netcheck_endpoint() -> (Option<String>, Option<u16>) {
@@ -77,14 +80,33 @@ fn configured_netcheck_endpoint() -> (Option<String>, Option<u16>) {
     let port = std::env::var("WORMHOLE_NETCHECK_PORT")
         .ok()
         .and_then(|value| value.trim().parse::<u16>().ok())
-        .filter(|value| *value > 0)
+        .filter(|value| is_usable_netcheck_port(*value))
         .or_else(|| {
             std::env::var("PORT")
                 .ok()
                 .and_then(|value| value.trim().parse::<u16>().ok())
-                .filter(|value| *value > 0)
-        });
+                .filter(|value| is_usable_netcheck_port(*value))
+        })
+        .or(Some(6666));
     (host, port)
+}
+
+fn advertised_horizon_wg_candidates(advertised: Vec<DirectCandidate>) -> Vec<DirectCandidate> {
+    advertised
+        .into_iter()
+        .filter(|candidate| candidate.port != 0)
+        .collect()
+}
+
+fn horizon_udp_port_for_endpoint_info(candidates: &[DirectCandidate]) -> Option<u16> {
+    candidates
+        .iter()
+        .find(|candidate| candidate.scope == "public_observed" && candidate.port != 0)
+        .map(|candidate| candidate.port)
+}
+
+fn voyager_advertised_wg_udp_port(voyager_wg_udp_port: Option<u16>) -> Option<u16> {
+    voyager_wg_udp_port.filter(|port| *port != 0)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1065,13 +1087,20 @@ async fn handle_endpoint_register(
         session.wg_udp_port = Some(port);
     }
     session.horizon_observed_addr = Some(remote_addr);
-    let _latest_observed = record_observed_candidate(
-        &mut session.horizon_observed_endpoints,
-        remote_addr,
-        "wormhole_observed",
-    );
-    session.horizon_candidates =
-        merge_candidates(&advertised, session.horizon_observed_endpoints.clone());
+    // TCP WebSocket source ports are not WG mappings.
+    session.horizon_candidates = advertised_horizon_wg_candidates(advertised);
+    for candidate in &session.horizon_candidates {
+        if candidate.scope != "public_observed" {
+            continue;
+        }
+        if let Ok(addr) = format!("{}:{}", candidate.addr, candidate.port).parse::<SocketAddr>() {
+            record_observed_candidate(
+                &mut session.horizon_observed_endpoints,
+                addr,
+                &candidate.source,
+            );
+        }
+    }
     let nat_mapping_behavior = classify_nat_mapping_behavior(&session.horizon_observed_endpoints);
     let direct_reachability_score = compute_direct_reachability_score(
         &session.horizon_candidates,
@@ -1095,7 +1124,7 @@ async fn handle_endpoint_register(
             "v": 1,
             "type": "endpoint_registered",
             "observedAddr": remote_addr.ip().to_string(),
-            "observedPort": remote_addr.port(),
+            "observedPort": 0,
             "observedEndpoints": session.horizon_observed_endpoints,
             "natMappingBehavior": nat_mapping_behavior,
             "hairpinLikely": false,
@@ -1124,29 +1153,18 @@ async fn handle_endpoint_request(
         .and_then(|v| v.as_u64())
         .map(|v| v as u16);
     let voyager_device_key = value.get("deviceKey").and_then(|v| v.as_str());
+    let voyager_wg_udp_port = voyager_advertised_wg_udp_port(voyager_wg_udp_port);
     let voyager_candidates = merge_candidates(
         &parse_direct_candidates(value, "voyagerCandidates"),
         observed_ip_candidate(
             remote_addr.ip(),
-            voyager_wg_udp_port.or_else(|| Some(remote_addr.port())),
-            if voyager_wg_udp_port.is_some() {
-                "last_known"
-            } else {
-                "public_observed"
-            },
-            if voyager_wg_udp_port.is_some() {
-                90
-            } else {
-                100
-            },
-            if voyager_wg_udp_port.is_some() {
-                "wormhole_observed_ip"
-            } else {
-                "wormhole_observed"
-            },
+            voyager_wg_udp_port,
+            "last_known",
+            90,
+            "wormhole_observed_ip",
         ),
     );
-    let observed_port = voyager_wg_udp_port.unwrap_or(remote_addr.port());
+    let observed_port = voyager_wg_udp_port.unwrap_or(0);
 
     let mut sessions = state.sessions.lock().await;
     let Some(session) = sessions.get_mut(session_id) else {
@@ -1154,11 +1172,7 @@ async fn handle_endpoint_request(
     };
     session.punch_epoch = session.punch_epoch.saturating_add(1);
     let punch_epoch = session.punch_epoch;
-    let horizon_candidates = if session.horizon_candidates.is_empty() {
-        merge_candidates(&[], session.horizon_observed_endpoints.clone())
-    } else {
-        session.horizon_candidates.clone()
-    };
+    let horizon_candidates = session.horizon_candidates.clone();
     let nat_mapping_behavior = classify_nat_mapping_behavior(&session.horizon_observed_endpoints);
     let hairpin_likely = hairpin_likely(session.horizon_observed_addr, &voyager_candidates);
     let direct_reachability_score = compute_direct_reachability_score(
@@ -1184,7 +1198,7 @@ async fn handle_endpoint_request(
             "netcheckHost": netcheck_host,
             "netcheckPort": netcheck_port,
             "horizonAddr": session.horizon_observed_addr.map(|a| a.ip().to_string()),
-            "horizonPort": session.horizon_observed_addr.map(|a| a.port()),
+            "horizonPort": horizon_udp_port_for_endpoint_info(&horizon_candidates),
             "horizonCandidates": horizon_candidates,
             "observedEndpoints": session.horizon_observed_endpoints,
             "natMappingBehavior": nat_mapping_behavior,
@@ -1246,29 +1260,18 @@ async fn handle_voyager_direct_candidates_update(
         .and_then(|v| v.as_u64())
         .map(|v| v as u16);
     let voyager_device_key = value.get("deviceKey").and_then(|v| v.as_str());
+    let voyager_wg_udp_port = voyager_advertised_wg_udp_port(voyager_wg_udp_port);
     let voyager_candidates = merge_candidates(
         &parse_direct_candidates(value, "voyagerCandidates"),
         observed_ip_candidate(
             remote_addr.ip(),
-            voyager_wg_udp_port.or_else(|| Some(remote_addr.port())),
-            if voyager_wg_udp_port.is_some() {
-                "last_known"
-            } else {
-                "public_observed"
-            },
-            if voyager_wg_udp_port.is_some() {
-                90
-            } else {
-                100
-            },
-            if voyager_wg_udp_port.is_some() {
-                "wormhole_observed_ip"
-            } else {
-                "wormhole_observed"
-            },
+            voyager_wg_udp_port,
+            "last_known",
+            90,
+            "wormhole_observed_ip",
         ),
     );
-    let observed_port = voyager_wg_udp_port.unwrap_or(remote_addr.port());
+    let observed_port = voyager_wg_udp_port.unwrap_or(0);
 
     let mut sessions = state.sessions.lock().await;
     let Some(session) = sessions.get_mut(session_id) else {
@@ -1543,5 +1546,58 @@ mod tests {
 
         assert!(hairpin);
         assert!(score >= 90);
+    }
+
+    #[test]
+    fn observed_candidate_drops_port_zero() {
+        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(1, 2, 3, 4), 0));
+        assert!(observed_candidate(addr, "wormhole_observed").is_none());
+    }
+
+    #[test]
+    fn tcp_remote_addr_port_is_not_a_wg_candidate() {
+        let advertised = vec![candidate("192.168.1.10", 51820, "lan", 250)];
+        let merged = advertised_horizon_wg_candidates(advertised);
+        assert!(!has_scope(&merged, "public_observed"));
+        assert_eq!(horizon_udp_port_for_endpoint_info(&merged), None);
+        assert_eq!(voyager_advertised_wg_udp_port(None), None);
+
+        let voyager_candidates = merge_candidates(
+            &merged,
+            observed_ip_candidate(
+                IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+                voyager_advertised_wg_udp_port(None),
+                "last_known",
+                90,
+                "wormhole_observed_ip",
+            ),
+        );
+        assert!(voyager_candidates
+            .iter()
+            .all(|candidate| candidate.port != 443));
+        assert!(!has_scope(&voyager_candidates, "public_observed"));
+    }
+
+    #[test]
+    fn advertised_public_observed_is_kept_without_guessing_listen_port() {
+        let advertised = vec![
+            candidate("192.168.1.10", 51820, "lan", 250),
+            DirectCandidate {
+                addr: "203.0.113.10".to_string(),
+                port: 40123,
+                scope: "public_observed".to_string(),
+                priority: 180,
+                source: "wormhole_netcheck".to_string(),
+            },
+        ];
+        let merged = advertised_horizon_wg_candidates(advertised);
+        let public = merged
+            .iter()
+            .find(|candidate| candidate.scope == "public_observed")
+            .expect("horizon-advertised public_observed should be kept");
+        assert_eq!(public.port, 40123);
+        assert_eq!(horizon_udp_port_for_endpoint_info(&merged), Some(40123));
+        assert_eq!(voyager_advertised_wg_udp_port(Some(25000)), Some(25000));
+        assert_eq!(voyager_advertised_wg_udp_port(Some(0)), None);
     }
 }

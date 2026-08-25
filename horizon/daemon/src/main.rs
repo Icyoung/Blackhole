@@ -3158,6 +3158,33 @@ fn hairpin_likely(observed_addr: Option<&str>, voyager_candidates: &[DirectCandi
     })
 }
 
+fn record_upnp_udp_candidate(store: &mut Vec<DirectCandidate>, addr: &str, port: u16) {
+    let has_netcheck_public = store.iter().any(|candidate| {
+        candidate.scope == "public_observed" && candidate.source == "wormhole_netcheck"
+    });
+    if has_netcheck_public {
+        if store
+            .iter()
+            .any(|candidate| candidate.addr == addr && candidate.port == port)
+        {
+            return;
+        }
+        store.push(DirectCandidate {
+            addr: addr.to_string(),
+            port,
+            scope: "last_known".to_string(),
+            priority: 120,
+            source: "upnp".to_string(),
+        });
+        store.sort_by(|a, b| b.priority.cmp(&a.priority));
+        if store.len() > 8 {
+            store.truncate(8);
+        }
+        return;
+    }
+    record_observed_direct_candidate(store, Some(addr), Some(port), "upnp");
+}
+
 fn record_observed_direct_candidate(
     store: &mut Vec<DirectCandidate>,
     addr: Option<&str>,
@@ -5706,6 +5733,49 @@ async fn start_vpn_server(
         .map_err(|e| format!("failed to create WG server: {e}"))?;
     info!("WireGuard server listening on UDP port {port}");
 
+    let (netcheck_tx, mut netcheck_rx) = mpsc::unbounded_channel();
+    server.set_netcheck_observer(netcheck_tx);
+    let netcheck_state = state.clone();
+    tokio::spawn(async move {
+        while let Some(observation) = netcheck_rx.recv().await {
+            {
+                let mut observed = netcheck_state.wg_observed_endpoints.lock().await;
+                record_observed_direct_candidate(
+                    &mut observed,
+                    Some(&observation.addr),
+                    Some(observation.port),
+                    "wormhole_netcheck",
+                );
+            }
+            info!(
+                addr = %observation.addr,
+                port = observation.port,
+                scope = "public_observed",
+                source = "wormhole_netcheck",
+                "recorded public_observed WG mapping"
+            );
+            send_horizon_endpoint_register(&netcheck_state).await;
+        }
+    });
+
+    let (netcheck_host, netcheck_port) = configured_wg_netcheck_endpoint(&state);
+    if let (Some(host), Some(nc_port)) = (netcheck_host, netcheck_port) {
+        match resolve_wg_netcheck_dest(&host, nc_port).await {
+            Some(dest) => {
+                if let Err(error) = server.begin_netcheck(dest).await {
+                    warn!(error = %error, dest = %dest, "failed to send WG netcheck");
+                }
+            }
+            None => {
+                warn!(
+                    host = %host,
+                    port = nc_port,
+                    "failed to resolve WG netcheck destination"
+                );
+            }
+        }
+    }
+
     // Create peer command channel and store sender in AppState
     let (peer_tx, peer_rx) = mpsc::unbounded_channel::<WgPeerCommand>();
     {
@@ -5764,7 +5834,8 @@ fn configured_wg_netcheck_endpoint(state: &Arc<AppState>) -> (Option<String>, Op
     let configured_port = std::env::var("WORMHOLE_NETCHECK_PORT")
         .ok()
         .and_then(|value| value.trim().parse::<u16>().ok())
-        .filter(|value| *value > 0);
+        .filter(|value| *value > 0 && *value != 443)
+        .or(Some(6666));
 
     let derived_host = state.wormhole_url.as_deref().and_then(|base_url| {
         let without_scheme = base_url.split("://").nth(1).unwrap_or(base_url);
@@ -5783,6 +5854,34 @@ fn configured_wg_netcheck_endpoint(state: &Arc<AppState>) -> (Option<String>, Op
     });
 
     (configured_host.or(derived_host), configured_port)
+}
+
+async fn resolve_wg_netcheck_dest(host: &str, port: u16) -> Option<SocketAddr> {
+    if port == 0 || port == 443 {
+        return None;
+    }
+    tokio::net::lookup_host((host, port)).await.ok()?.next()
+}
+
+async fn send_horizon_endpoint_register(state: &Arc<AppState>) {
+    let sender = state.wormhole_sender.lock().await.clone();
+    let Some(sender) = sender else {
+        return;
+    };
+    let wg_pub = state.wg_public_key.lock().await.clone();
+    let wg_port = *state.wg_udp_port.lock().await;
+    if wg_pub.is_none() && wg_port.is_none() {
+        return;
+    }
+    let horizon_candidates = current_horizon_direct_candidates(state).await;
+    let _ = sender.send(tokio_tungstenite::tungstenite::Message::Text(encode_json(
+        json!({
+            "type": "endpoint_register",
+            "wgPublicKey": wg_pub,
+            "wgUdpPort": wg_port,
+            "horizonCandidates": horizon_candidates,
+        }),
+    )));
 }
 
 async fn run_wormhole(
@@ -6147,15 +6246,9 @@ async fn handle_wormhole_incoming(
                     if let Some(addr) = observed_addr {
                         let mut wg_addr = state.wg_observed_addr.lock().await;
                         *wg_addr = Some(addr.to_string());
-                        let mut observed_endpoints = state.wg_observed_endpoints.lock().await;
-                        record_observed_direct_candidate(
-                            &mut observed_endpoints,
-                            observed_addr,
-                            observed_port.map(|port| port as u16),
-                            "wormhole_observed",
-                        );
+                        // TCP observedPort from Wormhole is not a WG mapping.
                         info!(
-                            "wg endpoint registered: observed {}:{}",
+                            "wg endpoint registered: observed {} (tcp port {})",
                             addr,
                             observed_port.unwrap_or(0)
                         );
@@ -6476,5 +6569,24 @@ mod tests {
 
         assert!(hairpin);
         assert!(score >= 90);
+    }
+
+    #[test]
+    fn upnp_does_not_replace_netcheck_public_observed() {
+        let mut store = Vec::new();
+        record_observed_direct_candidate(
+            &mut store,
+            Some("203.0.113.10"),
+            Some(40123),
+            "wormhole_netcheck",
+        );
+        record_upnp_udp_candidate(&mut store, "203.0.113.10", 51820);
+
+        assert_eq!(store[0].scope, "public_observed");
+        assert_eq!(store[0].port, 40123);
+        assert_eq!(store[0].source, "wormhole_netcheck");
+        assert_eq!(store[1].scope, "last_known");
+        assert_eq!(store[1].port, 51820);
+        assert_eq!(store[1].source, "upnp");
     }
 }

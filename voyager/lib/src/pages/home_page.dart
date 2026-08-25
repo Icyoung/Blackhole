@@ -34,6 +34,7 @@ import '../services/group_store.dart';
 import '../services/launch_trace_service.dart';
 import '../services/launch_connection_policy.dart';
 import '../services/vpn_transport_handoff.dart';
+import '../services/vpn_netcheck_config.dart';
 import '../services/vpn_service.dart';
 import '../services/terminal_manager.dart';
 import '../services/transport_models.dart';
@@ -2532,31 +2533,15 @@ class _VoyagerHomeState extends State<VoyagerHome> with WidgetsBindingObserver {
   }
 
   (String?, int?) _deriveVpnNetcheckConfig(EndpointInfo info) {
-    final explicitHost = info.netcheckHost?.trim();
-    final explicitPort = info.netcheckPort;
-    if (explicitHost != null &&
-        explicitHost.isNotEmpty &&
-        explicitPort != null &&
-        explicitPort > 0) {
-      return (explicitHost, explicitPort);
-    }
-
-    final rawUrl =
+    final wormholeUrl =
         _connectionManager.activeTransportKind == TransportKind.wormholeRelay
             ? _wormholeController.text.trim()
-            : '';
-    final uri = Uri.tryParse(rawUrl);
-    if (uri == null || uri.host.isEmpty) {
-      return (null, null);
-    }
-    final port =
-        uri.hasPort
-            ? uri.port
-            : switch (uri.scheme) {
-              'wss' || 'https' => 443,
-              _ => 80,
-            };
-    return (uri.host, port);
+            : null;
+    return deriveVpnNetcheckConfig(
+      signalingHost: info.netcheckHost,
+      signalingPort: info.netcheckPort,
+      wormholeUrl: wormholeUrl,
+    );
   }
 
   Future<List<DirectCandidate>> _buildVoyagerDirectCandidates({
