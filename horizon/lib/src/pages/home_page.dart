@@ -98,8 +98,13 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
   bool _showGroupTopFade = false;
   bool _showGroupBottomFade = false;
 
+  bool get _keyboardToolsVisible =>
+      _showKeyboardTools &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS);
+
   double get _bottomBarHeight =>
-      (_showKeyboardTools ? _quickBarHeight : 0) +
+      (_keyboardToolsVisible ? _quickBarHeight : 0) +
       (_showHHKB ? _hhkbKeyboardHeight : 0);
   double _lastMetricsInsetsBottom = 0;
   Size _lastMetricsSize = Size.zero;
@@ -3657,7 +3662,7 @@ class _HorizonHomeState extends State<HorizonHome> with WidgetsBindingObserver {
         KeyedSubtree(
           key: _quickBarKey,
           child:
-              _showKeyboardTools
+              _keyboardToolsVisible
                   ? QuickActionsBar(
                     connected: isInputActive,
                     ctrl: _ctrl,
